@@ -14,6 +14,8 @@ pi                                          # далі /login хоча б в о�
 npx shiftwork init --model anthropic/claude-sonnet-4-5
 ```
 
+`npx shiftwork` працює без встановлення ([пакет у npm](https://www.npmjs.com/package/shiftwork)). npx кешує завантажене, тож пиши `npx shiftwork@latest …`, щоб точно отримати найновішу версію, або встанови один раз через `npm i -g shiftwork` і далі запускай просто `shiftwork …`.
+
 `init` створює:
 
 | Файл | Що це |
