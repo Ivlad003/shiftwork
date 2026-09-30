@@ -4,11 +4,24 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** code
 **Verify:** `npm test`
 
-- [ ] Planner tests for the merge order, including the legacy `budgets.models`
-- [ ] Context percent uses the profile window when set: fake backend context events carrying tokens are rescaled
-- [ ] Config validation names the field path for bad profiles
-- [ ] `shiftwork run --dry-run` shows the effective budget per ticket
+- [x] Planner tests for the merge order, including the legacy `budgets.models`
+- [x] Context percent uses the profile window when set: fake backend context events carrying tokens are rescaled
+- [x] Config validation names the field path for bad profiles
+- [x] `shiftwork run --dry-run` shows the effective budget per ticket
+
+## Comments
+
+### Shift 1 — pi xai/grok-4.6 (medium)
+- Ended: stop
+- Usage: 82410 in / 21028 out tokens, $0.8070, 22 turns
+- Verify: passed
+- Outcome: resolved
+- Landed: merged shiftwork/orchestrator-03 into main
+
+### Review — Claude Code (claude-opus-5-5)
+- Accepted: `models[ref]` profiles (budget merged after legacy `budgets.models`, capped by the ticket), context events rescaled to the profile window, effective budget in `--dry-run`. 22 turns on xai/grok-4.6
+- Changed: thinking precedence. The shift let a model profile override even the ticket type's thinking (a git ticket asking for "low" would run "high"); the order is now routing[type] → model profile → tier → global, and the test that encoded the old order was replaced

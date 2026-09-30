@@ -6,7 +6,7 @@
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
  * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, then are capped by the ticket budget.
- * A model profile's thinking wins over the tier's; its contextWindow is used for context fill.
+ * Thinking: the ticket type's routing → the model profile → the tier → global. A profile's contextWindow is used for context fill.
  * @returns {object} a Route, or `{ wait: Date }` when every candidate is cooling down
  */
 export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date(), classification } = {}) {
@@ -39,8 +39,8 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 		if (blockedModels.length) return { stop: "no eligible model: stalled models excluded" };
 		throw new Error(`no route for ticket ${ticket.feature}/${ticket.number} (type "${type}")`);
 	}
-	const thinking =
-		routing?.thinking ?? config.tiers?.[picked.tier ?? tierName]?.thinking ?? config.thinking;
+	// The ticket type's thinking wins; buildRoute falls back to profile → tier → global.
+	const thinking = routing?.thinking;
 	return buildRoute({
 		ticket,
 		config,
@@ -57,7 +57,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 function buildRoute({ ticket, config, type, typeSource, model, tierName, thinking, history, onExceed, capRemaining = false }) {
 	const tier = tierName ?? tierForModel(model, config);
 	const profile = config.models?.[model];
-	const think = profile?.thinking ?? thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
+	const think = thinking ?? profile?.thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
 	const skills = resolveSkills({
 		ticket,
 		tier: config.tiers?.[tier],

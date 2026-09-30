@@ -257,18 +257,6 @@ test("planShift: profile thinking wins over the tier's", () => {
 	assert.equal(route.thinking, "max");
 });
 
-test("planShift: profile thinking wins over routing thinking", () => {
-	const cfg = validateConfig({
-		model: "fake/m1",
-		thinking: "low",
-		routing: { code: { tier: "standard", thinking: "minimal" } },
-		tiers: { standard: { chain: ["fake/m1"], thinking: "high" } },
-		models: { "fake/m1": { thinking: "xhigh" } },
-	});
-	const route = planShift({ ticket: t({ type: "code" }), config: cfg });
-	assert.equal(route.thinking, "xhigh");
-});
-
 test("planShift: profile contextWindow is on the route", () => {
 	const cfg = validateConfig({
 		model: "fake/m1",
@@ -495,4 +483,15 @@ test("planShift: a paid provider is used only when no subscription provider free
 
 	assert.equal(new Date(waiting.wait).toISOString(), "2026-01-01T00:05:00.000Z", "a 5-minute server cooldown is waited out");
 	assert.equal(paying.model, "paid/b", "a 5-hour usage limit falls through to the paid provider");
+});
+
+test("planShift: thinking order is ticket type routing → model profile → tier → global", () => {
+	const cfg = validateConfig({
+		thinking: "medium",
+		routing: { git: { tier: "std", thinking: "low" }, code: { tier: "std" } },
+		tiers: { std: { chain: ["p/m1"], thinking: "minimal" } },
+		models: { "p/m1": { thinking: "high" } },
+	});
+	assert.equal(planShift({ ticket: t({ type: "git" }), config: cfg }).thinking, "low", "the git type asks for low");
+	assert.equal(planShift({ ticket: t({ type: "code" }), config: cfg }).thinking, "high", "the model profile beats the tier");
 });
