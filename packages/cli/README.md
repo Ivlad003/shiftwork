@@ -7,6 +7,7 @@ CLI for [Shiftwork](https://github.com/Ivlad003/shiftwork). Autonomous agents wo
 ```bash
 npx shiftwork init --model anthropic/<model-id>   # .pi/shiftwork.json, worker prompt, pi compaction settings
 npx shiftwork status                              # tickets and the ready frontier
+npx shiftwork tui                                 # live dashboard: runner, budgets, cooldowns, logs
 npx shiftwork run --dry-run                       # which model/tier/thinking each ticket would get
 npx shiftwork run --once                          # work one ticket
 npx shiftwork run                                 # work the frontier until nothing is left

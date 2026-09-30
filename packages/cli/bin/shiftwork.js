@@ -13,6 +13,8 @@ Usage:
   shiftwork status [dir] [--dir <path>]
                                 List tickets and the frontier of ready ones
   shiftwork run [options]       Work the frontier until nothing is left
+  shiftwork tui [--once] [--dir <path>]
+                                Read-only dashboard: tickets, the live runner, cooldowns and logs
   shiftwork --version
 
 Run options:
@@ -43,6 +45,11 @@ try {
 		case "run":
 			process.exitCode = await run(rest);
 			break;
+		case "tui": {
+			const { tui } = await import("../src/tui.js");
+			process.exitCode = await tui(rest);
+			break;
+		}
 		case "-v":
 		case "--version":
 			console.log(VERSION);
