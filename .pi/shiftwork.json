@@ -84,5 +84,12 @@
       "mode": "new-process"
     }
   },
-  "crossTier": "up"
+  "crossTier": "up",
+  "jev": {
+    "model": [
+      "openrouter/typesafe/jev-1.13",
+      "openrouter/~typesafe/jev-latest",
+      "typesafe/jev-latest"
+    ]
+  }
 }
