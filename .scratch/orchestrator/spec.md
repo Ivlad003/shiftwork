@@ -125,7 +125,7 @@ Phase 1 made Shiftwork work tickets on pi. Using it on its own repo showed what'
 | 06 | Codex backend | resolved | opencode-go/kimi-k2.7-code |
 | 07 | OpenCode backend | resolved | opencode-go/kimi-k2.7-code |
 | 08 | Grok Build (`grok`) backend | resolved | opencode-go/kimi-k3 |
-| 09 | Cursor CLI (`cursor-agent`) backend | ready-for-agent |  |
+| 09 | Cursor CLI (`cursor-agent`) backend | resolved | opencode-go/kimi-k3 |
 | 10 | OpenSpec tracker | ready-for-agent |  |
 | 11 | `shiftwork tui`: read-only dashboard | ready-for-agent |  |
 | 12 | `shiftwork tui`: run, stop with handoff, dry-run | ready-for-agent |  |
