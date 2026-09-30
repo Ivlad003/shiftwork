@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 /** How long a waiter polls a live lock before taking it over anyway. */
@@ -35,15 +35,35 @@ async function acquire(path, owner, timeoutMs, stepMs) {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
 		if (await createExclusive(path, owner)) return;
-		const held = await readOwner(path);
-		// Stale when the holder's pid is gone. Past the timeout the lock is taken over
-		// too: every guarded write is atomic, so the worst case is one racing update,
-		// never a corrupt file.
-		if (!held || !isAlive(held.pid) || Date.now() >= deadline) {
-			await unlink(path).catch(() => {});
+		const held = await readLock(path);
+		if (held.missing) continue; // released meanwhile: try again at once
+		// An unreadable file is a lock whose owner is still being written (createExclusive opens
+		// before it writes): it is held. Stale only when the holder's pid is gone; past the timeout
+		// it is taken over too (every guarded write is atomic, so the worst case is one racing update).
+		const stale = held.owner ? !isAlive(held.owner.pid) || Date.now() >= deadline : Date.now() >= deadline;
+		if (stale) {
+			// Take over only the lock we judged: another waiter may already have replaced it.
+			const again = await readLock(path);
+			if (again.missing || again.owner?.token === held.owner?.token) await unlink(path).catch(() => {});
 			continue;
 		}
 		await new Promise((resolve) => setTimeout(resolve, stepMs));
+	}
+}
+
+/** The lock file's state: `{ missing: true }`, `{ owner }`, or `{ owner: null }` while it is being written. */
+async function readLock(path) {
+	let text;
+	try {
+		text = await readFile(path, "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return { missing: true };
+		return { owner: null };
+	}
+	try {
+		return { owner: JSON.parse(text) };
+	} catch {
+		return { owner: null };
 	}
 }
 
@@ -53,15 +73,22 @@ async function release(path, owner) {
 	if (held?.token === owner.token) await unlink(path).catch(() => {});
 }
 
+/**
+ * Create `path` holding `owner`, or return false when it exists. The owner is written to a
+ * temp file first and hard-linked into place, so the file never appears empty: a reader
+ * (a waiter judging staleness, a claim check) always sees a complete owner.
+ */
 export async function createExclusive(path, owner) {
+	const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+	await writeFile(tmp, JSON.stringify(owner));
 	try {
-		const handle = await open(path, "wx");
-		await handle.writeFile(JSON.stringify(owner));
-		await handle.close();
+		await link(tmp, path);
 		return true;
 	} catch (error) {
 		if (error.code === "EEXIST") return false;
 		throw error;
+	} finally {
+		await unlink(tmp).catch(() => {});
 	}
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -69,4 +69,21 @@ test("sections never interleave: two writers through the same lock", async () =>
 	// Every section is one atomic unit: all 20 of one writer's entries are there.
 	assert.equal(entries.filter((e) => e.startsWith("1-")).length, 20);
 	assert.equal(entries.filter((e) => e.startsWith("2-")).length, 20);
+});
+
+test("a lock file whose owner is still being written is held, not stale", async () => {
+	// createExclusive opens the file before it writes the owner: a waiter that reads it in
+	// between sees an empty file and must wait, not take the lock over.
+	const root = await mkdtemp(join(tmpdir(), "sw-lock-"));
+	await mkdir(join(root, ".pi"), { recursive: true });
+	await writeFile(lockPath(root), "");
+	let entered = false;
+	const waiting = withLock(root, async () => {
+		entered = true;
+	}, { timeoutMs: 5_000, stepMs: 10 });
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	assert.equal(entered, false, "must wait while the owner is being written");
+	await rm(lockPath(root));
+	await waiting;
+	assert.equal(entered, true);
 });

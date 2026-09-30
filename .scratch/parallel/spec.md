@@ -52,6 +52,7 @@ Splitting one ticket across several agents; cross-process provider slots; parall
 | NN | title | status | last route |
 | -- | ----- | ------ | ---------- |
 | 01 | Parallel scheduler with provider concurrency caps | resolved | opencode-go/glm-5.3 |
-| 02 | Shared state safe for parallel shifts and a second runner | ready-for-agent |  |
+| 02 | Shared state safe for parallel shifts and a second runner | resolved | opencode-go/glm-5.3 |
 | 03 | Rebase or redo tickets that conflict with a parallel landing | ready-for-agent |  |
+| 04 | Stray idea.md deletion in the working tree (no change needed) | resolved |  |
 <!-- shiftwork:tickets:end -->
