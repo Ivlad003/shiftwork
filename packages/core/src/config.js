@@ -11,6 +11,7 @@ const DEFAULTS = {
 	maxHandoffs: 3,
 	softLimitPct: 80,
 	crossTier: "none",
+	allowInPlace: false,
 	cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
 	skillGroups: {},
 	skillSources: {},
@@ -53,6 +54,7 @@ export function validateConfig(input) {
 	checkBudgets(config.budgets, "budgets");
 	checkOnExceed(config.onExceed, "onExceed");
 	checkCrossTier(config.crossTier, "crossTier");
+	if (typeof config.allowInPlace !== "boolean") fail("allowInPlace", "must be true or false");
 	if (config.paidProviders !== undefined && !(Array.isArray(config.paidProviders) && config.paidProviders.every((p) => typeof p === "string"))) {
 		fail("paidProviders", "must be an array of provider names");
 	}

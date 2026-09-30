@@ -189,17 +189,19 @@ const AUTO_IN_PLACE_KINDS = new Set(["maxCostUsd", "maxTokens", "maxTurns"]);
 
 /**
  * Pick in-place (`same-process`) vs a fresh process, and whether to compact first.
+ * Fresh is the default (ADR-0005). In-place is restored only when `allowInPlace` is true,
+ * the backend supports `inPlaceHandoff`, and `auto`/`same-process` would have kept the session.
  * `auto` keeps the session for cost/token/turn limits when the target window can hold current usage.
- * Backends without `inPlaceHandoff` always get a fresh handoff.
  */
 export function chooseHandoffMode({
 	mode,
 	kind,
+	allowInPlace = false,
 	inPlaceHandoff = false,
 	contextTokens,
 	targetContextWindow,
 } = {}) {
-	if (!inPlaceHandoff) return { mode: "new-process", compact: false };
+	if (!allowInPlace || !inPlaceHandoff) return { mode: "new-process", compact: false };
 	const windowTooSmall =
 		targetContextWindow != null && contextTokens != null && contextTokens > targetContextWindow;
 	let resolved = mode ?? "new-process";

@@ -29,8 +29,10 @@ const t = (n, title, extra = "") => `# ${n}: ${title}\n\n**Blocked by:** None (c
 
 test("init writes config, worker prompt and pi compaction settings, and keeps them on re-run", async () => {
 	const root = await repo({});
-	await exec(["init", "--dir", root, "--model", "anthropic/m1"]);
+	const { stdout: first } = await exec(["init", "--dir", root, "--model", "anthropic/m1"]);
+	assert.match(first, /allowInPlace: true/);
 	const config = JSON.parse(await readFile(join(root, ".pi", "shiftwork.json"), "utf8"));
+	assert.equal(config.allowInPlace, false);
 	assert.deepEqual(config.tiers.quick.chain, ["anthropic/m1"]);
 	assert.match(await readFile(join(root, ".pi", "shiftwork-worker.md"), "utf8"), /Shiftwork worker/);
 	assert.equal(JSON.parse(await readFile(join(root, ".pi", "settings.json"), "utf8")).compaction.reserveTokens, 16384);

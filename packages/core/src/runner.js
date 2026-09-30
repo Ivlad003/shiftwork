@@ -191,6 +191,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				getDiffStat,
 				ticketPath: ticket.path,
 				maxHandoffs,
+				allowInPlace: Boolean(config.allowInPlace),
 				planHandoff: (kind, fromRoute) =>
 					planShift({ ticket, config, classification, history: historyOf({ previousRoute: fromRoute, exceededKind: kind }) }),
 			},
@@ -478,6 +479,7 @@ async function runShift(backend, request, log) {
 		const decision = chooseHandoffMode({
 			mode: currentRoute.onExceed?.[kind]?.mode,
 			kind,
+			allowInPlace: Boolean(request.allowInPlace),
 			inPlaceHandoff: Boolean(canSwap),
 			contextTokens: used || undefined,
 			targetContextWindow: targetWindow,

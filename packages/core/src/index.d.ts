@@ -70,6 +70,7 @@ export declare const DEFAULT_COOLDOWN_MS: Record<LimitKind, number>;
 export declare function chooseHandoffMode(options: {
 	mode?: "same-process" | "new-process" | "auto";
 	kind: string;
+	allowInPlace?: boolean;
 	inPlaceHandoff?: boolean;
 	contextTokens?: number;
 	targetContextWindow?: number;

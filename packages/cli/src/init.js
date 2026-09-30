@@ -43,6 +43,7 @@ export function starterConfig(model) {
 		},
 		cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
 		crossTier: "none",
+		allowInPlace: false,
 		jev: {
 			enabled: true,
 			model: ["typesafe/jev-latest", "openrouter/typesafe/jev-1.13", "opencode/jev-1.13-free"],
@@ -89,5 +90,6 @@ export async function init(argv, { root = process.cwd(), log = console.log } = {
 		await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 		log(`updated ${settingsPath} (compaction; set per-model thresholds in compaction.modelOverrides)`);
 	}
+	log("handoffs start a fresh context by default; set allowInPlace: true in .pi/shiftwork.json to restore in-place swaps");
 	if (!values.model) log('\nNext: replace the CHANGE-ME models in .pi/shiftwork.json (see "pi --list-models"), then "shiftwork run --dry-run".');
 }
