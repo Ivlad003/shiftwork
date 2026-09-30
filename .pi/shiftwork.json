@@ -40,7 +40,12 @@
     "standard": {
       "chain": [
         "opencode-go/kimi-k2.7-code",
-        "opencode-go/deepseek-v4-pro"
+        "opencode-go/kimi-k3",
+        "opencode-go/qwen3.8-max",
+        "opencode-go/deepseek-v4-pro",
+        "opencode-go/glm-5.3",
+        "opencode-go/minimax-m3",
+        "opencode-go/mimo-v2.6-pro"
       ]
     },
     "premium": {

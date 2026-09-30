@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { planShift } from "./planner.js";
 import { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";
@@ -33,10 +34,9 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 	const maxAttempts = config.maxAttempts ?? 3;
 	const summary = { resolved: [], needsInfo: [], stoppedReason: undefined };
 	const seen = new Set();
-	let hasRunShift = false;
 
 	for (;;) {
-		if (hasRunShift && checkStop(root)) {
+		if (checkStop(root)) {
 			summary.stoppedReason = "STOP file";
 			break;
 		}
@@ -51,7 +51,6 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 		if (!claim) continue;
 		try {
 			const outcome = await workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log });
-			hasRunShift = true;
 			if (outcome.action === "stop") {
 				summary.stoppedReason = outcome.reason;
 				break;
@@ -74,6 +73,8 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 
 async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log }) {
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
+	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(/^### Shift (\d+) — /gm)].map((m) => Number(m[1]));
+	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
 	for (let attempt = 1; ; attempt++) {
 		const route = { ...planShift({ ticket, config }), backend: backend.name };
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
@@ -101,7 +102,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
 		}
 
-		await tracker.appendComment(ticket, [shiftReport({ attempt, route, shift, verifyResult, decision }), ...notes].join("\n"));
+		await tracker.appendComment(ticket, [shiftReport({ number: firstShift + attempt - 1, route, shift, verifyResult, decision }), ...notes].join("\n"));
 		if (decision.action === "resolve") {
 			await tracker.setStatus(ticket, RESOLVED);
 			return { action: "resolve", reason: notes.length ? notes[0].replace(/^- Landed: /, "") : "verify passed" };
@@ -152,8 +153,8 @@ async function runShift(backend, request, log) {
 	return result;
 }
 
-function shiftReport({ attempt, route, shift, verifyResult, decision }) {
-	const lines = [`### Shift ${attempt} — ${route.backend} ${route.model} (${route.thinking})`];
+function shiftReport({ number, route, shift, verifyResult, decision }) {
+	const lines = [`### Shift ${number} — ${route.backend} ${route.model} (${route.thinking})`];
 	lines.push(`- Ended: ${shift.stopReason ?? "unknown"}${shift.error ? `, error: ${shift.error}` : ""}`);
 	lines.push(
 		`- Usage: ${shift.usage.input} in / ${shift.usage.output} out tokens, $${shift.costUsd.toFixed(4)}, ${shift.turns} turns`,

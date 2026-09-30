@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { test } from "node:test";
 import { openTracker, runFrontier } from "../src/index.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
@@ -196,10 +194,9 @@ test("a failed landing turns a passing ticket into needs-info with the reason", 
 	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* needs-info/);
 });
 
-test("a STOP file stops after the current shift with exit code 3 and no leftover claim", async () => {
+test("a STOP file created mid-shift stops after the current shift with exit code 3 and no leftover claim", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
-	const backend = fakeBackend([{ text: "Tried." }]);
-	writeFileSync(join(root, "STOP"), "");
+	const backend = fakeBackend([{ text: "Tried.", files: { STOP: "" } }]);
 
 	const summary = await run(root, backend);
 
@@ -210,4 +207,31 @@ test("a STOP file stops after the current shift with exit code 3 and no leftover
 	assert.equal((await tracker.activeClaims()).length, 0);
 	assert.equal((await tracker.frontier()).length, 1);
 	assert.equal((await tracker.list())[0].status, "ready-for-agent");
+});
+
+test("a STOP file present before the run starts works no ticket and exits 3", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const { writeFile } = await import("node:fs/promises");
+	await writeFile(`${root}/STOP`, "");
+	const backend = fakeBackend([{ files: { "done.txt": "" } }]);
+
+	const summary = await run(root, backend);
+
+	assert.equal(backend.shifts.length, 0);
+	assert.equal(summary.exitCode, 3);
+	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* ready-for-agent/);
+});
+
+test("shift numbers continue from the reports already in the ticket after a re-run", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	await run(root, fakeBackend([{ text: "no" }, { text: "no" }]));
+	const { readFile: rf, writeFile: wf } = await import("node:fs/promises");
+	const path = `${root}/.scratch/f/issues/01-a.md`;
+	await wf(path, (await rf(path, "utf8")).replace("**Status:** needs-info", "**Status:** ready-for-agent"));
+
+	await run(root, fakeBackend([{ files: { "done.txt": "" } }]));
+
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.deepEqual([...text.matchAll(/^### Shift (\d+) — /gm)].map((m) => m[1]), ["1", "2", "3"]);
+	assert.match(await ticketText(root, "f", "01-a.md"), /This is attempt 1|resolved/);
 });
