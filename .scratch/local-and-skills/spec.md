@@ -1,6 +1,6 @@
 # Spec: local models, fresh-context reviews, llms.txt and installable skills (phase 3)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 Source: operator requests, 2026-09-30, after phase 2. Vocabulary: `CONTEXT.md`.
 
@@ -68,6 +68,7 @@ Installing Ollama itself; model downloads; publishing to external skill registri
 | 02 | Review shifts in a fresh context | resolved | opencode-go/glm-5.3 |
 | 03 | `llms.txt` and `llms-full.txt` | resolved | opencode-go/glm-5.3 |
 | 04 | Installable `shiftwork` skill for pi, Claude Code, OpenCode, Codex, Cursor | resolved | opencode-go/glm-5.3 |
-| 05 | Grok shifts get the project's AGENTS.md / CLAUDE.md | ready-for-agent |  |
-| 06 | Follow-up to local-and-skills/04: The skill, packaging, tests and README all me… | ready-for-agent |  |
+| 05 | Grok shifts get the project's AGENTS.md / CLAUDE.md | resolved | opencode-go/glm-5.3 |
+| 06 | sync-skills resolves the repo root from its own location; delete stray skill copies | resolved |  |
+| 07 | Guide: grok shifts now get AGENTS.md / CLAUDE.md | resolved |  |
 <!-- shiftwork:tickets:end -->

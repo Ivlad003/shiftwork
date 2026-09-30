@@ -224,7 +224,7 @@ Agents read your repo's instruction files themselves. Checked live on 2026-09-30
 | Codex (`codex:`) | yes | no |
 | OpenCode (`opencode:`) | yes | only when there's no `AGENTS.md` |
 | Cursor (`cursor:`) | yes | yes |
-| Grok CLI (`grok:`) | no | no (fix planned: ticket `local-and-skills/05`) |
+| Grok CLI (`grok:`) | no, so Shiftwork puts it into the prompt | same: `CLAUDE.md` when there's no `AGENTS.md` |
 
 So keep the rules in `AGENTS.md` and make `CLAUDE.md` a single line, `@AGENTS.md`: every agent then sees the same rules. `xai/…` models run through pi and do get them.
 
@@ -266,5 +266,4 @@ Turn on a **review shift**: after a ticket lands, a fresh agent on the tier you 
 ## 8. Not there yet
 
 - Several tickets at once: planned in [`.scratch/parallel/`](../.scratch/parallel/spec.md).
-- `llms.txt` and an installable skill: in progress in [`.scratch/local-and-skills/`](../.scratch/local-and-skills/spec.md).
 - Editing config from the TUI.

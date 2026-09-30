@@ -226,7 +226,7 @@ Skill — це тека з файлом `SKILL.md`. Вкажи, де вони л
 | Codex (`codex:`) | так | ні |
 | OpenCode (`opencode:`) | так | лише коли немає `AGENTS.md` |
 | Cursor (`cursor:`) | так | так |
-| Grok CLI (`grok:`) | ні | ні (виправлення заплановано: тікет `local-and-skills/05`) |
+| Grok CLI (`grok:`) | ні, тому Shiftwork вставляє його в промпт | так само: `CLAUDE.md`, якщо немає `AGENTS.md` |
 
 Тож тримай правила в `AGENTS.md`, а `CLAUDE.md` зроби з одного рядка `@AGENTS.md`: тоді всі агенти бачать ті самі правила. Моделі `xai/…` працюють через pi, тож вони їх отримують.
 
@@ -273,5 +273,4 @@ TUI лише показує стан, запускає й зупиняє роб�
 ## 8. Чого ще немає
 
 - Кілька тікетів одночасно: заплановано в [`.scratch/parallel/`](../.scratch/parallel/spec.md).
-- `llms.txt` та skill, який можна встановити: в роботі в [`.scratch/local-and-skills/`](../.scratch/local-and-skills/spec.md).
 - Редагування конфігу з TUI.
