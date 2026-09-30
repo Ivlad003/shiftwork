@@ -5,49 +5,123 @@
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
  * Budgets merge model → tier → default, then are capped by the ticket budget.
- * @returns {{ backend: "pi", type, tier?, model, thinking, skills: { paths: string[], preload: string[], warnings: string[], restricted: boolean }, budget: object, onExceed: object }}
+ * @returns {object} a Route, or `{ wait: Date }` when every candidate is cooling down
  */
-export function planShift({ ticket, config, history = {} }) {
+export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date() }) {
 	const type = ticket.type && config.routing?.[ticket.type] ? ticket.type : config.defaultType;
 	const routing = config.routing?.[type];
 	const tierName = routing?.model ? undefined : (routing?.tier ?? config.defaultTier);
-	const tier = tierName ? config.tiers?.[tierName] : undefined;
-
-	const model = ticket.model ?? routing?.model ?? tier?.chain[0] ?? config.model;
-	if (!model) throw new Error(`no route for ticket ${ticket.feature}/${ticket.number} (type "${type}")`);
-	const thinking = routing?.thinking ?? tier?.thinking ?? config.thinking;
-	const skills = resolveSkills({ ticket, tier, skillGroups: config.skillGroups ?? {}, skillSources: config.skillSources ?? {} });
-
-	const baseBudget = mergeBudgets(
-		config.budgets?.default,
-		tier?.budget,
-		config.budgets?.models?.[model],
-	);
-	const ticketBudget = resolveTicketBudget(ticket, config);
-	const budget = capBudget(baseBudget, ticketBudget);
-
+	const at = now instanceof Date ? now : new Date(now);
 	const onExceed = config.onExceed ?? {};
+
 	if (history.exceededKind && history.previousRoute) {
-		const nextModel = chooseHandoffTarget({ previousRoute: history.previousRoute, kind: history.exceededKind, config });
-		if (nextModel) {
-			const nextTier = tierForModel(nextModel, config);
-			return {
-				backend: "pi",
-				type,
-				tier: nextTier,
-				model: nextModel,
-				thinking: config.tiers?.[nextTier]?.thinking ?? thinking,
-				skills: resolveSkills({ ticket, tier: config.tiers?.[nextTier], skillGroups: config.skillGroups ?? {}, skillSources: config.skillSources ?? {} }),
-				budget: capBudget(
-					mergeBudgets(config.budgets?.default, config.tiers?.[nextTier]?.budget, config.budgets?.models?.[nextModel]),
-					capBudgetRemaining(ticketBudget, history.ticketUsage),
-				),
-				onExceed,
-			};
-		}
+		const nextModel = chooseHandoffTarget({
+			previousRoute: history.previousRoute,
+			kind: history.exceededKind,
+			config,
+			cooldowns,
+			now: at,
+		});
+		if (nextModel) return buildRoute({ ticket, config, type, model: nextModel, history, onExceed, capRemaining: true });
 	}
 
-	return { backend: "pi", type, tier: tierName, model, thinking, skills, budget, onExceed };
+	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at });
+	if (picked.wait) return picked;
+	if (!picked.model) throw new Error(`no route for ticket ${ticket.feature}/${ticket.number} (type "${type}")`);
+	const thinking =
+		routing?.thinking ?? config.tiers?.[picked.tier ?? tierName]?.thinking ?? config.thinking;
+	return buildRoute({
+		ticket,
+		config,
+		type,
+		model: picked.model,
+		tierName: picked.tier ?? tierName,
+		thinking,
+		history,
+		onExceed,
+	});
+}
+
+function buildRoute({ ticket, config, type, model, tierName, thinking, history, onExceed, capRemaining = false }) {
+	const tier = tierName ?? tierForModel(model, config);
+	const think = thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
+	const skills = resolveSkills({
+		ticket,
+		tier: config.tiers?.[tier],
+		skillGroups: config.skillGroups ?? {},
+		skillSources: config.skillSources ?? {},
+	});
+	const ticketBudget = resolveTicketBudget(ticket, config);
+	const budget = capBudget(
+		mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model]),
+		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
+	);
+	return { backend: "pi", type, tier, model, thinking: think, skills, budget, onExceed };
+}
+
+function pickModel({ ticket, config, routing, tierName, cooldowns, now }) {
+	const pinned = ticket.model ?? routing?.model;
+	if (pinned) {
+		if (isCooling(pinned, cooldowns, now)) return { wait: cooldownUntil(pinned, cooldowns) };
+		return { model: pinned, tier: tierName };
+	}
+	const chain = config.tiers?.[tierName]?.chain ?? [];
+	const free = firstFree(chain, cooldowns, now);
+	if (free) return { model: free, tier: tierName };
+	if (chain.length) {
+		const neighbour = crossTierPick(tierName, config, cooldowns, now);
+		if (neighbour) return neighbour;
+		const until = earliestCooldown(chain, cooldowns, now);
+		if (until) return { wait: until };
+	}
+	if (config.model) {
+		if (isCooling(config.model, cooldowns, now)) return { wait: cooldownUntil(config.model, cooldowns) };
+		return { model: config.model, tier: tierName };
+	}
+	return {};
+}
+
+function providerOf(model) {
+	return String(model).split("/")[0];
+}
+
+function isCooling(model, cooldowns, now) {
+	const provider = providerOf(model);
+	const t = now instanceof Date ? now.getTime() : new Date(now).getTime();
+	return (cooldowns ?? []).some((c) => c.provider === provider && new Date(c.until).getTime() > t);
+}
+
+function firstFree(chain, cooldowns, now) {
+	return (chain ?? []).find((model) => !isCooling(model, cooldowns, now));
+}
+
+function cooldownUntil(model, cooldowns) {
+	const provider = providerOf(model);
+	const hit = (cooldowns ?? []).find((c) => c.provider === provider);
+	return hit ? new Date(hit.until) : undefined;
+}
+
+function earliestCooldown(models, cooldowns, now) {
+	const providers = new Set((models ?? []).map(providerOf));
+	const t = now instanceof Date ? now.getTime() : new Date(now).getTime();
+	const times = (cooldowns ?? [])
+		.filter((c) => providers.has(c.provider) && new Date(c.until).getTime() > t)
+		.map((c) => new Date(c.until).getTime());
+	if (!times.length) return undefined;
+	return new Date(Math.min(...times));
+}
+
+function crossTierPick(tierName, config, cooldowns, now) {
+	const dir = config.crossTier;
+	if (dir !== "up" && dir !== "down") return undefined;
+	const order = ["quick", "standard", "premium"];
+	const idx = order.indexOf(tierName);
+	if (idx < 0) return undefined;
+	const next = order[idx + (dir === "up" ? 1 : -1)];
+	if (!next) return undefined;
+	const free = firstFree(config.tiers?.[next]?.chain, cooldowns, now);
+	if (!free) return undefined;
+	return { model: free, tier: next };
 }
 
 /** Reasons where `auto` may keep the live session (cost, tokens, turns). */
@@ -134,19 +208,21 @@ function parseTicketBudget(value) {
 	return Object.keys(out).length ? out : undefined;
 }
 
-function chooseHandoffTarget({ previousRoute, kind, config }) {
+function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now = new Date() }) {
 	const rule = config.onExceed?.[kind];
 	if (!rule?.to) return undefined;
 	const tier = config.tiers?.[previousRoute.tier];
 	const chain = tier?.chain ?? [];
 	const idx = chain.indexOf(previousRoute.model);
 	if (rule.to === "next") {
-		if (idx >= 0 && idx + 1 < chain.length) return chain[idx + 1];
-		return undefined;
+		if (idx < 0) return undefined;
+		return firstFree(chain.slice(idx + 1), cooldowns, now);
 	}
 	if (rule.to === "same-tier") {
-		if (idx >= 0 && chain.length > 1) {
-			return chain[(idx + 1) % chain.length];
+		if (idx < 0 || chain.length < 2) return undefined;
+		for (let step = 1; step < chain.length; step++) {
+			const model = chain[(idx + step) % chain.length];
+			if (!isCooling(model, cooldowns, now)) return model;
 		}
 		return undefined;
 	}
@@ -157,7 +233,7 @@ function chooseHandoffTarget({ previousRoute, kind, config }) {
 		const delta = rule.to === "escalate" ? 1 : -1;
 		const nextTier = order[currentIdx + delta];
 		if (!nextTier) return undefined;
-		return config.tiers?.[nextTier]?.chain?.[0];
+		return firstFree(config.tiers?.[nextTier]?.chain, cooldowns, now);
 	}
 	return undefined;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { openTracker, runFrontier } from "../src/index.js";
+import { openCooldowns, openTracker, runFrontier } from "../src/index.js";
 import { SOFT_LIMIT_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
@@ -526,6 +526,96 @@ test("same-process compacts first when the target window is smaller", async () =
 	assert.equal(backend.shifts.length, 1);
 	assert.equal(backend.shifts[0].compactions.length, 1);
 	assert.equal(backend.shifts[0].swaps.length, 1);
+});
+
+function chainTwoProviders(extra = {}) {
+	return {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 1,
+		maxHandoffs: 3,
+		crossTier: "none",
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "other/m2"], thinking: "low" } },
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+		onExceed: {},
+		...extra,
+	};
+}
+
+function fakeClock(start) {
+	let now = start;
+	const sleeps = [];
+	return {
+		sleeps,
+		now: () => new Date(now),
+		async sleep(ms) {
+			sleeps.push(ms);
+			now += ms;
+		},
+	};
+}
+
+test("a 429 cools the provider, relaunches on the next chain model, and does not count an attempt", async () => {
+	const cfg = chainTwoProviders();
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ error: "HTTP 429 Too Many Requests" }, { files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.equal(summary.exitCode, 0);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.equal(backend.shifts[1].request.route.model, "other/m2");
+	assert.match(backend.shifts[0].request.prompt, /attempt 1/);
+	assert.match(backend.shifts[1].request.prompt, /attempt 1/);
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.equal(state.cooldowns[0].provider, "fake");
+	assert.equal(state.cooldowns[0].kind, "rate");
+	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: rate on fake/);
+	assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /verify gate failed/);
+});
+
+test("all-cooling with crossTier none waits on an injected clock, then resumes", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const cfg = chainTwoProviders();
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	await openCooldowns(root).add("fake", new Date(t0 + 30_000), "rate");
+	await openCooldowns(root).add("other", new Date(t0 + 10_000), "rate");
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const waits = [];
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: cfg,
+		clock,
+		log: (entry) => {
+			if (entry.event?.type === "wait") waits.push(entry.event);
+		},
+	});
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(clock.sleeps, [10_000]);
+	assert.equal(waits.length, 1);
+	assert.equal(backend.shifts.length, 1);
+	assert.equal(backend.shifts[0].request.route.model, "other/m2");
+});
+
+test("cooldowns survive a runner restart and skip the cooled provider", async () => {
+	const cfg = chainTwoProviders();
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	await openCooldowns(root).add("fake", new Date(Date.now() + 60_000), "rate");
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.equal(summary.exitCode, 0);
+	assert.equal(backend.shifts.length, 1);
+	assert.equal(backend.shifts[0].request.route.model, "other/m2");
 });
 
 test("auto mode with a smaller target window does a fresh handoff instead of compacting", async () => {

@@ -107,3 +107,4 @@ export { decideNext, runFrontier } from "./runner.js";
 export { loadConfig, THINKING_LEVELS, validateConfig } from "./config.js";
 export { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
 export { createMeter } from "./meter.js";
+export { classifyError, cooldownMs, DEFAULT_COOLDOWN_MS } from "./classify.js";

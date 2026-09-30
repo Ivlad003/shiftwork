@@ -149,8 +149,13 @@ async function run(argv) {
 	if (values["dry-run"]) {
 		const tickets = (await openTracker(root).frontier()).filter((t) => !values.feature || t.feature === values.feature);
 		if (!tickets.length) console.log("Nothing to do: the frontier is empty.");
+		const cooldowns = await openCooldowns(root).active();
 		for (const t of tickets) {
-			const r = planShift({ ticket: t, config });
+			const r = planShift({ ticket: t, config, cooldowns });
+			if (r.wait) {
+				console.log(`${t.feature}/${t.number}  wait until ${new Date(r.wait).toISOString()}  ${t.title ?? ""}`);
+				continue;
+			}
 			console.log(`${t.feature}/${t.number}  type=${r.type}${t.type ? "" : " (default)"}  tier=${r.tier ?? "-"}  model=${r.model}  thinking=${r.thinking}  ${t.title ?? ""}`);
 		}
 		return 0;

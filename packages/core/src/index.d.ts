@@ -32,7 +32,29 @@ export interface Route {
 export declare function parseTicket(markdown: string, path?: string): Ticket;
 export declare function frontier<T extends Ticket>(tickets: T[]): T[];
 export declare function loadTickets(root?: string): Promise<(Ticket & { feature: string })[]>;
-export declare function planShift(options: { ticket: Ticket; config: Record<string, unknown>; history?: Record<string, unknown> }): Route;
+export type Plan =
+	| Route
+	| { wait: Date }
+	| { stop: string };
+
+export declare function planShift(options: {
+	ticket: Ticket;
+	config: Record<string, unknown>;
+	history?: Record<string, unknown>;
+	cooldowns?: Cooldown[];
+	now?: Date | number;
+}): Plan;
+
+export type LimitKind = "rate" | "usage" | "quota" | "server";
+
+export declare function classifyError(
+	message: string,
+	headers?: Record<string, string | number>,
+	now?: Date | number,
+): null | { kind: LimitKind; resetAt?: Date };
+
+export declare function cooldownMs(config: Record<string, unknown> | undefined, kind: LimitKind): number;
+export declare const DEFAULT_COOLDOWN_MS: Record<LimitKind, number>;
 export declare function chooseHandoffMode(options: {
 	mode?: "same-process" | "new-process" | "auto";
 	kind: string;

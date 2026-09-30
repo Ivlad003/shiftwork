@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { parseCooldownDuration } from "./classify.js";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -9,6 +10,8 @@ const DEFAULTS = {
 	maxAttempts: 3,
 	maxHandoffs: 3,
 	softLimitPct: 80,
+	crossTier: "none",
+	cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
 	skillGroups: {},
 	skillSources: {},
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
@@ -48,6 +51,8 @@ export function validateConfig(input) {
 
 	checkBudgets(config.budgets, "budgets");
 	checkOnExceed(config.onExceed, "onExceed");
+	checkCrossTier(config.crossTier, "crossTier");
+	config.cooldown = checkCooldown({ ...DEFAULTS.cooldown, ...config.cooldown }, "cooldown");
 
 	for (const [name, sources] of Object.entries(skillGroups)) {
 		if (!Array.isArray(sources) || !sources.every((s) => typeof s === "string")) {
@@ -129,6 +134,8 @@ function checkBudget(value, path) {
 
 const ON_EXCEED_TARGETS = ["next", "downgrade", "escalate", "same-tier"];
 const ON_EXCEED_MODES = ["same-process", "new-process", "auto"];
+const CROSS_TIER = ["none", "up", "down"];
+const COOLDOWN_KINDS = ["rate", "usage", "quota", "server"];
 
 function checkOnExceed(value, path) {
 	if (value === undefined) return;
@@ -143,6 +150,32 @@ function checkOnExceed(value, path) {
 			fail(`${path}.${kind}.mode`, `must be one of ${ON_EXCEED_MODES.join(", ")}`);
 		}
 	}
+}
+
+function checkCrossTier(value, path) {
+	if (value === undefined) return;
+	if (!CROSS_TIER.includes(value)) fail(path, `must be one of ${CROSS_TIER.join(", ")}`);
+}
+
+function checkCooldown(value, path) {
+	if (value === undefined) return undefined;
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	const out = {};
+	for (const key of Object.keys(value)) {
+		if (!COOLDOWN_KINDS.includes(key)) fail(`${path}.${key}`, `unknown cooldown kind; expected one of ${COOLDOWN_KINDS.join(", ")}`);
+	}
+	for (const kind of COOLDOWN_KINDS) {
+		const raw = value[kind];
+		if (raw === undefined || raw === null) continue;
+		if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+			out[kind] = raw;
+			continue;
+		}
+		const ms = parseCooldownDuration(raw);
+		if (ms == null) fail(`${path}.${kind}`, `expected a duration like "15m" or milliseconds, got ${JSON.stringify(raw)}`);
+		out[kind] = ms;
+	}
+	return out;
 }
 
 function checkModel(value, path, { optional = false } = {}) {

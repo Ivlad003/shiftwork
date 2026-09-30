@@ -39,6 +39,8 @@ export function starterConfig(model) {
 			maxContextPct: { to: "same-tier", mode: "new-process" },
 			maxWallMin: { to: "next", mode: "new-process" },
 		},
+		cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
+		crossTier: "none",
 	};
 }
 

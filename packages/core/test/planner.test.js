@@ -184,3 +184,61 @@ for (const [name, input, expected] of autoCases) {
 		assert.deepEqual(chooseHandoffMode(input), expected);
 	});
 }
+
+const far = "2099-01-01T00:00:00.000Z";
+const t0 = new Date("2026-01-01T00:00:00Z");
+
+test("planShift: skips a cooled-down provider in the chain", () => {
+	const route = planShift({
+		ticket: t({ type: "code" }),
+		config,
+		cooldowns: [{ provider: "anthropic", until: far, kind: "rate" }],
+		now: t0,
+	});
+	assert.equal(route.model, "xai/grok");
+	assert.equal(route.tier, "standard");
+});
+
+test("planShift: all-cooling with crossTier none waits for the earliest", () => {
+	const plan = planShift({
+		ticket: t({ type: "code" }),
+		config: { ...config, crossTier: "none" },
+		cooldowns: [
+			{ provider: "anthropic", until: "2026-01-01T00:20:00Z", kind: "rate" },
+			{ provider: "xai", until: "2026-01-01T00:10:00Z", kind: "usage" },
+		],
+		now: t0,
+	});
+	assert.equal(new Date(plan.wait).toISOString(), "2026-01-01T00:10:00.000Z");
+	assert.equal(plan.model, undefined);
+});
+
+test("planShift: all-cooling with crossTier up moves to the neighbouring tier", () => {
+	const cfg = {
+		...config,
+		crossTier: "up",
+		tiers: { ...config.tiers, premium: { chain: ["openai/gpt"], thinking: "high" } },
+	};
+	const route = planShift({
+		ticket: t({ type: "code" }),
+		config: cfg,
+		cooldowns: [
+			{ provider: "anthropic", until: far, kind: "rate" },
+			{ provider: "xai", until: far, kind: "rate" },
+		],
+		now: t0,
+	});
+	assert.equal(route.model, "openai/gpt");
+	assert.equal(route.tier, "premium");
+	assert.equal(route.thinking, "high");
+});
+
+test("planShift: a pinned Model whose provider is cooling waits", () => {
+	const plan = planShift({
+		ticket: t({ type: "code", model: "anthropic/sonnet" }),
+		config,
+		cooldowns: [{ provider: "anthropic", until: "2026-01-01T00:05:00Z", kind: "rate" }],
+		now: t0,
+	});
+	assert.equal(new Date(plan.wait).toISOString(), "2026-01-01T00:05:00.000Z");
+});

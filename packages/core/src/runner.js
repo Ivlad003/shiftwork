@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { classifyError, cooldownMs } from "./classify.js";
+import { openCooldowns } from "./cooldowns.js";
 import { createMeter } from "./meter.js";
 import { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, SOFT_LIMIT_STEER, WORKER_PROMPT } from "./prompt.js";
@@ -31,12 +33,29 @@ function checkStop(root) {
 
 /**
  * Work the frontier until nothing is left (or one ticket with `once`).
- * Every dependency is injected: tracker, backend, verify, log.
+ * Every dependency is injected: tracker, backend, verify, log, classify, clock, cooldowns.
  */
-export async function runFrontier({ root, tracker, backend, verify, config, workspace, log = () => {}, options = {} }) {
+export async function runFrontier({
+	root,
+	tracker,
+	backend,
+	verify,
+	config,
+	workspace,
+	log = () => {},
+	options = {},
+	classify = classifyError,
+	clock,
+	cooldowns,
+}) {
 	const maxAttempts = config.maxAttempts ?? 3;
 	const summary = { resolved: [], needsInfo: [], stoppedReason: undefined };
 	const seen = new Set();
+	const time = clock ?? {
+		now: () => new Date(),
+		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	};
+	const cooldownStore = cooldowns ?? openCooldowns(root);
 
 	for (;;) {
 		if (checkStop(root)) {
@@ -53,7 +72,20 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 		const claim = await tracker.claim(ticket);
 		if (!claim) continue;
 		try {
-			const outcome = await workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log });
+			const outcome = await workTicket({
+				root,
+				ticket,
+				tracker,
+				backend,
+				verify,
+				config,
+				workspace,
+				maxAttempts,
+				log,
+				classify,
+				clock: time,
+				cooldowns: cooldownStore,
+			});
 			if (outcome.action === "stop") {
 				summary.stoppedReason = outcome.reason;
 				break;
@@ -74,7 +106,7 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 	return summary;
 }
 
-async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log }) {
+async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, clock, cooldowns }) {
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
@@ -88,11 +120,24 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	const maxHandoffs = config.maxHandoffs ?? 3;
 
 	for (;;) {
+		if (checkStop(root)) {
+			await tracker.setStatus(ticket, READY);
+			return { action: "stop", reason: "STOP file" };
+		}
+		const now = clock.now();
 		const plan = planShift({
 			ticket,
 			config,
 			history: { previousRoute, exceededKind, ticketUsage },
+			cooldowns: await cooldowns.active(now),
+			now,
 		});
+		if (plan.wait) {
+			const ms = Math.max(0, new Date(plan.wait).getTime() - now.getTime());
+			log({ ticket, event: { type: "wait", until: plan.wait, ms } });
+			await clock.sleep(ms);
+			continue;
+		}
 		const route = { ...plan, backend: backend.name };
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
 		const softLimitPct = config.softLimitPct ?? 80;
@@ -115,6 +160,28 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		);
 
 		accumulateUsage(ticketUsage, shift);
+
+		const limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
+		if (limit) {
+			const provider = route.model.split("/")[0];
+			const until = limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind));
+			await cooldowns.add(provider, until, limit.kind);
+			await tracker.appendComment(
+				ticket,
+				[
+					shiftReport({
+						number: shiftNumber,
+						route,
+						shift,
+						verifyResult: null,
+						decision: { action: "retry", reason: `provider ${limit.kind} limit` },
+					}),
+					`- Provider limit: ${limit.kind} on ${provider}, cooling until ${until instanceof Date ? until.toISOString() : until}; continuing without counting an attempt`,
+				].join("\n"),
+			);
+			shiftNumber++;
+			continue;
+		}
 
 		const hasVerify = ticket.verify.length > 0;
 		// A handed-off shift may already have finished the work: the gate decides either way.
@@ -396,6 +463,7 @@ async function runShift(backend, request, log) {
 				result.text += `${event.text}\n`;
 			} else if (event.type === "error") {
 				result.error = event.message;
+				result.errorHeaders = event.headers;
 			} else if (event.type === "end") {
 				result.stopReason = event.stopReason;
 				break;

@@ -35,7 +35,7 @@ export function fakeBackend(script) {
 				const usage = step.usage ?? { input: 100, output: 20 };
 				queue.push({ type: "turn", usage: { ...usage, totalTokens: usage.input + usage.output }, costUsd: step.costUsd ?? 0.01 });
 				if (step.text) queue.push({ type: "text", text: step.text });
-				if (step.error) queue.push({ type: "error", message: step.error });
+				if (step.error) queue.push({ type: "error", message: step.error, headers: step.errorHeaders });
 				queue.push({ type: "end", stopReason: step.error ? "error" : "stop" });
 			}
 			let aborted = false;
