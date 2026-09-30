@@ -9,10 +9,14 @@
     "packages/opencode"
   ],
   "scripts": {
+    "test": "node --test \"packages/*/test/**/*.test.js\"",
     "pack:dry": "npm pack --dry-run --workspaces",
     "publish:all": "bash scripts/publish.sh"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.99.1"
   }
 }

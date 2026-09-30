@@ -3,3 +3,4 @@ node_modules/
 .DS_Store
 .pi/shiftwork-state.json
 logs/
+.scratch/.claims/
