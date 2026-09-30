@@ -89,3 +89,26 @@ test("review is validated: off by default, tier required when enabled, filters a
 		await assert.rejects(loadConfig(bad.root, bad.userDir), message);
 	}
 });
+
+test("parallel and concurrency are validated: > 1 needs worktree.enabled, caps are positive integers", async () => {
+	const defaults = await dirs({ model: "a/1" });
+	assert.equal((await loadConfig(defaults.root, defaults.userDir)).parallel, 1);
+
+	const good = await dirs({ model: "a/1", worktree: { enabled: true }, parallel: 2, concurrency: { a: 1, "claude:anthropic": 3 } });
+	const config = await loadConfig(good.root, good.userDir);
+	assert.equal(config.parallel, 2);
+	assert.deepEqual(config.concurrency, { a: 1, "claude:anthropic": 3 });
+
+	for (const [project, message] of [
+		[{ model: "a/1", parallel: 2 }, /parallel: parallel > 1 requires worktree\.enabled/],
+		[{ model: "a/1", worktree: { enabled: false }, parallel: 2 }, /parallel: parallel > 1 requires worktree\.enabled/],
+		[{ model: "a/1", parallel: 0 }, /parallel: must be a positive integer/],
+		[{ model: "a/1", parallel: "2" }, /parallel: must be a positive integer/],
+		[{ model: "a/1", worktree: { enabled: true }, parallel: 2, concurrency: { a: 0 } }, /concurrency\.a: must be a positive integer/],
+		[{ model: "a/1", worktree: { enabled: true }, parallel: 2, concurrency: { a: 1.5 } }, /concurrency\.a: must be a positive integer/],
+		[{ model: "a/1", worktree: { enabled: true }, parallel: 2, concurrency: "a" }, /concurrency: must be an object of provider → max shifts at once/],
+	]) {
+		const bad = await dirs(project);
+		await assert.rejects(loadConfig(bad.root, bad.userDir), message);
+	}
+});

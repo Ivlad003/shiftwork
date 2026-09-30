@@ -12,6 +12,7 @@ const DEFAULTS = {
 	softLimitPct: 80,
 	crossTier: "none",
 	allowInPlace: false,
+	parallel: 1,
 	cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
 	skillGroups: {},
 	skillSources: {},
@@ -108,6 +109,18 @@ export function validateConfig(input) {
 	if (worktree.enabled !== undefined && typeof worktree.enabled !== "boolean") fail("worktree.enabled", "must be true or false");
 	if (worktree.setup !== undefined && !(Array.isArray(worktree.setup) && worktree.setup.every((c) => typeof c === "string"))) {
 		fail("worktree.setup", "must be an array of shell commands");
+	}
+
+	// Parallel shifts: N frontier tickets at once, each in its own worktree (ticket 01).
+	if (!Number.isInteger(config.parallel) || config.parallel < 1) fail("parallel", "must be a positive integer");
+	if (config.parallel > 1 && worktree.enabled !== true) {
+		fail("parallel", "parallel > 1 requires worktree.enabled: every parallel ticket needs its own worktree");
+	}
+	if (config.concurrency !== undefined) {
+		if (!isPlainObject(config.concurrency)) fail("concurrency", "must be an object of provider → max shifts at once");
+		for (const [provider, cap] of Object.entries(config.concurrency)) {
+			if (!Number.isInteger(cap) || cap < 1) fail(`concurrency.${provider}`, "must be a positive integer");
+		}
 	}
 
 	const fallback = config.routing?.[config.defaultType];

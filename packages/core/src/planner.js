@@ -7,9 +7,11 @@
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
  * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, then are capped by the ticket budget.
  * Thinking: the ticket type's routing → the model profile → the tier → global. A profile's contextWindow is used for context fill.
- * @returns {object} a Route, or `{ wait: Date }` when every candidate is cooling down
+ * A provider at its `concurrency` cap (`fullProviders`) is skipped like a cooling one, but no
+ * cooldown is written and there is no end time: waiting re-plans after FULL_PROVIDER_RETRY_MS.
+ * @returns {object} a Route, or `{ wait: Date }` when every candidate is cooling or full
  */
-export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date(), classification } = {}) {
+export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date(), classification, fullProviders = [] } = {}) {
 	const { type, typeSource } = resolveType(ticket, config, classification);
 	const routing = config.routing?.[type];
 	let tierName = routing?.model ? undefined : (routing?.tier ?? config.defaultTier);
@@ -28,11 +30,12 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 			cooldowns,
 			now: at,
 			blockedModels,
+			fullProviders,
 		});
 		if (nextModel) return buildRoute({ ticket, config, type, typeSource, model: nextModel, history, onExceed, capRemaining: true });
 	}
 
-	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at, blockedModels });
+	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at, blockedModels, fullProviders });
 	if (picked.wait) return picked;
 	if (picked.stop) return picked;
 	if (!picked.model) {
@@ -131,24 +134,28 @@ function preferWaitOverPaid(picked, { config, tierName, cooldowns, now, blockedM
 	return soonest ? { wait: soonest } : picked;
 }
 
-function pickAnyModel({ ticket, config, routing, tierName, cooldowns, now, blockedModels = [] }) {
+function pickAnyModel({ ticket, config, routing, tierName, cooldowns, now, blockedModels = [], fullProviders = [] }) {
 	const pinned = ticket.model ?? routing?.model;
 	if (pinned && !isBlocked(pinned, blockedModels)) {
 		if (isCooling(pinned, cooldowns, now)) return { wait: cooldownUntil(pinned, cooldowns) };
+		if (isBusy(pinned, fullProviders)) return { wait: fullRetryAt(now) };
 		return { model: pinned, tier: tierName };
 	}
 	const chain = config.tiers?.[tierName]?.chain ?? [];
-	const free = firstFree(chain, cooldowns, now, blockedModels);
+	const free = firstFree(chain, cooldowns, now, blockedModels, fullProviders);
 	if (free) return { model: free, tier: tierName };
 	if (chain.length) {
-		const neighbour = crossTierPick(tierName, config, cooldowns, now, blockedModels);
+		const neighbour = crossTierPick(tierName, config, cooldowns, now, blockedModels, fullProviders);
 		if (neighbour) return neighbour;
 		const until = earliestCooldown(chain, cooldowns, now);
 		if (until) return { wait: until };
+		// A full provider frees a slot as soon as any shift ends, so re-plan soon instead of stopping.
+		if (chain.some((model) => isBusy(model, fullProviders) && !isBlocked(model, blockedModels))) return { wait: fullRetryAt(now) };
 		if (blockedModels.length) return { stop: "no eligible model: stalled models excluded" };
 	}
 	if (config.model && !isBlocked(config.model, blockedModels)) {
 		if (isCooling(config.model, cooldowns, now)) return { wait: cooldownUntil(config.model, cooldowns) };
+		if (isBusy(config.model, fullProviders)) return { wait: fullRetryAt(now) };
 		return { model: config.model, tier: tierName };
 	}
 	if (blockedModels.length) return { stop: "no eligible model: stalled models excluded" };
@@ -157,6 +164,18 @@ function pickAnyModel({ ticket, config, routing, tierName, cooldowns, now, block
 
 function isBlocked(model, blocked) {
 	return (blocked ?? []).includes(model);
+}
+
+/** A model whose provider has no free concurrency slot. */
+function isBusy(model, fullProviders) {
+	return (fullProviders ?? []).includes(providerOf(model));
+}
+
+/** No end time is known for a full provider: re-plan after this long. */
+const FULL_PROVIDER_RETRY_MS = 60_000;
+
+function fullRetryAt(now) {
+	return new Date((now instanceof Date ? now : new Date(now)).getTime() + FULL_PROVIDER_RETRY_MS);
 }
 
 function providerOf(model) {
@@ -188,8 +207,10 @@ function isCooling(model, cooldowns, now) {
 	return cooldownsFor(model, cooldowns).some((c) => new Date(c.until).getTime() > t);
 }
 
-function firstFree(chain, cooldowns, now, blocked = []) {
-	return (chain ?? []).find((model) => !isCooling(model, cooldowns, now) && !isBlocked(model, blocked));
+function firstFree(chain, cooldowns, now, blocked = [], fullProviders = []) {
+	return (chain ?? []).find(
+		(model) => !isCooling(model, cooldowns, now) && !isBlocked(model, blocked) && !isBusy(model, fullProviders),
+	);
 }
 
 function cooldownUntil(model, cooldowns) {
@@ -207,7 +228,7 @@ function earliestCooldown(models, cooldowns, now) {
 	return new Date(Math.min(...times));
 }
 
-function crossTierPick(tierName, config, cooldowns, now, blockedModels) {
+function crossTierPick(tierName, config, cooldowns, now, blockedModels, fullProviders = []) {
 	const dir = config.crossTier;
 	if (dir !== "up" && dir !== "down") return undefined;
 	const order = ["quick", "standard", "premium"];
@@ -215,7 +236,7 @@ function crossTierPick(tierName, config, cooldowns, now, blockedModels) {
 	if (idx < 0) return undefined;
 	const next = order[idx + (dir === "up" ? 1 : -1)];
 	if (!next) return undefined;
-	const free = firstFree(config.tiers?.[next]?.chain, cooldowns, now, blockedModels);
+	const free = firstFree(config.tiers?.[next]?.chain, cooldowns, now, blockedModels, fullProviders);
 	if (!free) return undefined;
 	return { model: free, tier: next };
 }
@@ -339,7 +360,7 @@ function parseTicketBudget(value) {
 	return Object.keys(out).length ? out : undefined;
 }
 
-function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now = new Date(), blockedModels = [] }) {
+function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now = new Date(), blockedModels = [], fullProviders = [] }) {
 	const rule = config.onExceed?.[kind];
 	if (!rule?.to) return undefined;
 	const tier = config.tiers?.[previousRoute.tier];
@@ -347,13 +368,13 @@ function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now 
 	const idx = chain.indexOf(previousRoute.model);
 	if (rule.to === "next") {
 		if (idx < 0) return undefined;
-		return firstFree(chain.slice(idx + 1), cooldowns, now, blockedModels);
+		return firstFree(chain.slice(idx + 1), cooldowns, now, blockedModels, fullProviders);
 	}
 	if (rule.to === "same-tier") {
 		if (idx < 0 || chain.length < 2) return undefined;
 		for (let step = 1; step < chain.length; step++) {
 			const model = chain[(idx + step) % chain.length];
-			if (!isCooling(model, cooldowns, now) && !isBlocked(model, blockedModels)) return model;
+			if (!isCooling(model, cooldowns, now) && !isBlocked(model, blockedModels) && !isBusy(model, fullProviders)) return model;
 		}
 		return undefined;
 	}
@@ -364,7 +385,7 @@ function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now 
 		const delta = rule.to === "escalate" ? 1 : -1;
 		const nextTier = order[currentIdx + delta];
 		if (!nextTier) return undefined;
-		return firstFree(config.tiers?.[nextTier]?.chain, cooldowns, now, blockedModels);
+		return firstFree(config.tiers?.[nextTier]?.chain, cooldowns, now, blockedModels, fullProviders);
 	}
 	return undefined;
 }

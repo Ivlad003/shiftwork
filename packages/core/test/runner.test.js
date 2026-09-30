@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 import { openCooldowns, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
 import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
@@ -1408,4 +1409,164 @@ test("formatDuration renders seconds, minutes and hours", () => {
 	assert.equal(formatDuration(0.5), "30s");
 	assert.equal(formatDuration(12 + 34 / 60), "12m 34s");
 	assert.equal(formatDuration(125), "2h 5m");
+});
+
+// Parallel shifts (spec stories 1–2): up to N frontier tickets at once, per-provider caps.
+
+/** A scripted backend whose shifts stay open until the test releases them, recording start and end. */
+// Start and end use performance.now(): Date.now()'s millisecond can make an overlap look serial.
+function gateBackend(script) {
+	const shifts = [];
+	return {
+		name: "fake",
+		shifts,
+		async startShift(request) {
+			const step = script[shifts.length] ?? {};
+			const record = { request, startedAt: null, endedAt: null, aborted: false };
+			shifts.push(record);
+			// The gate is set up synchronously, before any await, so a test that sees
+			// the shift in `shifts` can always release it.
+			let open;
+			const gate = new Promise((resolve) => {
+				open = resolve;
+			});
+			record.open = () => {
+				record.endedAt = performance.now();
+				open();
+			};
+			for (const [rel, content] of Object.entries(step.files ?? {})) {
+				await writeFile(join(request.cwd, rel), content);
+			}
+			const events = (async function* () {
+				record.startedAt = performance.now();
+				await gate;
+				yield { type: "turn", usage: { input: 100, output: 20, totalTokens: 120 }, costUsd: 0.01 };
+				yield { type: "end", stopReason: "stop" };
+			})();
+			return {
+				capabilities: {},
+			events,
+				warnings: [],
+				steer: async () => {},
+				abort: async () => {
+					record.aborted = true;
+				},
+				close: async () => {},
+			};
+		},
+	};
+}
+
+async function waitFor(condition) {
+	// A generous budget: the whole suite runs at once and the event loop can stall for seconds.
+	for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.ok(condition(), "timed out waiting for the runner");
+}
+
+function runParallel(root, backend, configOverrides = {}) {
+	return runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: { ...config, ...configOverrides },
+		options: { parallel: 2 },
+	});
+}
+
+test("parallel: 2 works two independent tickets at once", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	const running = runParallel(root, backend);
+	// Wait until both shifts have really started, then release both gates at once.
+	await waitFor(() => backend.shifts.length === 2 && backend.shifts.every((s) => s.startedAt));
+	backend.shifts[0].open();
+	backend.shifts[1].open();
+	const summary = await running;
+	// Parallel tickets finish in their own time: the pool records them as they settle.
+	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
+	assert.ok(backend.shifts[1].startedAt < backend.shifts[0].endedAt, "the second shift started before the first one ended");
+	assert.ok(backend.shifts[0].startedAt < backend.shifts[1].endedAt, "the shifts overlapped in time");
+});
+
+test("a ticket blocked by a running parallel ticket starts only after it resolves", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { blockedBy: "01", extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	const running = runParallel(root, backend);
+	await waitFor(() => backend.shifts.length === 1 && backend.shifts[0].startedAt);
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	assert.equal(backend.shifts.length, 1, "the blocked ticket must not start while its blocker runs");
+	backend.shifts[0].open();
+	await waitFor(() => backend.shifts.length === 2 && backend.shifts[1].startedAt);
+	assert.ok(backend.shifts[1].startedAt >= backend.shifts[0].endedAt, "the blocked ticket starts only after its blocker resolves");
+	backend.shifts[1].open();
+	const summary = await running;
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01", "02"]);
+});
+
+test("a provider at its concurrency cap is skipped for the next model, and no cooldown is written", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Type:** code\n**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	const running = runParallel(root, backend, chainTwoProviders({ concurrency: { fake: 1 } }));
+	await waitFor(() => backend.shifts.length === 2);
+	assert.deepEqual(
+		[backend.shifts[0].request.route.model, backend.shifts[1].request.route.model].sort(),
+		["fake/m1", "other/m2"],
+		"the ticket that finds the provider full skips to the next chain model",
+	);
+	backend.shifts[0].open();
+	backend.shifts[1].open();
+	const summary = await running;
+	// Parallel tickets finish in their own time: the pool records them as they settle.
+	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
+	let stateText = "{}";
+	try {
+		stateText = await readFile(`${root}/.pi/shiftwork-state.json`, "utf8");
+	} catch {}
+	assert.deepEqual(JSON.parse(stateText).cooldowns ?? [], [], "no cooldown is written for a full provider");
+});
+
+test("parallel landings go through one queue: one landing at a time", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	let inLanding = 0;
+	let maxInLanding = 0;
+	const workspace = {
+		...fakeWorkspace(),
+		async land(t) {
+			inLanding++;
+			maxInLanding = Math.max(maxInLanding, inLanding);
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			inLanding--;
+			return { ok: true, message: "merged" };
+		},
+	};
+	const running = runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config,
+		workspace,
+		options: { parallel: 2 },
+	});
+	await waitFor(() => backend.shifts.length === 2);
+	backend.shifts[0].open();
+	backend.shifts[1].open();
+	const summary = await running;
+	// Parallel tickets finish in their own time: the pool records them as they settle.
+	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
+	assert.equal(maxInLanding, 1, "only one landing runs at a time");
 });

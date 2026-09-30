@@ -27,6 +27,9 @@ Run options:
   --model <provider/id>  Default model (else "model" in .pi/shiftwork.json)
   --thinking <level>     Default thinking level (default: medium)
   --max-attempts <n>     Attempts per ticket before needs-info (default: 3)
+  --parallel <n>         Work up to n frontier tickets at once (default: 1, or "parallel"
+                        in .pi/shiftwork.json; > 1 needs worktree.enabled and one worktree
+                        per ticket; "concurrency" caps the shifts per provider)
   --no-worktree          Work in the main checkout instead of a git worktree per ticket
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
@@ -144,6 +147,7 @@ async function run(argv) {
 			model: { type: "string" },
 			thinking: { type: "string" },
 			"max-attempts": { type: "string" },
+			parallel: { type: "string" },
 			"no-worktree": { type: "boolean" },
 			dir: { type: "string" },
 			help: { type: "boolean", short: "h" },
@@ -160,8 +164,12 @@ async function run(argv) {
 		model: values.model ?? loaded.model,
 		thinking: values.thinking ?? loaded.thinking,
 		maxAttempts: values["max-attempts"] ? Number(values["max-attempts"]) : loaded.maxAttempts,
+		parallel: values.parallel !== undefined ? Number(values.parallel) : loaded.parallel,
 		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
 	});
+	if ((config.parallel ?? 1) > 1 && values["no-worktree"]) {
+		throw new Error("--no-worktree cannot be combined with parallel > 1: every parallel ticket needs its own worktree");
+	}
 
 	if (values["dry-run"]) {
 		const { collectDryRunLines } = await import("../src/dry-run.js");
@@ -178,6 +186,7 @@ async function run(argv) {
 	const classifyTicket = createJevClassifier({ config, agentDir });
 	const workspace = await createWorkspace(root, config, values["no-worktree"]);
 	console.log(`shiftwork: registry · max ${config.maxAttempts} attempts per ticket`);
+	if ((config.parallel ?? 1) > 1) console.log(`shiftwork: parallel · up to ${config.parallel} tickets at once`);
 
 	const summary = await runFrontier({
 		root,

@@ -78,6 +78,37 @@ export async function runFrontier({
 	};
 	const cooldownStore = cooldowns ?? openCooldowns(root);
 	const state = runState ?? (root ? openRunState(root) : noRunState());
+	// In-memory per-provider shift caps (`concurrency`): a serial run never fills one.
+	// Cross-process caps are out of scope; the lock file (ticket 02) covers shared state, not slots.
+	const slots = createProviderSlots(config.concurrency);
+	const parallel = options.parallel ?? config.parallel ?? 1;
+	const counts = () => ({ resolved: summary.resolved.length, needsInfo: summary.needsInfo.length, reopened: summary.reopened.length });
+	const recordOutcome = (ticket, outcome) => {
+		if (outcome.action === "resolve") summary.resolved.push({ ...ticket, reason: outcome.reason, review: outcome.review });
+		else if (outcome.action === "reopen") summary.reopened.push({ ...ticket, reason: outcome.reason, review: outcome.review });
+		else if (outcome.action === NEEDS_INFO) summary.needsInfo.push({ ...ticket, reason: outcome.reason });
+	};
+	const workOne = (ticket, ws = workspace) =>
+		workTicket({
+			root,
+			ticket,
+			tracker,
+			backend,
+			verify,
+			config,
+			workspace: ws,
+			maxAttempts,
+			log,
+			classify,
+			classifyTicket,
+			clock: time,
+			cooldowns: cooldownStore,
+			runState: state,
+			slots,
+		});
+	const frontierPage = async () =>
+		(await tracker.frontier()).filter((t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature));
+
 	await state.update({
 		pid: process.pid,
 		running: true,
@@ -88,56 +119,35 @@ export async function runFrontier({
 		summary: { resolved: 0, needsInfo: 0, reopened: 0 },
 	});
 
-	for (;;) {
-		if (checkStop(root)) {
-			summary.stoppedReason = "STOP file";
-			break;
-		}
-		const frontier = (await tracker.frontier()).filter(
-			(t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature),
-		);
-		if (frontier.length === 0) break;
-		const ticket = frontier[0];
-		seen.add(seenKey(ticket));
+	// `once` is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
+	if (parallel > 1 && !options.once) await runInPool();
+	else
+		for (;;) {
+			if (checkStop(root)) {
+				summary.stoppedReason = "STOP file";
+				break;
+			}
+			const frontier = await frontierPage();
+			if (frontier.length === 0) break;
+			const ticket = frontier[0];
+			seen.add(seenKey(ticket));
 
-		const claim = await tracker.claim(ticket);
-		if (!claim) continue;
-		try {
-			const outcome = await workTicket({
-				root,
-				ticket,
-				tracker,
-				backend,
-				verify,
-				config,
-				workspace,
-				maxAttempts,
-				log,
-				classify,
-				classifyTicket,
-				clock: time,
-				cooldowns: cooldownStore,
-				runState: state,
-			});
+			const claim = await tracker.claim(ticket);
+			if (!claim) continue;
+			let outcome;
+			try {
+				outcome = await workOne(ticket);
+			} finally {
+				await tracker.release(claim);
+			}
 			if (outcome.action === "stop") {
 				summary.stoppedReason = outcome.reason;
 				break;
 			}
-			if (outcome.action === "resolve") summary.resolved.push({ ...ticket, reason: outcome.reason, review: outcome.review });
-			else if (outcome.action === "reopen") summary.reopened.push({ ...ticket, reason: outcome.reason, review: outcome.review });
-			else summary.needsInfo.push({ ...ticket, reason: outcome.reason });
-			await state.update({
-				summary: {
-					resolved: summary.resolved.length,
-					needsInfo: summary.needsInfo.length,
-					reopened: summary.reopened.length,
-				},
-			});
-		} finally {
-			await tracker.release(claim);
+			recordOutcome(ticket, outcome);
+			await state.update({ summary: counts() });
+			if (options.once) break;
 		}
-		if (options.once) break;
-	}
 
 	if (!summary.stoppedReason && checkStop(root)) {
 		summary.stoppedReason = "STOP file";
@@ -149,16 +159,100 @@ export async function runFrontier({
 		finishedAt: new Date().toISOString(),
 		ticket: null,
 		stoppedReason: summary.stoppedReason ?? null,
-		summary: {
-			resolved: summary.resolved.length,
-			needsInfo: summary.needsInfo.length,
-			reopened: summary.reopened.length,
-		},
+		summary: counts(),
 	});
 	return summary;
+
+	/** Work up to `parallel` frontier tickets at once; after any one finishes, re-read the frontier. */
+	async function runInPool() {
+		// Landings (git merges in the root checkout) go through one in-process queue.
+		const ws = workspace ? withLandingQueue(workspace) : undefined;
+		const running = [];
+		let stopping = false;
+		const startWorker = (ticket, claim) => {
+			const worker = (async () => {
+				let outcome;
+				try {
+					outcome = await workOne(ticket, ws);
+				} finally {
+					await tracker.release(claim);
+				}
+				return { worker, ticket, outcome };
+			})();
+			return worker;
+		};
+		for (;;) {
+			// A STOP file stops new tickets at once; the running shifts hand off on their own.
+			if (!stopping && checkStop(root)) {
+				summary.stoppedReason = "STOP file";
+				stopping = true;
+			}
+			while (!stopping && running.length < parallel) {
+				const frontier = await frontierPage();
+				if (frontier.length === 0) break;
+				const ticket = frontier[0];
+				seen.add(seenKey(ticket));
+				const claim = await tracker.claim(ticket);
+				if (!claim) continue;
+				running.push(startWorker(ticket, claim));
+			}
+			if (running.length === 0) break;
+			const done = await Promise.race(running);
+			running.splice(running.indexOf(done.worker), 1);
+			recordOutcome(done.ticket, done.outcome);
+			await state.update({ summary: counts() });
+			if (done.outcome.action === "stop") {
+				summary.stoppedReason ??= done.outcome.reason;
+				stopping = true;
+			}
+		}
+	}
 }
 
-async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState }) {
+/**
+ * In-memory per-provider slot counters for `concurrency: { "<provider>": n }`:
+ * at most n shifts of this process run at once on a provider. A serial run never fills one.
+ */
+function createProviderSlots(concurrency = {}) {
+	const used = new Map(Object.keys(concurrency).map((provider) => [provider, 0]));
+	return {
+		/** Providers whose slots are all taken right now. */
+		fullProviders() {
+			return [...used].filter(([provider, n]) => n >= concurrency[provider]).map(([provider]) => provider);
+		},
+		/**
+		 * Take a slot for one shift on `provider`: returns the release function, or null when
+		 * every slot is taken (re-plan: the planner skips full providers like cooling ones).
+		 */
+		acquire(provider) {
+			if (!used.has(provider)) return () => {};
+			const n = used.get(provider);
+			if (n >= concurrency[provider]) return null;
+			used.set(provider, n + 1);
+			let released = false;
+			return () => {
+				if (released) return;
+				released = true;
+				used.set(provider, Math.max(0, used.get(provider) - 1));
+			};
+		},
+	};
+}
+
+/** One landing at a time: git merges in the root checkout are serialised through an in-process queue. */
+function withLandingQueue(workspace) {
+	let queue = Promise.resolve();
+	return {
+		...workspace,
+		land: (ticket) => {
+			const landing = queue.then(() => workspace.land(ticket));
+			queue = landing.catch(() => {});
+			return landing;
+		},
+	};
+}
+
+async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState, slots }) {
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
@@ -185,6 +279,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		// Before every ticket, check every guessed cooldown; between its shifts, every probeEveryMin.
 		await probeCooldowns({ backend, cooldowns, config, now, force: firstPlan && config.probeBeforeTicket !== false, log: (event) => log({ ticket, attempt, event }) });
 		firstPlan = false;
+		// A provider at its concurrency cap is skipped like a cooling one, but no cooldown is written.
 		const plan = planShift({
 			ticket,
 			config,
@@ -192,6 +287,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			history: historyOf(),
 			cooldowns: await cooldowns.active(now),
 			now,
+			fullProviders: slots ? slots.fullProviders() : [],
 		});
 		if (plan.wait) {
 			const ms = Math.max(0, new Date(plan.wait).getTime() - now.getTime());
@@ -209,31 +305,53 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: NEEDS_INFO, reason: plan.stop };
 		}
 		const route = plan;
+		// Take this shift's provider slot right after planning it: plan and acquire are
+		// one synchronous block, so two workers can never take the last slot together.
+		const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
+		if (slots && !releaseSlot) {
+			// Planned before another worker took the last slot: re-plan shortly.
+			log({ ticket, event: { type: "wait", provider: route.provider, ms: WAIT_STEP_MS } });
+			await clock.sleep(WAIT_STEP_MS);
+			continue;
+		}
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
 		const softLimitPct = config.softLimitPct ?? 80;
 		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
 		const publish = await publishShift(runState ?? noRunState(), { ticket, attempt, shift: shiftNumber, route });
-		const shift = await runShift(
-			backend,
-			{
-				root,
-				cwd,
-				route,
-				prompt,
-				systemPrompt: config.workerPrompt ?? WORKER_PROMPT,
-				softLimitPct,
-				getDiffStat,
-				ticketPath: ticket.path,
-				maxHandoffs,
-				allowInPlace: Boolean(config.allowInPlace),
-				planHandoff: (kind, fromRoute) =>
-					planShift({ ticket, config, classification, history: historyOf({ previousRoute: fromRoute, exceededKind: kind }) }),
-			},
-			(event) => {
-				log({ ticket, attempt, event });
-				publish(event);
-			},
-		);
+		let shift;
+		try {
+			shift = await runShift(
+				backend,
+				{
+					root,
+					cwd,
+					route,
+					prompt,
+					systemPrompt: config.workerPrompt ?? WORKER_PROMPT,
+					softLimitPct,
+					getDiffStat,
+					ticketPath: ticket.path,
+					maxHandoffs,
+					allowInPlace: Boolean(config.allowInPlace),
+					// Planned while this shift holds its own slot, so a same-provider in-place
+					// swap can look busy at a cap of 1; that only skips to another provider.
+					planHandoff: (kind, fromRoute) =>
+						planShift({
+							ticket,
+							config,
+							classification,
+							history: historyOf({ previousRoute: fromRoute, exceededKind: kind }),
+							fullProviders: slots ? slots.fullProviders() : [],
+						}),
+				},
+				(event) => {
+					log({ ticket, attempt, event });
+					publish(event);
+				},
+			);
+		} finally {
+			releaseSlot?.();
+		}
 
 		accumulateUsage(ticketUsage, shift);
 
@@ -399,6 +517,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					log,
 					type: route.type,
 					landed: landedMessage,
+					slots,
 				});
 				if (review.verdict === "reopen") return { action: "reopen", reason: review.reason, review };
 				return { action: "resolve", reason, review };
@@ -447,7 +566,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
  * and ends with a verdict marker; the runner records it as `### Review` in Comments.
  * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "skip", reason: string, warning?: string, followUp?: object }>}
  */
-async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed }) {
+async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots }) {
 	const review = config.review;
 	const now = clock.now();
 	// Plan on the review tier as if the ticket were untyped and unrouted: the review is its own job.
@@ -456,6 +575,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		config: { ...config, routing: {}, defaultTier: review.tier },
 		cooldowns: await cooldowns.active(now),
 		now,
+		fullProviders: slots ? slots.fullProviders() : [],
 	});
 	const why =
 		plan.wait
@@ -466,21 +586,31 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		return { verdict: "skip", reason: why };
 	}
 
-	const shift = await runShift(
-		backend,
-		{
-			root,
-			cwd: root,
-			route: plan,
-			prompt: buildReviewPrompt(ticket, { root, landed }),
-			systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
-			softLimitPct: config.softLimitPct ?? 80,
-			ticketPath: ticket.path,
-			// A review is one shift: no handoffs, no in-place swaps.
-			maxHandoffs: 0,
-		},
-		(event) => log({ ticket, attempt: "review", event }),
-	);
+	const releaseSlot = slots ? slots.acquire(plan.provider) : undefined;
+	if (slots && !releaseSlot) {
+		await tracker.appendComment(ticket, `### Review\n- Not run: ${plan.provider} is at its concurrency cap`);
+		return { verdict: "skip", reason: `${plan.provider} at its concurrency cap` };
+	}
+	let shift;
+	try {
+		shift = await runShift(
+			backend,
+			{
+				root,
+				cwd: root,
+				route: plan,
+				prompt: buildReviewPrompt(ticket, { root, landed }),
+				systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
+				softLimitPct: config.softLimitPct ?? 80,
+				ticketPath: ticket.path,
+				// A review is one shift: no handoffs, no in-place swaps.
+				maxHandoffs: 0,
+			},
+			(event) => log({ ticket, attempt: "review", event }),
+		);
+	} finally {
+		releaseSlot?.();
+	}
 
 	const markers = [...shift.text.matchAll(REVIEW_MARKER)];
 	const marker = markers[markers.length - 1];
@@ -596,13 +726,20 @@ async function probeCooldowns({ backend, cooldowns, config, now, force = false, 
 	if (typeof backend.probe !== "function") return;
 	const everyMs = (config.probeEveryMin ?? 15) * 60_000;
 	const models = Object.values(config.tiers ?? {}).flatMap((tier) => tier.chain ?? []);
+	const due = [];
 	for (const cooldown of await cooldowns.active(now)) {
 		if (cooldown.exact) continue;
 		const last = new Date(cooldown.probedAt ?? cooldown.at ?? 0).getTime();
 		if (!force && now.getTime() - last < everyMs) continue;
 		const model = models.find((m) => cooldownKey(m) === cooldown.provider || parseModelRef(m).provider === cooldown.provider);
 		if (!model) continue;
-		const ok = await backend.probe(model).catch(() => false);
+		due.push({ cooldown, model });
+	}
+	// Probes run concurrently (parallel where it's free); the store writes follow, one at a time.
+	const probed = await Promise.all(
+		due.map(async ({ cooldown, model }) => ({ cooldown, model, ok: await backend.probe(model).catch(() => false) })),
+	);
+	for (const { cooldown, model, ok } of probed) {
 		log({ type: "probe", provider: cooldown.provider, model, ok });
 		if (ok) await cooldowns.remove(cooldown.provider);
 		else await cooldowns.markProbed(cooldown.provider, now);

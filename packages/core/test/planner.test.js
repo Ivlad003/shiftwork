@@ -596,3 +596,16 @@ test("Budget lines understand k/M token and h time shorthands, and Ukrainian uni
 		assert.deepEqual(resolveTicketBudget({ budget: line }, {}), expected, line);
 	}
 });
+
+test("planShift: a provider at its concurrency cap is skipped for the next chain model", () => {
+	const route = planShift({ ticket: t({ type: "code" }), config, fullProviders: ["anthropic"] });
+	assert.deepEqual({ model: route.model, tier: route.tier }, { model: "xai/grok", tier: "standard" });
+});
+
+test("planShift: a full provider writes no cooldown and an all-full chain waits to re-plan", () => {
+	const now = new Date("2026-01-01T00:00:00Z");
+	const chain = planShift({ ticket: t({ type: "code" }), config, fullProviders: ["anthropic", "xai"], now });
+	assert.equal(chain.wait?.getTime(), now.getTime() + 60_000, "no end time is known: re-plan after a minute");
+	const pinned = planShift({ ticket: t({ type: "docs" }), config, fullProviders: ["openrouter"], now });
+	assert.equal(pinned.wait?.getTime(), now.getTime() + 60_000, "a pinned model on a full provider waits too");
+});
