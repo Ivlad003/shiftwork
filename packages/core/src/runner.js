@@ -185,6 +185,7 @@ function accumulateUsage(target, shift) {
 	target.maxTokens += shift.usage.totalTokens ?? 0;
 	target.maxCostUsd += shift.costUsd ?? 0;
 	target.maxTurns += shift.turns ?? 0;
+	target.maxWallMin += shift.wallMin ?? 0;
 }
 
 function remainingTicketBudget(ticket, config, usage) {
@@ -222,6 +223,7 @@ async function runShift(backend, request, log) {
 		return result;
 	}
 	result.warnings = shift.warnings ?? [];
+	const startedAt = Date.now();
 	const meter = createMeter(request.route.budget, request.softLimitPct ?? 80, { now: Date.now });
 	async function checkLimit(limit) {
 		if (!limit) return false;
@@ -264,6 +266,7 @@ async function runShift(backend, request, log) {
 			break;
 		}
 	}
+	result.wallMin = (Date.now() - startedAt) / 60_000;
 	const marker = result.text.match(MARKER);
 	if (marker) result.needsInfo = marker[1];
 	return result;

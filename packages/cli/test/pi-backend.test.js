@@ -37,6 +37,9 @@ test("a real pi shift runs tools and maps events to turns, text and end", { time
 	assert.equal(events.filter((e) => e.type === "turn").length, 2);
 	assert.ok(events.some((e) => e.type === "text" && e.text.includes("Finished the ticket.")));
 	assert.deepEqual(events.at(-1), { type: "end", stopReason: "stop" });
+	const context = events.filter((e) => e.type === "context");
+	assert.ok(context.length >= 1, "context fill is reported for maxContextPct budgets");
+	assert.ok(context[0].percent > 0 && context[0].percent < 100);
 });
 
 test("a provider error in a real pi shift becomes an error event and ends the shift", { timeout: 90_000 }, async () => {

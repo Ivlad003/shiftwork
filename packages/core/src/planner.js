@@ -38,10 +38,8 @@ export function planShift({ ticket, config, history = {} }) {
 				model: nextModel,
 				thinking: config.tiers?.[nextTier]?.thinking ?? thinking,
 				skills: resolveSkills({ ticket, tier: config.tiers?.[nextTier], skillGroups: config.skillGroups ?? {}, skillSources: config.skillSources ?? {} }),
-				budget: mergeBudgets(
-					config.budgets?.default,
-					config.tiers?.[nextTier]?.budget,
-					config.budgets?.models?.[nextModel],
+				budget: capBudget(
+					mergeBudgets(config.budgets?.default, config.tiers?.[nextTier]?.budget, config.budgets?.models?.[nextModel]),
 					capBudgetRemaining(ticketBudget, history.ticketUsage),
 				),
 				onExceed,

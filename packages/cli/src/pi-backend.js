@@ -92,6 +92,16 @@ export function createPiBackend(options = {}) {
 					if (mapped.type === "turn") lastStop = mapped.stopReason;
 					queue.push(mapped);
 				}
+				// Context fill for budgets (maxContextPct): pi reports it through session stats.
+				if (event.type === "message_end" && event.message?.role === "assistant") {
+					client
+						.getSessionStats()
+						.then((stats) => {
+							const usage = stats.contextUsage;
+							if (usage?.percent != null) queue.push({ type: "context", percent: usage.percent, tokens: usage.tokens, contextWindow: usage.contextWindow });
+						})
+						.catch(() => {});
+				}
 				if (event.type === "agent_settled") finish(lastStop === "error" ? "error" : (lastStop ?? "stop"));
 			});
 

@@ -146,3 +146,19 @@ test("planShift: a handoff picks the next model in the chain", () => {
 	assert.equal(second.model, "fake/m2");
 	assert.equal(second.budget.maxTurns, 10); // new model has no override, tier budget applies
 });
+
+test("planShift: after a handoff, the remaining ticket budget caps the shift budget but never raises it", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: budgetConfig });
+	const plenty = planShift({
+		ticket: t({ type: "code" }),
+		config: budgetConfig,
+		history: { previousRoute: first, exceededKind: "maxTurns", ticketUsage: { maxCostUsd: 1 } },
+	});
+	const little = planShift({
+		ticket: t({ type: "code" }),
+		config: budgetConfig,
+		history: { previousRoute: first, exceededKind: "maxTurns", ticketUsage: { maxCostUsd: 4.5 } },
+	});
+	assert.equal(plenty.budget.maxCostUsd, 2, "tier budget $2 stays when $4 of the ticket budget is left");
+	assert.equal(little.budget.maxCostUsd, 0.5, "only $0.5 of the ticket budget is left");
+});
