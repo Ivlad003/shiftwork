@@ -250,3 +250,26 @@ live(
 		assert.deepEqual(events.at(-1), { type: "end", stopReason: "stop" });
 	},
 );
+
+test("the codex sandbox is configurable: approve-for-me by default, bypass for already isolated worktrees", { timeout: 30_000 }, async () => {
+	const { mkdtemp: mk, writeFile: wf, chmod: ch, readFile: rf } = await import("node:fs/promises");
+	const { tmpdir: td } = await import("node:os");
+	const { join: j } = await import("node:path");
+	const { createCodexBackend } = await import("../src/codex-backend.js");
+	const binDir = await mk(j(td(), "sw-codex-args-"));
+	const record = j(binDir, "args.json");
+	await wf(j(binDir, "codex"), `#!/usr/bin/env node\nrequire("fs").writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));\n`);
+	await ch(j(binDir, "codex"), 0o755);
+	const argsFor = async (options) => {
+		const backend = createCodexBackend({ ...options, env: { PATH: `${binDir}:${process.env.PATH}` } });
+		const shift = await backend.startShift({ cwd: await mk(j(td(), "sw-codex-cwd-")), route: { model: "gpt-x", skills: { paths: [], preload: [] } }, prompt: "p", systemPrompt: "s" });
+		for await (const event of shift.events) if (event.type === "end") break;
+		await shift.close?.();
+		return JSON.parse(await rf(record, "utf8"));
+	};
+
+	assert.ok((await argsFor({})).includes("--approve-for-me"));
+	assert.ok((await argsFor({ sandbox: "bypass" })).includes("--dangerously-bypass-approvals-and-sandbox"));
+	const ww = await argsFor({ sandbox: "workspace-write" });
+	assert.deepEqual(ww.slice(ww.indexOf("--sandbox"), ww.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+});

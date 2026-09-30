@@ -11,6 +11,8 @@ import { classifyError } from "shiftwork-core";
  * The worker prompt is prepended to the prompt.
  * Options: { command?: "codex", args?: string[], env?: object, timeoutMs?: number }
  */
+const SAFETY_TIMEOUT_MS = 3 * 60 * 60_000;
+
 export function createCodexBackend(options = {}) {
 	const command = options.command ?? "codex";
 
@@ -73,7 +75,13 @@ export function createCodexBackend(options = {}) {
 			const dir = await mkdtemp(join(tmpdir(), "shiftwork-codex-"));
 			const lastFile = join(dir, "last-message.txt");
 
-			const args = ["exec", "-m", route.model, "--json", "--approve-for-me"];
+			// Sandbox: "approve-for-me" (default; codex's workspace-write sandbox with automatic review),
+			// "workspace-write", or "bypass" for environments that are already isolated (the ticket's worktree
+			// is), e.g. where bwrap can't create a sandbox.
+			const sandbox = options.sandbox ?? "approve-for-me";
+			const sandboxArgs =
+				sandbox === "bypass" ? ["--dangerously-bypass-approvals-and-sandbox"] : sandbox === "workspace-write" ? ["--sandbox", "workspace-write"] : ["--approve-for-me"];
+			const args = ["exec", "-m", route.model, "--json", ...sandboxArgs];
 			args.push(...(options.args ?? []));
 			args.push("-o", lastFile);
 			args.push(fullPrompt);
@@ -105,7 +113,8 @@ export function createCodexBackend(options = {}) {
 			const child = execFile(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
-				timeout: options.timeoutMs ?? 60 * 60_000,
+				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
+				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
 				maxBuffer: 256 * 1024 * 1024,
 			});
 

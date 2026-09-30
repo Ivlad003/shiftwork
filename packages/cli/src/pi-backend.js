@@ -97,11 +97,13 @@ export function createPiBackend(options = {}) {
 				await client.stop().catch(() => {});
 				await rm(dir, { recursive: true, force: true });
 			};
+			// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
+			const timeoutMs = options.timeoutMs ?? 3 * 60 * 60_000;
 			const timer = setTimeout(() => {
-				queue.push({ type: "error", message: `shift timed out after ${options.timeoutMs} ms` });
+				queue.push({ type: "error", message: `shift timed out after ${Math.round(timeoutMs / 60_000)} min (safety timeout)` });
 				client.abort().catch(() => {});
 				finish("timeout");
-			}, options.timeoutMs ?? 60 * 60_000);
+			}, timeoutMs);
 
 			let lastStop = null;
 			client.onEvent((event) => {

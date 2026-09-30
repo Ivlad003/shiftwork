@@ -170,7 +170,7 @@ async function run(argv) {
 	const { createBackend } = await import("../src/backend-registry.js");
 	const { createJevClassifier } = await import("../src/jev.js");
 	const { runVerify } = await import("../src/verify.js");
-	const backend = createBackend({ pi: config.pi, claude: config.claude });
+	const backend = createBackend({ pi: config.pi, claude: config.claude, codex: config.codex, opencode: config.opencode, grok: config.grok, cursor: config.cursor });
 	const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 	const classifyTicket = createJevClassifier({ config, agentDir });
 	const workspace = await createWorkspace(root, config, values["no-worktree"]);

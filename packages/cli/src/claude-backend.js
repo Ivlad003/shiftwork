@@ -8,6 +8,8 @@ import { classifyError } from "shiftwork-core";
  * Claude Code backend: `claude -p` with `--output-format stream-json`.
  * Options: { command?: "claude", args?: string[], env?: object, timeoutMs?: number }
  */
+const SAFETY_TIMEOUT_MS = 3 * 60 * 60_000;
+
 export function createClaudeBackend(options = {}) {
 	const command = options.command ?? "claude";
 
@@ -99,7 +101,8 @@ export function createClaudeBackend(options = {}) {
 			const child = execFile(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
-				timeout: options.timeoutMs ?? 60 * 60_000,
+				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
+				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
 				maxBuffer: 256 * 1024 * 1024,
 			});
 
