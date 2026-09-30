@@ -1,0 +1,47 @@
+{
+  "name": "pi-shiftwork",
+  "version": "0.0.1",
+  "description": "Shiftwork for pi (pi.dev): /shift command over markdown tickets; ticket runner, skill tiers, model budgets and provider fallback are in development.",
+  "license": "MIT",
+  "author": "ivlad003 <ivlad003@gmail.com>",
+  "homepage": "https://github.com/Ivlad003/shiftwork#readme",
+  "bugs": {
+    "url": "https://github.com/Ivlad003/shiftwork/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivlad003/shiftwork.git",
+    "directory": "packages/pi"
+  },
+  "keywords": [
+    "pi-package",
+    "shiftwork",
+    "pi",
+    "pi-coding-agent",
+    "agents",
+    "autonomous"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "shiftwork-core": "0.0.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

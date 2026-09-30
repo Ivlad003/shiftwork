@@ -1,0 +1,44 @@
+{
+  "name": "shiftwork-core",
+  "version": "0.0.1",
+  "description": "Shiftwork core: parse markdown tickets (.scratch/<feature>/issues/NN-*.md) and compute the frontier of ready tickets. No pi/OpenCode dependencies.",
+  "license": "MIT",
+  "author": "ivlad003 <ivlad003@gmail.com>",
+  "homepage": "https://github.com/Ivlad003/shiftwork#readme",
+  "bugs": {
+    "url": "https://github.com/Ivlad003/shiftwork/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivlad003/shiftwork.git",
+    "directory": "packages/core"
+  },
+  "keywords": [
+    "shiftwork",
+    "agents",
+    "autonomous",
+    "tickets",
+    "ralph-loop",
+    "llm"
+  ],
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}

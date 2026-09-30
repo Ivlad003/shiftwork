@@ -1,0 +1,46 @@
+{
+  "name": "shiftwork",
+  "version": "0.0.1",
+  "description": "Shiftwork CLI: autonomous agents working in shifts - a fresh context per ticket, model handoff on budgets and provider limits (pi, Claude Code, Codex, OpenCode).",
+  "license": "MIT",
+  "author": "ivlad003 <ivlad003@gmail.com>",
+  "homepage": "https://github.com/Ivlad003/shiftwork#readme",
+  "bugs": {
+    "url": "https://github.com/Ivlad003/shiftwork/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivlad003/shiftwork.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "shiftwork",
+    "agents",
+    "autonomous",
+    "cli",
+    "pi",
+    "opencode",
+    "claude-code",
+    "codex",
+    "openrouter",
+    "ralph-loop"
+  ],
+  "bin": {
+    "shiftwork": "./bin/shiftwork.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "shiftwork-core": "0.0.1"
+  }
+}

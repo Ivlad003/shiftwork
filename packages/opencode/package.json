@@ -1,0 +1,36 @@
+{
+  "name": "opencode-shiftwork",
+  "version": "0.0.1",
+  "description": "Shiftwork for OpenCode V2 (in development): fresh session per ticket, per-tier skill permissions, model handoff on budgets and provider limits.",
+  "license": "MIT",
+  "author": "ivlad003 <ivlad003@gmail.com>",
+  "homepage": "https://github.com/Ivlad003/shiftwork#readme",
+  "bugs": {
+    "url": "https://github.com/Ivlad003/shiftwork/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivlad003/shiftwork.git",
+    "directory": "packages/opencode"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "shiftwork",
+    "agents",
+    "autonomous"
+  ],
+  "main": "./src/index.js",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
+}
