@@ -931,3 +931,42 @@ test("a failing classifier falls back to the default type and notes it", async (
 	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
 	assert.match(await ticketText(root, "f", "01-a.md"), /Type: code \(default\); Jev unavailable, used default type/);
 });
+
+test("a profile contextWindow rescales fake-backend context fill from tokens", async () => {
+	const profileConfig = {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 3,
+		maxHandoffs: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "fake/m2"], thinking: "low", budget: { maxContextPct: 50 } } },
+		models: { "fake/m1": { contextWindow: 1000 } },
+		onExceed: { maxContextPct: { to: "next", mode: "new-process" } },
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+	};
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			events: [
+				{ type: "context", percent: 10, tokens: 800, contextWindow: 8000 },
+				{ type: "end", stopReason: "stop" },
+			],
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: profileConfig,
+	});
+
+	assert.equal(summary.exitCode, 0);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /budget\.maxContextPct/);
+});

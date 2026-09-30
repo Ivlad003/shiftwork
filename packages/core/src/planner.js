@@ -5,7 +5,8 @@
  * Untyped tickets with classification.complexity=complex raise the tier by one.
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
- * Budgets merge model → tier → default, then are capped by the ticket budget.
+ * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, then are capped by the ticket budget.
+ * A model profile's thinking wins over the tier's; its contextWindow is used for context fill.
  * @returns {object} a Route, or `{ wait: Date }` when every candidate is cooling down
  */
 export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date(), classification } = {}) {
@@ -55,7 +56,8 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 
 function buildRoute({ ticket, config, type, typeSource, model, tierName, thinking, history, onExceed, capRemaining = false }) {
 	const tier = tierName ?? tierForModel(model, config);
-	const think = thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
+	const profile = config.models?.[model];
+	const think = profile?.thinking ?? thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
 	const skills = resolveSkills({
 		ticket,
 		tier: config.tiers?.[tier],
@@ -64,10 +66,21 @@ function buildRoute({ ticket, config, type, typeSource, model, tierName, thinkin
 	});
 	const ticketBudget = resolveTicketBudget(ticket, config);
 	const budget = capBudget(
-		mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model]),
+		mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget),
 		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
 	);
-	return { backend: "pi", type, typeSource, tier, model, thinking: think, skills, budget, onExceed };
+	return {
+		backend: "pi",
+		type,
+		typeSource,
+		tier,
+		model,
+		thinking: think,
+		skills,
+		budget,
+		onExceed,
+		contextWindow: profile?.contextWindow,
+	};
 }
 
 /** Conventional tier ladder. Jev `complexity=complex` raises one step. */

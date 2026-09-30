@@ -24,5 +24,23 @@ export function formatDryRunLine(ticket, route) {
 		return `${ticket.feature}/${ticket.number}  wait until ${new Date(route.wait).toISOString()}  ${ticket.title ?? ""}`;
 	}
 	const source = ticket.type ? "" : route.typeSource === "jev" ? " (jev)" : " (default)";
-	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.model}  thinking=${route.thinking}  ${ticket.title ?? ""}`;
+	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}  ${ticket.title ?? ""}`;
+}
+
+const BUDGET_PARTS = [
+	["maxCostUsd", (v) => `$${v}`],
+	["maxTokens", (v) => `${v} tok`],
+	["maxTurns", (v) => `${v} turns`],
+	["maxWallMin", (v) => `${v} min`],
+	["maxContextPct", (v) => `${v}% ctx`],
+	["stallTurns", (v) => `${v} stall`],
+];
+
+export function formatBudget(budget) {
+	if (!budget) return "-";
+	const parts = [];
+	for (const [key, fmt] of BUDGET_PARTS) {
+		if (budget[key] !== undefined && budget[key] !== null) parts.push(fmt(budget[key]));
+	}
+	return parts.length ? parts.join(" · ") : "-";
 }

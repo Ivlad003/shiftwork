@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createMeter } from "../src/meter.js";
+import { applyProfileContext, createMeter } from "../src/meter.js";
 
 const turn = (tokens = 100, costUsd = 0.01) => ({
 	type: "turn",
@@ -102,6 +102,26 @@ test("meter: stallTurns is hard-only, no soft limit", () => {
 	assert.equal(results.length, 1);
 	assert.equal(results[0].level, "hard");
 	assert.equal(results[0].kind, "stallTurns");
+});
+
+test("applyProfileContext: tokens are percent of the profile window", () => {
+	const event = { type: "context", percent: 10, tokens: 800, contextWindow: 8000 };
+	assert.deepEqual(applyProfileContext(event, 1000), {
+		type: "context",
+		percent: 80,
+		tokens: 800,
+		contextWindow: 1000,
+	});
+});
+
+test("applyProfileContext: leaves backend percent when the profile has no window", () => {
+	const event = { type: "context", percent: 10, tokens: 800, contextWindow: 8000 };
+	assert.equal(applyProfileContext(event, undefined), event);
+});
+
+test("applyProfileContext: leaves backend percent when the event has no tokens", () => {
+	const event = { type: "context", percent: 10 };
+	assert.equal(applyProfileContext(event, 1000), event);
 });
 
 function advancingNow(start, step) {

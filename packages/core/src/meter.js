@@ -1,4 +1,15 @@
 /**
+ * Rescale a context event to a profile window (`percent = tokens / contextWindow * 100`).
+ * Leaves the event unchanged when the profile has no window or the event has no token count.
+ */
+export function applyProfileContext(event, contextWindow) {
+	if (event?.type !== "context" || contextWindow == null || !(contextWindow > 0) || event.tokens == null) {
+		return event;
+	}
+	return { ...event, percent: (event.tokens / contextWindow) * 100, contextWindow };
+}
+
+/**
  * Observe a shift's events against a budget and report soft/hard limits.
  * Pure: the clock is injected via `options.now`.
  */

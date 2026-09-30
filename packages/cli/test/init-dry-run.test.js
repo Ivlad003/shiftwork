@@ -63,8 +63,8 @@ test("run --dry-run prints each frontier ticket's route and spends nothing", asy
 
 	const { stdout } = await exec(["run", "--dry-run", "--dir", root, "--feature", "f"]);
 
-	assert.match(stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low/);
-	assert.match(stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium/);
+	assert.match(stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=\$8 · 40 turns · 45 min · 60% ctx · 5 stall/);
+	assert.match(stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=\$1\.5 · 3000000 tok · 60 turns · 45 min · 8 stall/);
 	assert.doesNotMatch(stdout, /g\/01/);
 });
 
@@ -96,5 +96,15 @@ test("a dry run shows type (jev) for classified tickets", async () => {
 	});
 	assert.match(lines[0], /f\/01 {2}type=git {2}tier=quick/);
 	assert.match(lines[1], /f\/02 {2}type=git \(jev\) {2}tier=quick {2}model=prov\/model-a {2}thinking=low/);
-	assert.equal(formatDryRunLine({ feature: "f", number: "02", title: "Build it" }, { type: "git", typeSource: "jev", tier: "quick", model: "prov/model-a", thinking: "low" }), "f/02  type=git (jev)  tier=quick  model=prov/model-a  thinking=low  Build it");
+	assert.equal(formatDryRunLine({ feature: "f", number: "02", title: "Build it" }, { type: "git", typeSource: "jev", tier: "quick", model: "prov/model-a", thinking: "low" }), "f/02  type=git (jev)  tier=quick  model=prov/model-a  thinking=low  budget=-  Build it");
+});
+
+test("formatDryRunLine shows the effective budget", () => {
+	assert.equal(
+		formatDryRunLine(
+			{ feature: "f", number: "01", title: "Build it", type: "code" },
+			{ type: "code", tier: "standard", model: "prov/m", thinking: "medium", budget: { maxCostUsd: 1, maxTurns: 10, maxContextPct: 70 } },
+		),
+		"f/01  type=code  tier=standard  model=prov/m  thinking=medium  budget=$1 · 10 turns · 70% ctx  Build it",
+	);
 });

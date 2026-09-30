@@ -33,6 +33,7 @@ export interface Route {
 	skills: { paths: string[]; preload: string[]; warnings: string[]; restricted: boolean };
 	budget: Budget;
 	onExceed: Record<string, { to?: string; mode?: string }>;
+	contextWindow?: number;
 }
 
 export declare function parseTicket(markdown: string, path?: string): Ticket;
@@ -96,6 +97,11 @@ export interface Limit {
   current: number;
   limit: number;
 }
+
+export declare function applyProfileContext(
+  event: { type: string } & Record<string, unknown>,
+  contextWindow?: number,
+): { type: string } & Record<string, unknown>;
 
 export declare function createMeter(
   budget: Budget,

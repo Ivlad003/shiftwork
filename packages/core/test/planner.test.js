@@ -143,6 +143,11 @@ const invalid = [
 	[{ model: "fake/m1", tiers: { quick: { chain: ["fake/m1"], skills: ["g"], preload: ["other"] } }, skillGroups: { g: [], other: [] } }, /tiers\.quick\.preload: preload group "other" is not in tier skills/],
 	[{ model: "fake/m1", jev: { model: "no-slash" } }, /jev\.model: expected "provider\/model"/],
 	[{ model: "fake/m1", allowInPlace: "yes" }, /allowInPlace: must be true or false/],
+	[{ model: "fake/m1", models: "nope" }, /models: must be an object/],
+	[{ model: "fake/m1", models: { "fake/m1": { thinking: "huge" } } }, /models\.fake\/m1\.thinking: must be one of/],
+	[{ model: "fake/m1", models: { "fake/m1": { contextWindow: 0 } } }, /models\.fake\/m1\.contextWindow: must be a positive finite number/],
+	[{ model: "fake/m1", models: { "fake/m1": { budget: { nope: 1 } } } }, /models\.fake\/m1\.budget\.nope: unknown budget field/],
+	[{ model: "fake/m1", models: { "fake/m1": { extra: 1 } } }, /models\.fake\/m1\.extra: unknown profile field/],
 ];
 
 for (const [input, message] of invalid) {
@@ -187,6 +192,91 @@ test("planShift: budgets merge model over tier over default", () => {
 	const route = planShift({ ticket: t({ type: "code" }), config: budgetConfig });
 	assert.equal(route.budget.maxTurns, 10); // tier wins over default
 	assert.equal(route.budget.maxCostUsd, 1); // model wins over tier
+});
+
+test("planShift: budgets merge default → tier → budgets.models → models.budget", () => {
+	const cfg = validateConfig({
+		model: "fake/m1",
+		thinking: "low",
+		routing: { code: { tier: "standard" } },
+		tiers: {
+			standard: { chain: ["fake/m1"], budget: { maxTurns: 10, maxCostUsd: 2, maxTokens: 1000 } },
+		},
+		budgets: {
+			default: { maxTurns: 20, maxCostUsd: 5, maxTokens: 5000, maxWallMin: 45 },
+			models: { "fake/m1": { maxCostUsd: 1, maxTokens: 800 } },
+		},
+		models: {
+			"fake/m1": { budget: { maxCostUsd: 0.25 } },
+		},
+	});
+	const route = planShift({ ticket: t({ type: "code" }), config: cfg });
+	assert.equal(route.budget.maxTurns, 10, "tier wins over default");
+	assert.equal(route.budget.maxTokens, 800, "legacy budgets.models wins over tier");
+	assert.equal(route.budget.maxCostUsd, 0.25, "models.budget wins over legacy budgets.models");
+	assert.equal(route.budget.maxWallMin, 45, "default remains when nothing overrides it");
+});
+
+test("planShift: models.budget is still capped by the ticket Budget line", () => {
+	const cfg = validateConfig({
+		model: "fake/m1",
+		thinking: "low",
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], budget: { maxCostUsd: 2, maxTurns: 10 } } },
+		models: { "fake/m1": { budget: { maxCostUsd: 1, maxTurns: 8 } } },
+	});
+	const route = planShift({ ticket: t({ type: "code", budget: "$0.5 · 5 turns" }), config: cfg });
+	assert.equal(route.budget.maxCostUsd, 0.5);
+	assert.equal(route.budget.maxTurns, 5);
+});
+
+test("planShift: a model without a profile keeps default and tier budgets", () => {
+	const cfg = validateConfig({
+		model: "fake/m2",
+		thinking: "low",
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m2"], budget: { maxTurns: 10 } } },
+		budgets: { default: { maxWallMin: 45 }, models: { "fake/m1": { maxCostUsd: 1 } } },
+		models: { "fake/m1": { budget: { maxCostUsd: 0.25 } } },
+	});
+	const route = planShift({ ticket: t({ type: "code" }), config: cfg });
+	assert.equal(route.budget.maxTurns, 10);
+	assert.equal(route.budget.maxWallMin, 45);
+	assert.equal(route.budget.maxCostUsd, undefined);
+});
+
+test("planShift: profile thinking wins over the tier's", () => {
+	const cfg = validateConfig({
+		model: "fake/m1",
+		thinking: "low",
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "high" } },
+		models: { "fake/m1": { thinking: "max" } },
+	});
+	const route = planShift({ ticket: t({ type: "code" }), config: cfg });
+	assert.equal(route.thinking, "max");
+});
+
+test("planShift: profile thinking wins over routing thinking", () => {
+	const cfg = validateConfig({
+		model: "fake/m1",
+		thinking: "low",
+		routing: { code: { tier: "standard", thinking: "minimal" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "high" } },
+		models: { "fake/m1": { thinking: "xhigh" } },
+	});
+	const route = planShift({ ticket: t({ type: "code" }), config: cfg });
+	assert.equal(route.thinking, "xhigh");
+});
+
+test("planShift: profile contextWindow is on the route", () => {
+	const cfg = validateConfig({
+		model: "fake/m1",
+		thinking: "low",
+		models: { "fake/m1": { contextWindow: 32000 } },
+	});
+	const route = planShift({ ticket: t(), config: cfg });
+	assert.equal(route.contextWindow, 32000);
 });
 
 test("planShift: ticket Budget line caps the shift budget", () => {

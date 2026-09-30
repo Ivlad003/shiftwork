@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
-import { createMeter } from "./meter.js";
+import { applyProfileContext, createMeter } from "./meter.js";
 import { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
@@ -567,14 +567,15 @@ async function runShift(backend, request, log) {
 	}
 	try {
 		for await (const event of shift.events) {
-			log(event);
+			const observed = applyProfileContext(event, currentRoute.contextWindow);
+			log(observed);
 			let limit = null;
-			if (event.type === "turn") {
+			if (observed.type === "turn") {
 				result.turns++;
-				result.usage.input += event.usage?.input ?? 0;
-				result.usage.output += event.usage?.output ?? 0;
-				result.usage.totalTokens += event.usage?.totalTokens ?? 0;
-				result.costUsd += event.costUsd ?? 0;
+				result.usage.input += observed.usage?.input ?? 0;
+				result.usage.output += observed.usage?.output ?? 0;
+				result.usage.totalTokens += observed.usage?.totalTokens ?? 0;
+				result.costUsd += observed.costUsd ?? 0;
 				// Feed a diff-stat snapshot after each turn so stall detection can work.
 				if (request.getDiffStat) {
 					try {
@@ -582,11 +583,11 @@ async function runShift(backend, request, log) {
 						limit = meter.observe({ type: "diffStat", stat });
 					} catch {}
 				}
-			} else if (event.type === "context") {
-				contextTokens = event.tokens ?? contextTokens;
+			} else if (observed.type === "context") {
+				contextTokens = observed.tokens ?? contextTokens;
 			}
 
-			limit = meter.observe(event) ?? limit;
+			limit = meter.observe(observed) ?? limit;
 			if (exceededKind !== "stop" && request.root && checkStop(request.root)) {
 				await beginGrace(STOP_STEER, "stop");
 			}

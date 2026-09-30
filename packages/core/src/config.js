@@ -15,6 +15,7 @@ const DEFAULTS = {
 	cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
 	skillGroups: {},
 	skillSources: {},
+	models: {},
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
@@ -52,6 +53,7 @@ export function validateConfig(input) {
 	}
 
 	checkBudgets(config.budgets, "budgets");
+	checkModels(config.models, "models");
 	checkOnExceed(config.onExceed, "onExceed");
 	checkCrossTier(config.crossTier, "crossTier");
 	if (typeof config.allowInPlace !== "boolean") fail("allowInPlace", "must be true or false");
@@ -110,6 +112,28 @@ export function validateConfig(input) {
 	}
 
 	return config;
+}
+
+const PROFILE_FIELDS = ["contextWindow", "thinking", "budget"];
+
+function checkModels(value, path) {
+	if (value === undefined) return;
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const [ref, profile] of Object.entries(value)) checkProfile(profile, `${path}.${ref}`);
+}
+
+function checkProfile(value, path) {
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const key of Object.keys(value)) {
+		if (!PROFILE_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown profile field; expected one of ${PROFILE_FIELDS.join(", ")}`);
+	}
+	if (value.contextWindow !== undefined && value.contextWindow !== null) {
+		if (typeof value.contextWindow !== "number" || !Number.isFinite(value.contextWindow) || value.contextWindow <= 0) {
+			fail(`${path}.contextWindow`, "must be a positive finite number");
+		}
+	}
+	checkThinking(value.thinking, `${path}.thinking`, { optional: true });
+	checkBudget(value.budget, `${path}.budget`);
 }
 
 function checkBudgets(value, path) {
