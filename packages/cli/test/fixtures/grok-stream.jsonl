@@ -1,0 +1,20 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","write"],"commands":["compact","context"]}
+{"type":"text","data":"I'll"}
+{"type":"text","data":" create"}
+{"type":"text","data":" `"}
+{"type":"text","data":"hello"}
+{"type":"text","data":".txt"}
+{"type":"text","data":"`"}
+{"type":"text","data":" with"}
+{"type":"text","data":" the"}
+{"type":"text","data":" text"}
+{"type":"text","data":" you"}
+{"type":"text","data":" specified"}
+{"type":"text","data":"."}
+{"type":"usage","usage":{"input_tokens":17692,"output_tokens":83,"cache_read_input_tokens":2944,"cache_creation_input_tokens":0,"reasoning_tokens":44}}
+{"type":"tool_call","toolCallId":"call-f02a607e-ecf9-4b8d-ba09-cde8eca5609c-0","title":"write","kind":"write","status":"pending","toolName":"write","rawInput":{"file_path":"/work/hello.txt","content":"hello world"},"content":[],"locations":[]}
+{"type":"tool_call_update","toolCallId":"call-f02a607e-ecf9-4b8d-ba09-cde8eca5609c-0","status":null,"content":[{"type":"diff","path":"/work/hello.txt","oldText":"","newText":"hello world"}],"rawOutput":null,"locations":[{"path":"/work/hello.txt"}]}
+{"type":"tool_call_update","toolCallId":"call-f02a607e-ecf9-4b8d-ba09-cde8eca5609c-0","status":"completed","content":[{"type":"diff","path":"/work/hello.txt","oldText":"","newText":"hello world","_meta":{"details":[{"old_string":"","old_line":1,"new_string":"hello world","new_line":1,"context_before":"","context_after":"","line_prefix":""}]}}],"rawOutput":{"type":"SearchReplace","EditsApplied":{"old_string":"","new_string":"hello world","tool_output_for_prompt":"The file /work/hello.txt has been created.","tool_output_for_prompt_concise":"The file /work/hello.txt has been created.","absolute_path":"/work/hello.txt","edits":{"details":[{"old_string":"","old_line":1,"new_string":"hello world","new_line":1,"context_before":"","context_after":"","line_prefix":""}]}}},"locations":[]}
+{"type":"text","data":"DONE"}
+{"type":"usage","usage":{"input_tokens":140,"output_tokens":20,"cache_read_input_tokens":20608,"cache_creation_input_tokens":0,"reasoning_tokens":19}}
+{"type":"end","stopReason":"end_turn","usage":{"input_tokens":17832,"cache_read_input_tokens":23552,"cache_creation_input_tokens":0,"output_tokens":103,"reasoning_tokens":63,"total_tokens":41487},"num_turns":2,"total_cost_usd":0.01633972,"total_cost_usd_ticks":163397200,"modelUsage":{"grok-4.7-build":{"inputTokens":17832,"outputTokens":103,"cacheReadInputTokens":23552,"cacheCreationInputTokens":0,"modelCalls":2,"costUSD":0.01633972}}}

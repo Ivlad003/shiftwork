@@ -9,6 +9,7 @@ const USAGE = pattern([
 	"usage.?limit.?reached",
 	"usage.?limit.?resets",
 	"hit your (?:claude |openai |chatgpt )?(?:usage |token )?limit",
+	"hit your weekly limit",
 	"reached your (?:claude |openai |chatgpt )?(?:usage |token )?limit",
 	"claude code usage limit",
 	"claude code limit",
@@ -19,6 +20,7 @@ const QUOTA = pattern([
 	"out of budget",
 	"quota exceeded",
 	"exceeded your (?:current )?quota",
+	"out of credits",
 	"billing",
 ]);
 

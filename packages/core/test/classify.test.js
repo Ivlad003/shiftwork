@@ -13,6 +13,7 @@ const cases = [
 	["rate_limit_error", , "rate"],
 	["ResourceExhausted", , "rate"],
 	["This request would exceed your organization's rate limit", , "rate"],
+	["You've hit the rate limit for your plan.", , "rate"],
 
 	// Usage: OpenCode, ChatGPT, Claude wording. Beats a wrapping 429.
 	["GoUsageLimitError", , "usage"],
@@ -24,12 +25,15 @@ const cases = [
 	["usage limit reached", , "usage"],
 	["Claude Code usage limit reached", , "usage"],
 	["Claude Code limit resets at 2026-10-01T00:00:00Z", , "usage"],
+	["You hit your weekly limit. Upgrade to a higher tier for more usage.", , "usage"],
 	["available balance required to continue", , "usage"],
 
 	// Quota / billing
 	["insufficient_quota", , "quota"],
 	["You exceeded your current quota", , "quota"],
 	["quota exceeded", , "quota"],
+	["Agent-message quota exceeded (resets at 2026-10-01T00:00:00Z)", , "quota"],
+	["You've run out of credits. Purchase credits to keep using Grok Build.", , "quota"],
 	["out of budget", , "quota"],
 	["billing hard limit reached", , "quota"],
 

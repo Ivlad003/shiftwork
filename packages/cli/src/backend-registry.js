@@ -1,6 +1,7 @@
 import { parseModelRef } from "shiftwork-core";
 import { createClaudeBackend } from "./claude-backend.js";
 import { createCodexBackend } from "./codex-backend.js";
+import { createGrokBackend } from "./grok-backend.js";
 import { createOpencodeBackend } from "./opencode-backend.js";
 import { createPiBackend } from "./pi-backend.js";
 
@@ -14,6 +15,7 @@ export function createBackend(options = {}) {
 		claude: createClaudeBackend(options.claude ?? {}),
 		codex: createCodexBackend(options.codex ?? {}),
 		opencode: createOpencodeBackend(options.opencode ?? {}),
+		grok: createGrokBackend(options.grok ?? {}),
 	};
 
 	return {
