@@ -1,6 +1,6 @@
 # Shiftwork guide
 
-A plain-language walk through setting Shiftwork up and running it. Words in **bold** are defined in [CONTEXT.md](../CONTEXT.md).
+A plain-language walk through setting Shiftwork up and running it. Words in **bold** are defined in [CONTEXT.md](../CONTEXT.md). [Українська версія](guide.uk.md).
 
 ## How it works, in one paragraph
 
