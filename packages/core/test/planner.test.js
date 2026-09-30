@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chooseHandoffMode, planShift, validateConfig } from "../src/index.js";
+import { chooseHandoffMode, planShift, skillsForModel, validateConfig } from "../src/index.js";
 
 const config = validateConfig({
 	defaultType: "code",
@@ -152,6 +152,19 @@ test("planShift: without skill config the shift isn't restricted, so backend dis
 	const route = planShift({ ticket: t(), config: validateConfig({ model: "a/b" }) });
 	assert.equal(route.skills.restricted, false);
 	assert.deepEqual(route.skills.paths, []);
+});
+
+test("skillsForModel: a model in a tier gets that tier's skill paths", () => {
+	const { tier, skills } = skillsForModel("anthropic/sonnet", config);
+	assert.equal(tier, "standard");
+	assert.deepEqual(skills.paths, ["/skills/shiftwork", "/skills/design-system"]);
+	assert.equal(skills.restricted, true);
+});
+
+test("skillsForModel: a model without a tier is unrestricted", () => {
+	const { tier, skills } = skillsForModel("openrouter/unknown", config);
+	assert.equal(tier, undefined);
+	assert.equal(skills.restricted, false);
 });
 
 const budgetConfig = validateConfig({
