@@ -17,3 +17,13 @@ test("Blocked by, Type, Model and Skills are parsed", () => {
 	const t = parseTicket("# 07: B\n\n**Blocked by:** 03, 05\n\n**Status:** claimed\n**Type:** git\n**Model:** xai/grok-4.7\n**Skills:** +design -git\n");
 	assert.deepEqual([t.number, t.status, t.blockedBy, t.type, t.model, t.skills], ["07", "claimed", ["03", "05"], "git", "xai/grok-4.7", ["+design", "-git"]]);
 });
+
+test("frontier resolves blockers within the same feature only", async () => {
+	const { frontier } = await import("../src/index.js");
+	const tickets = [
+		{ feature: "new", number: "01", status: "ready-for-agent", blockedBy: [], path: "n1" },
+		{ feature: "new", number: "02", status: "ready-for-agent", blockedBy: ["01"], path: "n2" },
+		{ feature: "old", number: "01", status: "resolved", blockedBy: [], path: "o1" },
+	];
+	assert.deepEqual(frontier(tickets).map((t) => `${t.feature}/${t.number}`), ["new/01"]);
+});

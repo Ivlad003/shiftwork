@@ -69,10 +69,12 @@ function pad(number) {
 
 /** Tickets that are ready for an agent and whose blockers are all resolved, lowest number first. */
 export function frontier(tickets) {
-	const status = new Map(tickets.map((t) => [t.number, t.status]));
+	// Blockers are ticket numbers within the same feature.
+	const key = (feature, number) => `${feature ?? ""}/${number}`;
+	const status = new Map(tickets.map((t) => [key(t.feature, t.number), t.status]));
 	return tickets
-		.filter((t) => t.status === READY && t.blockedBy.every((n) => status.get(n) === RESOLVED))
-		.sort((a, b) => Number(a.number) - Number(b.number));
+		.filter((t) => t.status === READY && t.blockedBy.every((n) => status.get(key(t.feature, n)) === RESOLVED))
+		.sort((a, b) => Number(a.number) - Number(b.number) || String(a.feature).localeCompare(String(b.feature)));
 }
 
 /** Read every `.scratch/<feature>/issues/*.md` under `root`. */
