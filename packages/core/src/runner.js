@@ -542,6 +542,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 						`- Landing conflict with ${landed.conflict.files.join(", ") || "the target"}; redone on top of ${landed.conflict.commit}`,
 					);
 					redoNext = true;
+					// The report says what happens next: this shift's work is redone, not resolved.
+					decision = { action: "redo", reason: "landing conflict" };
 				} else {
 					decision = { action: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
 				}
@@ -719,6 +721,8 @@ function formatReviewComment({ route, verdict, reason, warning, verifyResult, sh
 	else if (verifyResult) {
 		const failed = verifyResult.results.find((r) => r.code !== 0) ?? verifyResult;
 		lines.push(`- Verify: failed at \`${failed.cmd}\` (exit ${failed.code})`);
+		// The failing output, as in a shift report: a verdict of accept over a red gate needs its why.
+		if (failed.outputTail) lines.push("", "```", failed.outputTail.trimEnd(), "```", "");
 	} else lines.push("- Verify: not run");
 	for (const w of shift.warnings ?? []) lines.push(`- Warning: ${w}`);
 	if (warning) lines.push(`- Warning: ${warning}`);
@@ -1125,7 +1129,9 @@ function shiftReport({ number, route, shift, verifyResult, decision, classificat
 	const outcome =
 		decision.action === "resolve"
 			? "resolved"
-			: decision.action === "retry"
+			: decision.action === "redo"
+				? "redo on the new target (landing conflict)"
+				: decision.action === "retry"
 				? "new attempt"
 				: decision.action === "stop"
 					? `stopped: ${decision.reason}`

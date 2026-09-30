@@ -250,6 +250,8 @@ test("a conflicting landing gets one fix-forward shift from the new target", asy
 	assert.notEqual(backend.shifts[1].request.cwd, backend.shifts[0].request.cwd, "the fix-forward shift runs in a fresh worktree");
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /- Landing conflict with done\.txt; redone on top of abc1234/);
+	// The conflicted shift's report must not claim the ticket resolved.
+	assert.match(text.split("### Shift 2")[0], /- Outcome: redo on the new target \(landing conflict\)/);
 	assert.match(text, /### Shift 2[\s\S]*- Landed: merged shiftwork\/f-01 into main/);
 });
 
@@ -1756,4 +1758,22 @@ test("a failed worker lets the others settle before the error propagates", async
 	const after = await state.read();
 	assert.equal(after.running, false);
 	assert.deepEqual(after.workers, []);
+});
+
+test("a review whose verify re-run fails records the failing output, like a shift report", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `npm test`" }) });
+	const backend = fakeBackend([{ text: "done" }, { text: reviewMarker("accept", "fine") }]);
+	let calls = 0;
+	// The shift's gate passes; the review's re-run of it fails (a flaky test, say).
+	const verify = async (commands) => {
+		calls++;
+		const code = calls === 1 ? 0 : 1;
+		return { ok: code === 0, results: [{ cmd: commands[0], code, outputTail: code ? "✖ failing tests:\nflaky.test.js timed out" : "" }] };
+	};
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify, config: reviewConfig(), options: { once: true } });
+
+	const review = (await ticketText(root, "f", "01-a.md")).split("### Review")[1];
+	assert.match(review, /- Verify: failed at `npm test` \(exit 1\)/);
+	assert.match(review, /flaky\.test\.js timed out/);
 });

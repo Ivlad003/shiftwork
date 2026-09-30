@@ -1,6 +1,6 @@
 # Spec: parallel shifts (phase 4)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 Source: operator request, 2026-09-30, during phase 3. Vocabulary: `CONTEXT.md`.
 
@@ -53,6 +53,6 @@ Splitting one ticket across several agents; cross-process provider slots; parall
 | -- | ----- | ------ | ---------- |
 | 01 | Parallel scheduler with provider concurrency caps | resolved | opencode-go/glm-5.3 |
 | 02 | Shared state safe for parallel shifts and a second runner | resolved | opencode-go/glm-5.3 |
-| 03 | Rebase or redo tickets that conflict with a parallel landing | ready-for-agent |  |
+| 03 | Rebase or redo tickets that conflict with a parallel landing | resolved | opencode-go/glm-5.3 |
 | 04 | Stray idea.md deletion in the working tree (no change needed) | resolved |  |
 <!-- shiftwork:tickets:end -->
