@@ -49,4 +49,9 @@ Source: operator request, 2026-09-30, during phase 3. Vocabulary: `CONTEXT.md`.
 Splitting one ticket across several agents; cross-process provider slots; parallel Verify commands (their order matters).
 
 <!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Parallel scheduler with provider concurrency caps | resolved | opencode-go/glm-5.3 |
+| 02 | Shared state safe for parallel shifts and a second runner | ready-for-agent |  |
+| 03 | Rebase or redo tickets that conflict with a parallel landing | ready-for-agent |  |
 <!-- shiftwork:tickets:end -->

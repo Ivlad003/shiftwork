@@ -12,3 +12,4 @@
 - [ ] A lock held by a dead pid is taken over; a live one is waited for
 - [ ] Runner test with `parallel: 2`: run-state lists both workers while they run; STOP hands off both
 - [ ] Dashboard/tui/status render the `workers` shape (fixture from a real `parallel: 2` run-state file)
+- [ ] If one worker throws, the pool waits for the others to settle (claims released, run-state finished) before the error propagates
