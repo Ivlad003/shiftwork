@@ -241,6 +241,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			decision = { action: NEEDS_INFO, reason: `maxHandoffs (${maxHandoffs}) exceeded` };
 		}
 
+		if (workspace?.hasChanges && decision.action === "resolve" && !(await workspace.hasChanges(ticket))) {
+			decision = { action: NEEDS_INFO, reason: "verify gate passed but no shift changed anything: the gate doesn't test this ticket" };
+		}
 		if (workspace && decision.action === "resolve") {
 			const landed = await workspace.land(ticket);
 			notes.push(`- Landed: ${landed.message}`);

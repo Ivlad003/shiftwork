@@ -39,12 +39,13 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		return join(await git(cwd, "rev-parse", "--absolute-git-dir"), "shiftwork-setup-paths");
 	}
 
+	/** Changed and untracked paths. Uses -z output: `trim()`ing porcelain text would eat the first entry's leading status column. */
 	async function changedPaths(cwd) {
-		const out = await git(cwd, "status", "--porcelain", "--untracked-files=normal");
-		return out
-			.split("\n")
+		const { stdout } = await run("git", ["status", "--porcelain", "-z", "--untracked-files=normal"], { cwd, maxBuffer: 16 * 1024 * 1024 });
+		return stdout
+			.split("\0")
 			.filter(Boolean)
-			.map((line) => line.slice(3).replace(/\/$/, ""));
+			.map((entry) => entry.slice(3).replace(/\/$/, ""));
 	}
 
 	/** Commit everything in the worktree except the tracker copy and setup output; returns whether a commit was made. */
@@ -111,6 +112,19 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		async keep(t) {
 			if (existsSync(pathOf(t))) await commitAll(t, `shiftwork: WIP ${t.feature}/${t.number} ${t.title ?? ""}`.trim());
 			return { branch: branchOf(t) };
+		},
+
+		/** Whether the ticket's branch differs from the target: commits ahead or uncommitted work (tracker and setup output excluded). */
+		async hasChanges(t) {
+			const cwd = pathOf(t);
+			if (!existsSync(cwd)) return false;
+			const ahead = Number(await git(cwd, "rev-list", "--count", `${await resolveTarget()}..HEAD`));
+			if (ahead > 0) return true;
+			const setupPaths = await readFile(await setupPathsFile(cwd), "utf8").then(
+				(text) => new Set(text.split("\n").filter(Boolean)),
+				() => new Set(),
+			);
+			return (await changedPaths(cwd)).some((p) => !p.startsWith(".scratch/") && !setupPaths.has(p));
 		},
 
 		/** What changed in the ticket's worktree since its last commit, including untracked files. */

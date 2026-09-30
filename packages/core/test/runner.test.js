@@ -132,10 +132,13 @@ test("a shift error is reported and counts as a failed attempt", async () => {
 	assert.match(await ticketText(root, "f", "01-a.md"), /### Shift 1[\s\S]*error: boom/);
 });
 
-function fakeWorkspace({ landOk = true } = {}) {
+function fakeWorkspace({ landOk = true, changed = true } = {}) {
 	const calls = [];
 	return {
 		calls,
+		async hasChanges() {
+			return changed;
+		},
 		async prepare(t) {
 			calls.push(["prepare", t.number]);
 			const { mkdtemp } = await import("node:fs/promises");
@@ -672,4 +675,17 @@ test("a long cooldown is waited out in steps of at most a minute, so a STOP file
 	assert.equal(summary.exitCode, 3);
 	assert.ok(clock.sleeps.every((ms) => ms <= 60_000));
 	assert.equal(clock.sleeps.length, 3);
+});
+
+test("a passing verify gate with no change in the worktree doesn't resolve the ticket", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const workspace = fakeWorkspace({ changed: false });
+	const backend = fakeBackend([{ error: '429: {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}' }]);
+	const verify = async () => ({ ok: true, results: [{ cmd: "npm test", code: 0, outputTail: "" }] });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
+
+	assert.deepEqual(summary.resolved, []);
+	assert.match(summary.needsInfo[0].reason, /no shift changed anything/);
+	assert.ok(!workspace.calls.some(([op]) => op === "land"));
 });

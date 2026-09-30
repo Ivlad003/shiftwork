@@ -155,3 +155,19 @@ test("files created by setup commands are never committed", async () => {
 	assert.equal(existsSync(join(root, "deps")), false);
 	assert.equal(existsSync(join(root, "cache.txt")), false);
 });
+
+test("hasChanges sees commits and uncommitted work, but not the tracker copy or setup output", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root, setup: ["echo x > setup-out.txt"] });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "edited copy\n");
+	assert.equal(await ws.hasChanges(t), false);
+
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	assert.equal(await ws.hasChanges(t), true);
+
+	git(cwd, "add", "feature.txt");
+	git(cwd, "commit", "-q", "-m", "work");
+	assert.equal(await ws.hasChanges(t), true);
+});
