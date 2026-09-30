@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -44,6 +44,83 @@ test("a provider error in a real pi shift becomes an error event and ends the sh
 
 	assert.ok(events.some((e) => e.type === "error" && /429/.test(e.message)));
 	assert.equal(events.at(-1).type, "end");
+});
+
+test("a skill outside the set is not advertised", { timeout: 90_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-pi-skills-"));
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-home-"));
+	const alpha = join(cwd, "alpha");
+	const beta = join(cwd, "beta");
+	await mkdir(alpha, { recursive: true });
+	await mkdir(beta, { recursive: true });
+	await writeFile(join(alpha, "SKILL.md"), "---\nname: alpha\ndescription: Alpha skill\n---\nAlpha body.");
+	await writeFile(join(beta, "SKILL.md"), "---\nname: beta\ndescription: Beta skill\n---\nBeta body.");
+
+	const backend = createPiBackend({
+		args: ["--offline", "-ns", "-ne", "-e", fixture],
+		env: { PI_CODING_AGENT_DIR: agentDir, SHIFTWORK_SCRIPT: "[]", SHIFTWORK_RECORD_SKILLS: "1" },
+		timeoutMs: 60_000,
+	});
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "scripted/s1", thinking: "off", skills: { paths: [alpha], preload: [] } },
+		prompt: "hi",
+		systemPrompt: "sys",
+	});
+	for await (const event of shift.events) {
+		if (event.type === "end") break;
+	}
+
+	const recorded = JSON.parse(await readFile(join(cwd, "shiftwork-skills.json"), "utf8"));
+	assert.deepEqual(recorded.skills, ["alpha"]);
+});
+
+test("preloaded skill bodies appear in the system prompt passed to the backend", { timeout: 90_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-pi-preload-"));
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-home-"));
+	const skill = join(cwd, "alpha");
+	await mkdir(skill, { recursive: true });
+	await writeFile(join(skill, "SKILL.md"), "---\nname: alpha\ndescription: Alpha skill\n---\nAlpha preloaded body.");
+
+	const backend = createPiBackend({
+		args: ["--offline", "-ns", "-ne", "-e", fixture],
+		env: { PI_CODING_AGENT_DIR: agentDir, SHIFTWORK_SCRIPT: "[]", SHIFTWORK_RECORD_SYSTEM: "1" },
+		timeoutMs: 60_000,
+	});
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "scripted/s1", thinking: "off", skills: { paths: [skill], preload: [skill] } },
+		prompt: "hi",
+		systemPrompt: "Worker prompt.",
+	});
+	for await (const event of shift.events) {
+		if (event.type === "end") break;
+	}
+
+	const system = await readFile(join(cwd, "shiftwork-system.md"), "utf8");
+	assert.match(system, /Worker prompt\./);
+	assert.match(system, /Alpha preloaded body\./);
+});
+
+test("a missing skill path does not crash the shift and is reported as a warning", { timeout: 90_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-pi-missing-"));
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-home-"));
+	const backend = createPiBackend({
+		args: ["--offline", "-ns", "-ne", "-e", fixture],
+		env: { PI_CODING_AGENT_DIR: agentDir, SHIFTWORK_SCRIPT: "[]" },
+		timeoutMs: 60_000,
+	});
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "scripted/s1", thinking: "off", skills: { paths: [], preload: [join(cwd, "no-such-skill")] } },
+		prompt: "hi",
+		systemPrompt: "sys",
+	});
+	for await (const event of shift.events) {
+		if (event.type === "end") break;
+	}
+
+	assert.ok(shift.warnings.some((w) => /missing skill path/.test(w)));
 });
 
 test("mapPiEvent ignores everything but finished assistant messages", () => {

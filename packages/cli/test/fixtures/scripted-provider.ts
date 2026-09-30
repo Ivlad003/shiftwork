@@ -2,6 +2,9 @@
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 type Step = { text?: string; tool?: { name: string; args: Record<string, unknown> }; error?: string };
 
 export default function (pi: ExtensionAPI) {
@@ -17,4 +20,19 @@ export default function (pi: ExtensionAPI) {
 		),
 	);
 	pi.registerProvider(faux.provider);
+
+	if (process.env.SHIFTWORK_RECORD_SKILLS) {
+		pi.on("before_agent_start", async (event, ctx) => {
+			await writeFile(
+				join(ctx.cwd, "shiftwork-skills.json"),
+				JSON.stringify({ skills: event.systemPromptOptions.skills.map((s) => s.name) }),
+			);
+		});
+	}
+
+	if (process.env.SHIFTWORK_RECORD_SYSTEM) {
+		pi.on("before_agent_start", async (event, ctx) => {
+			await writeFile(join(ctx.cwd, "shiftwork-system.md"), event.systemPrompt);
+		});
+	}
 }

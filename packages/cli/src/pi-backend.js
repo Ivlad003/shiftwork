@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -57,10 +57,14 @@ export function createPiBackend(options = {}) {
 			RpcClient ??= (await import(pathToFileURL(pi.index).href)).RpcClient;
 			const dir = await mkdtemp(join(tmpdir(), "shiftwork-shift-"));
 			const promptFile = join(dir, "system.md");
-			await writeFile(promptFile, systemPrompt ?? "");
+			const preload = await loadPreload(route.skills?.preload ?? []);
+			const fullSystemPrompt = [systemPrompt, preload.text].filter(Boolean).join("\n\n");
+			await writeFile(promptFile, fullSystemPrompt ?? "");
 
 			const args = ["--no-session", "--approve", "--append-system-prompt", promptFile];
 			if (route.thinking) args.push("--thinking", route.thinking);
+			args.push("-ns");
+			for (const skillPath of route.skills?.paths ?? []) args.push("--skill", skillPath);
 			args.push(...(options.args ?? []));
 			const client = new RpcClient({ cliPath: pi.cli, cwd, env: options.env, model: route.model, args });
 
@@ -106,6 +110,7 @@ export function createPiBackend(options = {}) {
 			return {
 				capabilities: { inPlaceHandoff: true },
 				events: queue.iterate(),
+				warnings: preload.warnings,
 				steer: (text) => client.steer(text),
 				async abort() {
 					await client.abort().catch(() => {});
@@ -138,6 +143,29 @@ export function mapPiEvent(event) {
 	if (text) out.push({ type: "text", text });
 	if (message.stopReason === "error") out.push({ type: "error", message: message.errorMessage ?? "provider error" });
 	return out;
+}
+
+async function loadPreload(preloadPaths) {
+	const warnings = [];
+	const bodies = [];
+	for (const skillPath of preloadPaths) {
+		const file = await skillFile(skillPath).catch(() => {
+			warnings.push(`missing skill path: ${skillPath}`);
+			return null;
+		});
+		if (!file) continue;
+		try {
+			bodies.push(`<!-- Preloaded skill: ${file} -->\n${await readFile(file, "utf8")}`);
+		} catch {
+			warnings.push(`missing skill path: ${skillPath}`);
+		}
+	}
+	return { text: bodies.join("\n\n"), warnings };
+}
+
+async function skillFile(skillPath) {
+	const info = await stat(skillPath);
+	return info.isDirectory() ? join(skillPath, "SKILL.md") : skillPath;
 }
 
 function eventQueue() {

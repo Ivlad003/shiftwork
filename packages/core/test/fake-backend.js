@@ -27,6 +27,7 @@ export function fakeBackend(script) {
 				events: (async function* () {
 					yield* events;
 				})(),
+				warnings: step.warnings ?? [],
 				async steer() {},
 				async abort() {},
 			};

@@ -110,6 +110,16 @@ test("nothing to do exits 0 and the claim is always released", async () => {
 	assert.deepEqual(summary.resolved, []);
 });
 
+test("a missing skill path is reported in the shift report", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "" }, warnings: ["missing skill path: /tmp/no-such-skill"] }]);
+
+	await run(root, backend);
+
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /Warning: missing skill path: \/tmp\/no-such-skill/);
+});
+
 test("a shift error is reported and counts as a failed attempt", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([{ error: "boom" }, { files: { "done.txt": "" } }]);

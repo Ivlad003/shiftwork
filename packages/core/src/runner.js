@@ -93,7 +93,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 /** Consume one shift's events into a result. */
 async function runShift(backend, request, log) {
-	const result = { usage: { input: 0, output: 0, totalTokens: 0 }, costUsd: 0, turns: 0, text: "", error: null, stopReason: null, needsInfo: null };
+	const result = { usage: { input: 0, output: 0, totalTokens: 0 }, costUsd: 0, turns: 0, text: "", error: null, stopReason: null, needsInfo: null, warnings: [] };
 	let shift;
 	try {
 		shift = await backend.startShift(request);
@@ -102,6 +102,7 @@ async function runShift(backend, request, log) {
 		result.stopReason = "error";
 		return result;
 	}
+	result.warnings = shift.warnings ?? [];
 	for await (const event of shift.events) {
 		log(event);
 		if (event.type === "turn") {
@@ -138,6 +139,9 @@ function shiftReport({ attempt, route, shift, verifyResult, decision }) {
 		if (failed.outputTail) lines.push("", "```", failed.outputTail.trimEnd(), "```", "");
 	} else {
 		lines.push("- Verify: not run");
+	}
+	for (const warning of shift.warnings ?? []) {
+		lines.push(`- Warning: ${warning}`);
 	}
 	const outcome = decision.action === "resolve" ? "resolved" : decision.action === "retry" ? "new attempt" : `needs-info: ${decision.reason}`;
 	lines.push(`- Outcome: ${outcome}`);
