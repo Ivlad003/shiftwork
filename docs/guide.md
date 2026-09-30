@@ -246,7 +246,7 @@ npx shiftwork run --parallel 3         # up to three tickets at once
 npx shiftwork tui                      # live dashboard
 ```
 
-Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. Shift logs are in `logs/<feature>/<NN>/`.
+Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. Shift logs are in `logs/<feature>/<NN>/`.
 
 ### What the TUI does
 
@@ -268,5 +268,4 @@ Turn on a **review shift**: after a ticket lands, a fresh agent on the tier you 
 
 ## 8. Not there yet
 
-- Parallel shifts are new: shared state is not yet safe against a second `shiftwork run` in the same repo, and a ticket whose landing conflicts with a parallel one is not yet rebased automatically — see [`.scratch/parallel/`](../.scratch/parallel/spec.md).
 - Editing config from the TUI.

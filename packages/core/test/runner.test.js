@@ -134,12 +134,15 @@ test("a shift error is reported and counts as a failed attempt", async () => {
 	assert.match(await ticketText(root, "f", "01-a.md"), /### Shift 1[\s\S]*error: boom/);
 });
 
-function fakeWorkspace({ landOk = true, changed = true, diffStat = "" } = {}) {
+function fakeWorkspace({ landOk = true, land, changed = true, diffStat = "" } = {}) {
 	const calls = [];
 	return {
 		calls,
 		async hasChanges() {
 			return changed;
+		},
+		async redo(t) {
+			calls.push(["redo", t.number]);
 		},
 		async diffStat() {
 			return typeof diffStat === "function" ? diffStat() : diffStat;
@@ -153,6 +156,7 @@ function fakeWorkspace({ landOk = true, changed = true, diffStat = "" } = {}) {
 		},
 		async land(t) {
 			calls.push(["land", t.number]);
+			if (land) return land(t);
 			return landOk ? { ok: true, message: "merged" } : { ok: false, message: "merge conflict in README.md" };
 		},
 		async keep(t) {
@@ -184,6 +188,92 @@ test("a ticket that needs info keeps its branch", async () => {
 
 	assert.deepEqual(workspace.calls, [["prepare", "01"], ["keep", "01"]]);
 	assert.match(await ticketText(root, "f", "01-a.md"), /Branch kept: shiftwork\/f-01/);
+});
+
+test("a landing whose target moved is rebased, re-verified and lands again", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const lands = [
+		{ ok: false, rebase: "abc1234", message: "the target moved to abc1234: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: true, message: "merged shiftwork/f-01 into main" },
+	];
+	const gates = [];
+	const verify = async (cmds, cwd) => {
+		gates.push(cwd);
+		return fileVerify()(cmds, cwd);
+	};
+	const workspace = fakeWorkspace({ land: () => lands.shift() });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(gates.length, 2, "the gate runs again on the rebased worktree");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Target moved to abc1234: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Landed: merged shiftwork\/f-01 into main/);
+});
+
+test("a landing whose target moved fails needs-info when the gate fails on the rebased branch", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "v1" } }]);
+	// The gate passes on the branch, then fails on the integrated state after the rebase.
+	let gates = 0;
+	const verify = async (cmds) =>
+		++gates === 1 ? { ok: true, results: [{ cmd: cmds[0], code: 0 }] } : { ok: false, results: [{ cmd: cmds[0], code: 1, outputTail: "" }] };
+	const workspace = fakeWorkspace({
+		land: () => ({ ok: false, rebase: "abc1234", message: "the target moved to abc1234: branch rebased onto it; re-verify and land again" }),
+	});
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
+
+	assert.equal(gates, 2);
+	assert.equal(summary.needsInfo[0].reason, "verify gate failed on the branch rebased onto abc1234 (`done.txt`)");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Target moved to abc1234: branch rebased onto it, verify gate re-run: failed at `done.txt` \(1\)/);
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+});
+
+test("a conflicting landing gets one fix-forward shift from the new target", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "v1" } }, { files: { "done.txt": "v2" } }]);
+	const lands = [
+		{ ok: false, conflict: { files: ["done.txt"], commit: "abc1234" }, message: "merge conflict in done.txt with the landed abc1234; branch shiftwork/f-01 kept" },
+		{ ok: true, message: "merged shiftwork/f-01 into main" },
+	];
+	const workspace = fakeWorkspace({ land: () => lands.shift() });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config, workspace });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2, "one more shift after the conflict");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["land", "01"], ["redo", "01"], ["prepare", "01"], ["land", "01"]]);
+	assert.notEqual(backend.shifts[1].request.cwd, backend.shifts[0].request.cwd, "the fix-forward shift runs in a fresh worktree");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Landing conflict with done\.txt; redone on top of abc1234/);
+	assert.match(text, /### Shift 2[\s\S]*- Landed: merged shiftwork\/f-01 into main/);
+});
+
+test("a second landing conflict goes to needs-info with the conflict files in the reason", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "v1" } }, { files: { "done.txt": "v2" } }]);
+	const conflict = () => ({
+		ok: false,
+		conflict: { files: ["done.txt"], commit: "abc1234" },
+		message: "merge conflict in done.txt with the landed abc1234; branch shiftwork/f-01 kept",
+	});
+	const workspace = fakeWorkspace({ land: conflict });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config, workspace });
+
+	assert.equal(summary.needsInfo.length, 1);
+	assert.equal(
+			summary.needsInfo[0].reason,
+			"verify gate passed but landing failed: merge conflict in done.txt with the landed abc1234; branch shiftwork/f-01 kept",
+	);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+	assert.match(text, /- Landing conflict with done\.txt; redone on top of abc1234/);
+	assert.match(text, /### Shift 2[\s\S]*needs-info: verify gate passed but landing failed: merge conflict in done\.txt/);
 });
 
 test("a failed landing turns a passing ticket into needs-info with the reason", async () => {

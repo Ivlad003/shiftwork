@@ -276,7 +276,7 @@ function withLandingQueue(workspace) {
 }
 
 async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState, slots }) {
-	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
+	let cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
 	let shiftNumber = firstShift;
@@ -284,6 +284,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	let handoffCount = 0;
 	let attempt = 1;
 	let landedMessage = undefined;
+	// One fix-forward per ticket: a landing conflict with a parallel landing gets the work
+	// redone on top of it once; a second conflict goes to needs-info as before (spec story 4).
+	let conflictRedone = false;
 	let previousRoute = undefined;
 	let exceededKind = undefined;
 	let lastVerifyFailure = undefined;
@@ -510,11 +513,39 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		if (workspace?.hasChanges && decision.action === "resolve" && !(await workspace.hasChanges(ticket))) {
 			decision = { action: NEEDS_INFO, reason: "verify gate passed but no shift changed anything: the gate doesn't test this ticket" };
 		}
+		let redoNext = false;
 		if (workspace && decision.action === "resolve") {
-			const landed = await workspace.land(ticket);
-			notes.push(`- Landed: ${landed.message}`);
-			if (landed.ok) landedMessage = landed.message;
-			if (!landed.ok) decision = { action: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
+			let landed = await workspace.land(ticket);
+			if (!landed.ok && landed.rebase) {
+				// A parallel landing moved the target: the branch is rebased onto it in its worktree,
+				// and the gate must pass on that integrated state before the branch lands (story 4).
+				const integrated = await verify(ticket.verify, cwd);
+				const failed = integrated.ok ? null : integrated.results.find((r) => r.code !== 0);
+				notes.push(
+					`- Target moved to ${landed.rebase}: branch rebased onto it, verify gate re-run: ${
+						integrated.ok ? "passed" : `failed at \`${failed?.cmd}\` (${failed?.code})`
+					}`,
+				);
+				if (integrated.ok) landed = await workspace.land(ticket);
+				else {
+					decision = { action: NEEDS_INFO, reason: `verify gate failed on the branch rebased onto ${landed.rebase} (\`${failed?.cmd}\`)` };
+					landed = null;
+				}
+			}
+			if (landed) {
+				notes.push(`- Landed: ${landed.message}`);
+				if (landed.ok) landedMessage = landed.message;
+				else if (landed.conflict && !conflictRedone) {
+					// One fix-forward per ticket: the note below tells the next shift what landed first.
+					conflictRedone = true;
+					notes.push(
+						`- Landing conflict with ${landed.conflict.files.join(", ") || "the target"}; redone on top of ${landed.conflict.commit}`,
+					);
+					redoNext = true;
+				} else {
+					decision = { action: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
+				}
+			}
 		}
 		if (workspace && decision.action === NEEDS_INFO && notes.length === 0) {
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
@@ -522,6 +553,14 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision, classificationNote, ticketUsage }), ...notes].join("\n"));
 		shiftNumber++;
+
+		if (redoNext) {
+			// The landing conflicted with a parallel one (noted above): one more shift, in a fresh
+			// worktree prepared from the new target, on top of what landed first.
+			if (typeof workspace.redo === "function") await workspace.redo(ticket);
+			cwd = (await workspace.prepare(ticket)).cwd;
+			continue;
+		}
 
 		if (decision.action === "resolve") {
 			await tracker.setStatus(ticket, RESOLVED);

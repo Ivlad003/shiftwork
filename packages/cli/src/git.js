@@ -67,6 +67,28 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		await git(root, "branch", "-D", branchOf(t)).catch(() => {});
 	}
 
+	/** Whether the ticket's branch already contains the target, so the merge would fast-forward. */
+	async function containsTarget(t, into) {
+		return git(pathOf(t), "merge-base", "--is-ancestor", into, "HEAD")
+			.then(() => true)
+			.catch(() => false);
+	}
+
+	/** Rebase the ticket's branch onto the target in its worktree. On a conflict the rebase is
+	 * aborted and nothing changes; `commit` is the target's short sha, what landed first. */
+	async function rebaseOnto(t, into) {
+		const cwd = pathOf(t);
+		const commit = await git(root, "rev-parse", "--short", into);
+		try {
+			await git(cwd, "rebase", into);
+			return { ok: true, conflict: false, files: [], commit };
+		} catch (error) {
+			const files = (await git(cwd, "diff", "--name-only", "--diff-filter=U").catch(() => "")).split("\n").filter(Boolean);
+			await git(cwd, "rebase", "--abort").catch(() => {});
+			return { ok: false, conflict: files.length > 0, files, commit, error: error.message };
+		}
+	}
+
 	return {
 		async prepare(t) {
 			const cwd = pathOf(t);
@@ -81,7 +103,9 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 			return { cwd, branch, reused: false };
 		},
 
-		/** Commit the ticket's work and merge it into the target; on conflict nothing changes and the branch stays. */
+		/** Commit the ticket's work and merge it into the target. A target moved by a parallel landing
+		 * rebases the branch onto it in its worktree (`rebase`: re-verify there and land again); a
+		 * conflicting rebase changes nothing and keeps the branch (`conflict`: redo the work on top). */
 		async land(t) {
 			const branch = branchOf(t);
 			const into = await resolveTarget();
@@ -90,6 +114,26 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 			if (current !== into) {
 				return { ok: false, message: `main checkout is on "${current}", not the target "${into}"; branch ${branch} kept` };
 			}
+			// A parallel landing moved the target: rebase the branch onto it in its worktree, so the
+			// caller can re-run the ticket's Verify gate on the integrated state before it lands.
+			if (!(await containsTarget(t, into))) {
+				const rebased = await rebaseOnto(t, into);
+				if (rebased.ok) {
+					return {
+						ok: false,
+						rebase: rebased.commit,
+						message: `the target moved to ${rebased.commit}: branch ${branch} rebased onto it; re-verify and land again`,
+					};
+				}
+				if (rebased.conflict) {
+					return {
+						ok: false,
+						conflict: { files: rebased.files, commit: rebased.commit },
+						message: `merge conflict in ${rebased.files.join(", ")} with the landed ${rebased.commit}; branch ${branch} kept`,
+					};
+				}
+				// The rebase could not run at all: fall through to a plain merge, as before.
+			}
 			try {
 				await git(root, "merge", "-q", "--ff-only", branch);
 			} catch {
@@ -97,15 +141,25 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 					await git(root, "merge", "-q", "--no-ff", "--no-edit", "-m", `shiftwork: merge ${t.feature}/${t.number} ${t.title ?? ""}`.trim(), branch);
 				} catch (error) {
 					const conflicts = await git(root, "diff", "--name-only", "--diff-filter=U").catch(() => "");
+					const files = conflicts.split("\n").filter(Boolean);
 					await git(root, "merge", "--abort").catch(() => {});
 					return {
 						ok: false,
-						message: `merge conflict in ${conflicts.split("\n").filter(Boolean).join(", ") || "the target"}; branch ${branch} kept (${error.message.split("\n")[0]})`,
+						// Conflict files mean a landing conflict with what landed first: the ticket is
+						// redone on top of it; anything else is a plain landing failure.
+						...(files.length ? { conflict: { files, commit: await git(root, "rev-parse", "--short", into) } } : {}),
+						message: `merge conflict in ${files.join(", ") || "the target"}; branch ${branch} kept (${error.message.split("\n")[0]})`,
 					};
 				}
 			}
 			await remove(t);
 			return { ok: true, message: `merged ${branch} into ${into}` };
+		},
+
+		/** Drop the ticket's worktree and branch, so the next prepare starts fresh from the target
+		 * (fix-forward after a landing conflict). */
+		async redo(t) {
+			await remove(t);
 		},
 
 		/** Keep the ticket's branch for inspection, with any unfinished work committed as WIP. */

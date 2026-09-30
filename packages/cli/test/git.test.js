@@ -79,7 +79,7 @@ test("a dirty main checkout doesn't block preparing or landing", async () => {
 	assert.ok(existsSync(join(root, "feature.txt")));
 });
 
-test("a diverged target gets a merge commit instead of a fast-forward", async () => {
+test("a diverged target rebases the branch onto it; landing again fast-forwards", async () => {
 	const root = await repo();
 	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
 	const t = ticket(root);
@@ -89,8 +89,80 @@ test("a diverged target gets a merge commit instead of a fast-forward", async ()
 	git(root, "add", "other.txt");
 	git(root, "commit", "-q", "-m", "meanwhile");
 
+	const moved = await ws.land(t);
+
+	assert.equal(moved.ok, false);
+	assert.match(moved.rebase, /^[0-9a-f]{7,}$/);
+	assert.match(moved.message, /rebased onto it/);
 	assert.equal((await ws.land(t)).ok, true);
-	assert.equal(git(root, "log", "-1", "--format=%p").split(" ").length, 2);
+	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n");
+	assert.equal(git(root, "log", "-1", "--format=%p").split(" ").length, 1, "no merge commit: the landing fast-forwards");
+});
+
+test("a target moved by a parallel landing rebases the branch; landing again fast-forwards", async () => {
+	const root = await repo();
+	await writeFile(join(root, "shared.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+	git(root, "add", "shared.txt");
+	git(root, "commit", "-q", "-m", "shared");
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t1 = ticket(root);
+	const t2 = { ...ticket(root), number: "02", title: "B", path: join(root, ".scratch", "f", "issues", "02-b.md") };
+	const a = await ws.prepare(t1);
+	const b = await ws.prepare(t2);
+	// Two worktrees from the same target, editing different lines of one file.
+	await writeFile(join(a.cwd, "shared.txt"), "ONE\ntwo\nthree\nfour\nfive\nsix\n");
+	await writeFile(join(b.cwd, "shared.txt"), "one\ntwo\nthree\nfour\nfive\nSIX\n");
+
+	assert.equal((await ws.land(t1)).ok, true);
+	const moved = await ws.land(t2);
+
+	assert.equal(moved.ok, false);
+	assert.match(moved.rebase, /^[0-9a-f]{7,}$/);
+	// The rebased worktree holds both tickets' work: the state the gate re-runs on.
+	assert.equal(await readFile(join(b.cwd, "shared.txt"), "utf8"), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
+
+	const landed = await ws.land(t2);
+
+	assert.equal(landed.ok, true);
+	assert.equal(await readFile(join(root, "shared.txt"), "utf8"), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
+	assert.equal(existsSync(b.cwd), false);
+});
+
+test("a conflicting parallel landing keeps the branch, and redo starts fresh from the new target", async () => {
+	const root = await repo();
+	await writeFile(join(root, "shared.txt"), "one\ntwo\nthree\n");
+	git(root, "add", "shared.txt");
+	git(root, "commit", "-q", "-m", "shared");
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t1 = ticket(root);
+	const t2 = { ...ticket(root), number: "02", title: "B", path: join(root, ".scratch", "f", "issues", "02-b.md") };
+	const a = await ws.prepare(t1);
+	const b = await ws.prepare(t2);
+	// The same line edited differently: the second landing conflicts with the first.
+	await writeFile(join(a.cwd, "shared.txt"), "ONE\ntwo\nthree\n");
+	await writeFile(join(b.cwd, "shared.txt"), "TWO!\ntwo\nthree\n");
+
+	assert.equal((await ws.land(t1)).ok, true);
+	const result = await ws.land(t2);
+
+	assert.equal(result.ok, false);
+	assert.deepEqual(result.conflict.files, ["shared.txt"]);
+	assert.match(result.conflict.commit, /^[0-9a-f]{7,}$/);
+	assert.match(result.message, /conflict/i);
+	// The rebase was aborted: nothing changed, in the worktree or the main checkout.
+	assert.equal(await readFile(join(b.cwd, "shared.txt"), "utf8"), "TWO!\ntwo\nthree\n");
+	assert.equal(git(b.cwd, "status", "--porcelain"), "");
+	assert.equal(git(root, "status", "--porcelain"), "");
+
+	await ws.redo(t2);
+
+	assert.equal(existsSync(b.cwd), false);
+	assert.equal(git(root, "branch", "--list", "shiftwork/f-02"), "");
+
+	const fresh = await ws.prepare(t2);
+
+	assert.equal(await readFile(join(fresh.cwd, "shared.txt"), "utf8"), "ONE\ntwo\nthree\n");
+	assert.equal(git(fresh.cwd, "rev-list", "--count", "main..HEAD"), "0");
 });
 
 test("a merge conflict keeps the branch and reports it", async () => {

@@ -60,6 +60,10 @@ _Avoid_: iteration, run, session
 All the shifts on a ticket between two runs of its verify gate. An attempt fails when the gate fails.
 _Avoid_: try, retry
 
+**Landing conflict**:
+A branch that no longer lands because a parallel ticket landed first: it is rebased onto the new target and its gate re-run, and a conflicting rebase is redone on top of it in a fresh worktree.
+_Avoid_: merge clash, collision
+
 **Review shift**:
 One shift in a fresh context after a ticket lands, on its own tier, judging the work and ending with a verdict: accept, reopen or follow-up.
 _Avoid_: code review, QA pass, checker
