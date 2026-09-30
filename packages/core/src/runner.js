@@ -1,8 +1,12 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { planShift } from "./planner.js";
 import { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";
 
 const NEEDS_INFO = "needs-info";
 const RESOLVED = "resolved";
+const READY = "ready-for-agent";
+const STOP_FILE = "STOP";
 const MARKER = /<shiftwork:needs-info\s+reason="([^"]*)"\s*\/>/;
 
 /**
@@ -17,16 +21,25 @@ export function decideNext({ attempt, maxAttempts, needsInfo, hasVerify, verifyO
 	return { action: "retry" };
 }
 
+function checkStop(root) {
+	return existsSync(join(root, STOP_FILE));
+}
+
 /**
  * Work the frontier until nothing is left (or one ticket with `once`).
  * Every dependency is injected: tracker, backend, verify, log.
  */
 export async function runFrontier({ root, tracker, backend, verify, config, workspace, log = () => {}, options = {} }) {
 	const maxAttempts = config.maxAttempts ?? 3;
-	const summary = { resolved: [], needsInfo: [] };
+	const summary = { resolved: [], needsInfo: [], stoppedReason: undefined };
 	const seen = new Set();
+	let hasRunShift = false;
 
 	for (;;) {
+		if (hasRunShift && checkStop(root)) {
+			summary.stoppedReason = "STOP file";
+			break;
+		}
 		const frontier = (await tracker.frontier()).filter(
 			(t) => !seen.has(t.path) && (!options.feature || t.feature === options.feature),
 		);
@@ -38,7 +51,12 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 		if (!claim) continue;
 		try {
 			const outcome = await workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log });
-			if (outcome.action === "resolve") summary.resolved.push(ticket);
+			hasRunShift = true;
+			if (outcome.action === "stop") {
+				summary.stoppedReason = outcome.reason;
+				break;
+			}
+			if (outcome.action === "resolve") summary.resolved.push({ ...ticket, reason: outcome.reason });
 			else summary.needsInfo.push({ ...ticket, reason: outcome.reason });
 		} finally {
 			await tracker.release(claim);
@@ -46,7 +64,11 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 		if (options.once) break;
 	}
 
-	summary.exitCode = summary.needsInfo.length > 0 ? 2 : 0;
+	if (!summary.stoppedReason && checkStop(root)) {
+		summary.stoppedReason = "STOP file";
+	}
+
+	summary.exitCode = summary.stoppedReason ? 3 : summary.needsInfo.length > 0 ? 2 : 0;
 	return summary;
 }
 
@@ -82,11 +104,16 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		await tracker.appendComment(ticket, [shiftReport({ attempt, route, shift, verifyResult, decision }), ...notes].join("\n"));
 		if (decision.action === "resolve") {
 			await tracker.setStatus(ticket, RESOLVED);
-			return decision;
+			return { action: "resolve", reason: notes.length ? notes[0].replace(/^- Landed: /, "") : "verify passed" };
 		}
 		if (decision.action === NEEDS_INFO) {
 			await tracker.setStatus(ticket, NEEDS_INFO);
-			return decision;
+			return { action: NEEDS_INFO, reason: decision.reason };
+		}
+
+		if (checkStop(root)) {
+			await tracker.setStatus(ticket, READY);
+			return { action: "stop", reason: "STOP file" };
 		}
 	}
 }

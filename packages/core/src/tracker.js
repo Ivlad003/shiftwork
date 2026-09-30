@@ -47,6 +47,17 @@ export function openTracker(root) {
 			if (owner?.token === claim.token) await unlink(claim.path).catch(() => {});
 		},
 
+		/** Live claims with their owner pid and timestamp. */
+		async activeClaims() {
+			const tickets = await loadTickets(root);
+			const live = [];
+			for (const t of tickets) {
+				const owner = await readOwner(claimPath(t));
+				if (owner && isAlive(owner.pid)) live.push({ ticket: t, ...owner });
+			}
+			return live;
+		},
+
 		setStatus: (ticketOrClaim, status) => setStatusLine(pathOf(ticketOrClaim), status),
 
 		async appendComment(ticketOrClaim, markdown) {

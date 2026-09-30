@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 import { openTracker, runFrontier } from "../src/index.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
@@ -23,6 +25,7 @@ test("a shift that makes the verify gate pass resolves the ticket with a report"
 
 	assert.equal(summary.exitCode, 0);
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(summary.resolved[0].reason, "verify passed");
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /\*\*Status:\*\* resolved/);
 	assert.match(text, /## Comments[\s\S]*### Shift 1 — fake fake\/m1[\s\S]*Verify: passed/);
@@ -191,4 +194,20 @@ test("a failed landing turns a passing ticket into needs-info with the reason", 
 
 	assert.equal(summary.needsInfo[0].reason, "verify gate passed but landing failed: merge conflict in README.md");
 	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* needs-info/);
+});
+
+test("a STOP file stops after the current shift with exit code 3 and no leftover claim", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ text: "Tried." }]);
+	writeFileSync(join(root, "STOP"), "");
+
+	const summary = await run(root, backend);
+
+	assert.equal(summary.exitCode, 3);
+	assert.equal(summary.stoppedReason, "STOP file");
+	assert.equal(backend.shifts.length, 1);
+	const tracker = openTracker(root);
+	assert.equal((await tracker.activeClaims()).length, 0);
+	assert.equal((await tracker.frontier()).length, 1);
+	assert.equal((await tracker.list())[0].status, "ready-for-agent");
 });

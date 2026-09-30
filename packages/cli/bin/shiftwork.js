@@ -3,14 +3,15 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { frontier, loadConfig, loadTickets, openTracker, planShift, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { loadConfig, openCooldowns, openTracker, planShift, runFrontier, validateConfig, VERSION } from "shiftwork-core";
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
 Usage:
   shiftwork init [--model <provider/id>] [--force]
                                 Create .pi/shiftwork.json, the worker prompt and pi settings
-  shiftwork status [dir]        List tickets and the frontier of ready ones
+  shiftwork status [dir] [--dir <path>]
+                                List tickets and the frontier of ready ones
   shiftwork run [options]       Work the frontier until nothing is left
   shiftwork --version
 
@@ -25,14 +26,14 @@ Run options:
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 
-Exit codes: 0 all resolved or nothing to do · 2 some tickets need info · 1 error`;
+Exit codes: 0 all resolved or nothing to do · 2 some tickets need info · 3 stopped · 1 error`;
 
 const [command = "help", ...rest] = process.argv.slice(2);
 
 try {
 	switch (command) {
 		case "status":
-			await status(rest[0] ?? process.cwd());
+			await status(rest);
 			break;
 		case "init": {
 			const { init } = await import("../src/init.js");
@@ -54,19 +55,66 @@ try {
 	process.exitCode = 1;
 }
 
-async function status(dir) {
-	const tickets = await loadTickets(dir);
+async function status(argv) {
+	const { positionals, values } = parseArgs({
+		args: argv,
+		allowPositionals: true,
+		options: { dir: { type: "string" } },
+	});
+	const dir = values.dir ?? positionals[0] ?? process.cwd();
+	const tracker = openTracker(dir);
+	const tickets = await tracker.list();
+	const frontier = await tracker.frontier();
+	const ready = new Set(frontier.map((t) => t.path));
+	const claims = await tracker.activeClaims();
+
 	if (tickets.length === 0) {
 		console.log("No tickets found in .scratch/<feature>/issues/*.md");
-		return;
+	} else {
+		for (const t of tickets) {
+			const mark = ready.has(t.path) ? "→" : " ";
+			const claim = claims.find((c) => c.ticket.path === t.path);
+			const claimInfo = claim ? `  pid ${claim.pid}  age ${formatAge(Date.now() - new Date(claim.at).getTime())}` : "";
+			const blocked = t.blockedBy.length ? `  blocked by ${t.blockedBy.join(", ")}` : "";
+			console.log(`${mark} ${t.feature}/${t.number}  [${t.status ?? "?"}]  ${t.title ?? ""}${claimInfo}${blocked}`);
+		}
+		console.log(`\n${ready.size} ready of ${tickets.length} tickets (→ = frontier)`);
 	}
-	const ready = new Set(frontier(tickets).map((t) => t.path));
-	for (const t of tickets) {
-		const mark = ready.has(t.path) ? "→" : " ";
-		const blocked = t.blockedBy.length ? `  blocked by ${t.blockedBy.join(", ")}` : "";
-		console.log(`${mark} ${t.feature}/${t.number}  [${t.status ?? "?"}]  ${t.title ?? ""}${blocked}`);
+
+	if (claims.length === 0) {
+		console.log("\nActive claims: none");
+	} else {
+		console.log("\nActive claims:");
+		for (const c of claims) {
+			console.log(`  ${c.ticket.feature}/${c.ticket.number}  pid ${c.pid}  age ${formatAge(Date.now() - new Date(c.at).getTime())}`);
+		}
 	}
-	console.log(`\n${ready.size} ready of ${tickets.length} tickets (→ = frontier)`);
+
+	const cooldowns = (await openCooldowns(dir).active()).sort((a, b) => new Date(a.until) - new Date(b.until));
+	if (cooldowns.length === 0) {
+		console.log("Cooldowns: none");
+	} else {
+		console.log("Cooldowns:");
+		const now = Date.now();
+		for (const c of cooldowns) {
+			const remaining = Math.max(0, new Date(c.until).getTime() - now);
+			console.log(`  ${c.provider} (${c.kind ?? "limit"})  ${remaining > 0 ? `${formatAge(remaining)} remaining` : "expiring"}`);
+		}
+	}
+}
+
+function formatAge(ms) {
+	if (ms < 1000) return "0s";
+	const sec = Math.floor(ms / 1000);
+	if (sec < 60) return `${sec}s`;
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m`;
+	const h = Math.floor(min / 60);
+	const remMin = min % 60;
+	if (h < 24) return remMin ? `${h}h ${remMin}m` : `${h}h`;
+	const d = Math.floor(h / 24);
+	const remH = h % 24;
+	return remH ? `${d}d ${remH}h` : `${d}d`;
 }
 
 async function run(argv) {
@@ -125,9 +173,10 @@ async function run(argv) {
 		options: { once: values.once, feature: values.feature },
 	});
 
-	for (const t of summary.resolved) console.log(`✔ ${t.feature}/${t.number} resolved  ${t.title ?? ""}`);
+	for (const t of summary.resolved) console.log(`✔ ${t.feature}/${t.number} resolved: ${t.reason}`);
 	for (const t of summary.needsInfo) console.log(`✖ ${t.feature}/${t.number} needs-info: ${t.reason}`);
-	if (!summary.resolved.length && !summary.needsInfo.length) console.log("Nothing to do: the frontier is empty.");
+	if (summary.stoppedReason) console.log(`⚠ Stopped: ${summary.stoppedReason}`);
+	if (!summary.resolved.length && !summary.needsInfo.length && !summary.stoppedReason) console.log("Nothing to do: the frontier is empty.");
 	return summary.exitCode;
 }
 

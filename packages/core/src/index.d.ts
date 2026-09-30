@@ -33,3 +33,32 @@ export declare function loadTickets(root?: string): Promise<(Ticket & { feature:
 export declare function planShift(options: { ticket: Ticket; config: Record<string, unknown> }): Route;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
 export declare const THINKING_LEVELS: readonly string[];
+
+export interface Claim {
+	ticket: Ticket;
+	pid: number;
+	token: string;
+	at: string;
+}
+
+export interface Cooldown {
+	provider: string;
+	until: string;
+	kind?: string;
+}
+
+export declare function openTracker(root: string): {
+	list(): Promise<(Ticket & { feature: string })[]>;
+	frontier(): Promise<(Ticket & { feature: string })[]>;
+	claim(ticket: Ticket, options?: { pid?: number }): Promise<Claim | null>;
+	release(claim: Claim): Promise<void>;
+	activeClaims(): Promise<Claim[]>;
+	setStatus(ticketOrClaim: Ticket | Claim, status: string): Promise<void>;
+	appendComment(ticketOrClaim: Ticket | Claim, markdown: string): Promise<void>;
+};
+
+export declare function openCooldowns(root: string): {
+	path: string;
+	active(now?: Date): Promise<Cooldown[]>;
+	add(provider: string, until: Date | string, kind?: string): Promise<void>;
+};
