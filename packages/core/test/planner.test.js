@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { planShift, validateConfig } from "../src/index.js";
+import { chooseHandoffMode, planShift, validateConfig } from "../src/index.js";
 
 const config = validateConfig({
 	defaultType: "code",
@@ -162,3 +162,25 @@ test("planShift: after a handoff, the remaining ticket budget caps the shift bud
 	assert.equal(plenty.budget.maxCostUsd, 2, "tier budget $2 stays when $4 of the ticket budget is left");
 	assert.equal(little.budget.maxCostUsd, 0.5, "only $0.5 of the ticket budget is left");
 });
+
+const autoCases = [
+	["explicit same-process stays in place", { mode: "same-process", kind: "maxTurns", inPlaceHandoff: true }, { mode: "same-process", compact: false }],
+	["explicit same-process without capability is fresh", { mode: "same-process", kind: "maxTurns", inPlaceHandoff: false }, { mode: "new-process", compact: false }],
+	["explicit new-process is always fresh", { mode: "new-process", kind: "maxCostUsd", inPlaceHandoff: true }, { mode: "new-process", compact: false }],
+	["explicit same-process with a smaller window still stays, but compacting first", { mode: "same-process", kind: "maxCostUsd", inPlaceHandoff: true, contextTokens: 9000, targetContextWindow: 8000 }, { mode: "same-process", compact: true }],
+	["auto + cost + room in the window is in-place", { mode: "auto", kind: "maxCostUsd", inPlaceHandoff: true, contextTokens: 1000, targetContextWindow: 8000 }, { mode: "same-process", compact: false }],
+	["auto + tokens + room in the window is in-place", { mode: "auto", kind: "maxTokens", inPlaceHandoff: true, contextTokens: 1000, targetContextWindow: 8000 }, { mode: "same-process", compact: false }],
+	["auto + turns with unknown windows is in-place", { mode: "auto", kind: "maxTurns", inPlaceHandoff: true }, { mode: "same-process", compact: false }],
+	["auto + turns when the target window is too small is fresh", { mode: "auto", kind: "maxTurns", inPlaceHandoff: true, contextTokens: 9000, targetContextWindow: 8000 }, { mode: "new-process", compact: false }],
+	["auto + context fill is fresh", { mode: "auto", kind: "maxContextPct", inPlaceHandoff: true, contextTokens: 1000, targetContextWindow: 8000 }, { mode: "new-process", compact: false }],
+	["auto + stall is fresh", { mode: "auto", kind: "stallTurns", inPlaceHandoff: true }, { mode: "new-process", compact: false }],
+	["auto + wall time is fresh", { mode: "auto", kind: "maxWallMin", inPlaceHandoff: true }, { mode: "new-process", compact: false }],
+	["auto without capability is fresh", { mode: "auto", kind: "maxTurns", inPlaceHandoff: false }, { mode: "new-process", compact: false }],
+	["missing mode is fresh", { kind: "maxTurns", inPlaceHandoff: true }, { mode: "new-process", compact: false }],
+];
+
+for (const [name, input, expected] of autoCases) {
+	test(`chooseHandoffMode: ${name}`, () => {
+		assert.deepEqual(chooseHandoffMode(input), expected);
+	});
+}

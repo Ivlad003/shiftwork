@@ -450,3 +450,102 @@ test("shift numbers continue from the reports already in the ticket after a re-r
 	assert.deepEqual([...text.matchAll(/^### Shift (\d+) — /gm)].map((m) => m[1]), ["1", "2", "3"]);
 	assert.match(await ticketText(root, "f", "01-a.md"), /This is attempt 1|resolved/);
 });
+
+const turn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+
+function chainConfig(mode) {
+	return {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 3,
+		maxHandoffs: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "fake/m2"], thinking: "low", budget: { maxTurns: 2 } } },
+		onExceed: { maxTurns: { to: "next", mode } },
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+	};
+}
+
+test("an in-place swap continues the same shift and records the handoff note", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			inPlaceHandoff: true,
+			events: [turn, turn, { type: "end", stopReason: "stop" }],
+			afterSwap: {
+				files: { "done.txt": "ok" },
+				events: [turn, { type: "end", stopReason: "stop" }],
+			},
+		},
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: chainConfig("same-process") });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 1, "in-place handoff must not start a new process");
+	assert.deepEqual(backend.shifts[0].swaps, [{ model: "fake/m2", thinking: "low" }]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Handoff — shift 1, fake\/m1 → fake\/m2, reason: budget\.maxTurns/);
+});
+
+test("same-process without inPlaceHandoff falls back to a fresh handoff", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ events: [turn, turn, { type: "end", stopReason: "stop" }] },
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: chainConfig("same-process") });
+
+	assert.equal(summary.exitCode, 0);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
+});
+
+test("same-process compacts first when the target window is smaller", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			inPlaceHandoff: true,
+			contextWindows: { "fake/m2": 50 },
+			events: [
+				{ type: "turn", usage: { input: 40, output: 20, totalTokens: 60 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 40, output: 20, totalTokens: 60 }, costUsd: 0.01 },
+				{ type: "end", stopReason: "stop" },
+			],
+			afterSwap: {
+				files: { "done.txt": "ok" },
+				events: [turn, { type: "end", stopReason: "stop" }],
+			},
+		},
+	]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: chainConfig("same-process") });
+
+	assert.equal(backend.shifts.length, 1);
+	assert.equal(backend.shifts[0].compactions.length, 1);
+	assert.equal(backend.shifts[0].swaps.length, 1);
+});
+
+test("auto mode with a smaller target window does a fresh handoff instead of compacting", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			inPlaceHandoff: true,
+			contextWindows: { "fake/m2": 50 },
+			events: [
+				{ type: "turn", usage: { input: 40, output: 20, totalTokens: 60 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 40, output: 20, totalTokens: 60 }, costUsd: 0.01 },
+				{ type: "end", stopReason: "stop" },
+			],
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: chainConfig("auto") });
+
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].swaps.length, 0);
+	assert.equal(backend.shifts[0].compactions.length, 0);
+});

@@ -71,9 +71,10 @@ export function createPiBackend(options = {}) {
 			const client = new RpcClient({ cliPath: pi.cli, cwd, env: options.env, model: route.model, args });
 
 			const queue = eventQueue();
+			let epoch = 0;
 			const finish = async (stopReason) => {
 				if (queue.closed) return;
-				queue.push({ type: "end", stopReason });
+				queue.push({ type: "end", stopReason, epoch });
 				queue.close();
 				clearTimeout(timer);
 				await client.stop().catch(() => {});
@@ -102,7 +103,10 @@ export function createPiBackend(options = {}) {
 						})
 						.catch(() => {});
 				}
-				if (event.type === "agent_settled") finish(lastStop === "error" ? "error" : (lastStop ?? "stop"));
+				// Keep the process alive after settle so set_model + follow_up can continue the same shift.
+				if (event.type === "agent_settled") {
+					queue.push({ type: "end", stopReason: lastStop === "error" ? "error" : (lastStop ?? "stop"), epoch });
+				}
 			});
 
 			try {
@@ -121,12 +125,41 @@ export function createPiBackend(options = {}) {
 
 			return {
 				capabilities: { inPlaceHandoff: true },
-				events: queue.iterate(),
+				events: (async function* () {
+					for await (const event of queue.iterate()) {
+						if (event.type === "end" && event.epoch < epoch) continue;
+						if (event.type === "end") {
+							yield { type: "end", stopReason: event.stopReason };
+						} else {
+							yield event;
+						}
+					}
+				})(),
 				warnings: preload.warnings,
 				steer: (text) => client.steer(text),
 				async abort() {
 					await client.abort().catch(() => {});
 					await finish("aborted");
+				},
+				async close() {
+					await finish(lastStop === "error" ? "error" : (lastStop ?? "stop"));
+				},
+				async swapModel(model, thinking) {
+					epoch += 1;
+					const slash = model.indexOf("/");
+					const provider = slash === -1 ? model : model.slice(0, slash);
+					const modelId = slash === -1 ? model : model.slice(slash + 1);
+					await client.setModel(provider, modelId);
+					if (thinking) await client.setThinkingLevel(thinking);
+					await client.followUp("Continue the ticket. The model has been swapped; read the ticket's Comments for the handoff.");
+				},
+				compact: (instructions) => client.compact(instructions),
+				async contextWindow(model) {
+					const models = await client.getAvailableModels().catch(() => []);
+					const slash = model.indexOf("/");
+					const provider = slash === -1 ? model : model.slice(0, slash);
+					const id = slash === -1 ? model : model.slice(slash + 1);
+					return models.find((m) => m.provider === provider && m.id === id)?.contextWindow;
 				},
 				client,
 			};

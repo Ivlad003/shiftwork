@@ -33,6 +33,13 @@ export declare function parseTicket(markdown: string, path?: string): Ticket;
 export declare function frontier<T extends Ticket>(tickets: T[]): T[];
 export declare function loadTickets(root?: string): Promise<(Ticket & { feature: string })[]>;
 export declare function planShift(options: { ticket: Ticket; config: Record<string, unknown>; history?: Record<string, unknown> }): Route;
+export declare function chooseHandoffMode(options: {
+	mode?: "same-process" | "new-process" | "auto";
+	kind: string;
+	inPlaceHandoff?: boolean;
+	contextTokens?: number;
+	targetContextWindow?: number;
+}): { mode: "same-process" | "new-process"; compact: boolean };
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
 export declare const THINKING_LEVELS: readonly string[];

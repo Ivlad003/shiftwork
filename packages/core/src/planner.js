@@ -50,6 +50,32 @@ export function planShift({ ticket, config, history = {} }) {
 	return { backend: "pi", type, tier: tierName, model, thinking, skills, budget, onExceed };
 }
 
+/** Reasons where `auto` may keep the live session (cost, tokens, turns). */
+const AUTO_IN_PLACE_KINDS = new Set(["maxCostUsd", "maxTokens", "maxTurns"]);
+
+/**
+ * Pick in-place (`same-process`) vs a fresh process, and whether to compact first.
+ * `auto` keeps the session for cost/token/turn limits when the target window can hold current usage.
+ * Backends without `inPlaceHandoff` always get a fresh handoff.
+ */
+export function chooseHandoffMode({
+	mode,
+	kind,
+	inPlaceHandoff = false,
+	contextTokens,
+	targetContextWindow,
+} = {}) {
+	if (!inPlaceHandoff) return { mode: "new-process", compact: false };
+	const windowTooSmall =
+		targetContextWindow != null && contextTokens != null && contextTokens > targetContextWindow;
+	let resolved = mode ?? "new-process";
+	if (mode === "auto") {
+		resolved = AUTO_IN_PLACE_KINDS.has(kind) && !windowTooSmall ? "same-process" : "new-process";
+	}
+	if (resolved !== "same-process") return { mode: "new-process", compact: false };
+	return { mode: "same-process", compact: Boolean(windowTooSmall) };
+}
+
 function mergeBudgets(...budgets) {
 	const merged = {};
 	for (const budget of budgets) {

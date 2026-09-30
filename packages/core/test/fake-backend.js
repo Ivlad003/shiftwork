@@ -11,6 +11,9 @@ import { join } from "node:path";
  *   costUsd?: number,
  *   events?: event[],     // full event sequence; if omitted, a single turn + optional text/error + end is emitted
  *   steer?: (text) => string | undefined, // text to append when the runner steers
+ *   inPlaceHandoff?: boolean,
+ *   afterSwap?: { files?, events? }, // consumed by swapModel; remaining queued events are replaced
+ *   contextWindows?: { [model]: number },
  * }
  */
 export function fakeBackend(script) {
@@ -20,35 +23,36 @@ export function fakeBackend(script) {
 		shifts,
 		async startShift(request) {
 			const step = script[shifts.length] ?? { text: "Nothing to do." };
-			const record = { request, step, aborted: false };
+			const record = { request, step, aborted: false, swaps: [], compactions: [] };
 			shifts.push(record);
 			for (const [rel, content] of Object.entries(step.files ?? {})) {
 				await writeFile(join(request.cwd, rel), content);
 			}
-			let events = [];
+			let queue = [];
 			if (step.events) {
-				events = step.events.map((e) => ({ ...e }));
+				queue = step.events.map((e) => ({ ...e }));
 			} else {
 				const usage = step.usage ?? { input: 100, output: 20 };
-				events.push({ type: "turn", usage: { ...usage, totalTokens: usage.input + usage.output }, costUsd: step.costUsd ?? 0.01 });
-				if (step.text) events.push({ type: "text", text: step.text });
-				if (step.error) events.push({ type: "error", message: step.error });
-				events.push({ type: "end", stopReason: step.error ? "error" : "stop" });
+				queue.push({ type: "turn", usage: { ...usage, totalTokens: usage.input + usage.output }, costUsd: step.costUsd ?? 0.01 });
+				if (step.text) queue.push({ type: "text", text: step.text });
+				if (step.error) queue.push({ type: "error", message: step.error });
+				queue.push({ type: "end", stopReason: step.error ? "error" : "stop" });
 			}
 			let aborted = false;
-			return {
-				capabilities: { inPlaceHandoff: false },
+			const inPlace = Boolean(step.inPlaceHandoff);
+			const shift = {
+				capabilities: { inPlaceHandoff: inPlace },
 				events: (async function* () {
-					for (const event of events) {
+					while (queue.length) {
 						if (aborted) break;
-						yield event;
+						yield queue.shift();
 					}
 				})(),
 				warnings: step.warnings ?? [],
 				async steer(text) {
 					if (step.steer) {
 						const reply = await step.steer(text);
-						if (reply) events.push({ type: "text", text: reply });
+						if (reply) queue.push({ type: "text", text: reply });
 					}
 				},
 				async abort() {
@@ -56,6 +60,21 @@ export function fakeBackend(script) {
 					record.aborted = true;
 				},
 			};
+			if (inPlace) {
+				shift.swapModel = async (model, thinking) => {
+					record.swaps.push({ model, thinking });
+					const next = step.afterSwap ?? {};
+					for (const [rel, content] of Object.entries(next.files ?? {})) {
+						await writeFile(join(request.cwd, rel), content);
+					}
+					queue = (next.events ?? [{ type: "end", stopReason: "stop" }]).map((e) => ({ ...e }));
+				};
+				shift.compact = async (instructions) => {
+					record.compactions.push(instructions);
+				};
+				shift.contextWindow = async (model) => step.contextWindows?.[model];
+			}
+			return shift;
 		},
 	};
 }

@@ -9,7 +9,13 @@ type Step = { text?: string; tool?: { name: string; args: Record<string, unknown
 
 export default function (pi: ExtensionAPI) {
 	const steps: Step[] = JSON.parse(process.env.SHIFTWORK_SCRIPT ?? "[]");
-	const faux = fauxProvider({ provider: "scripted", models: [{ id: "s1", contextWindow: 100_000, maxTokens: 8_000 }] });
+	const faux = fauxProvider({
+		provider: "scripted",
+		models: [
+			{ id: "s1", contextWindow: 100_000, maxTokens: 8_000 },
+			{ id: "s2", contextWindow: 80_000, maxTokens: 8_000 },
+		],
+	});
 	faux.setResponses(
 		steps.map((s) =>
 			s.error

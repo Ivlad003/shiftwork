@@ -23,8 +23,12 @@ async function shiftWith(script) {
 		systemPrompt: "You are a test worker.",
 	});
 	const events = [];
-	for await (const event of shift.events) if (event.type !== "raw") events.push(event);
-	return { cwd, events };
+	for await (const event of shift.events) {
+		if (event.type !== "raw") events.push(event);
+		if (event.type === "end") break;
+	}
+	await shift.close?.();
+	return { cwd, events, shift };
 }
 
 test("a real pi shift runs tools and maps events to turns, text and end", { timeout: 90_000 }, async () => {
@@ -73,6 +77,7 @@ test("a skill outside the set is not advertised", { timeout: 90_000 }, async () 
 	for await (const event of shift.events) {
 		if (event.type === "end") break;
 	}
+	await shift.close?.();
 
 	const recorded = JSON.parse(await readFile(join(cwd, "shiftwork-skills.json"), "utf8"));
 	assert.deepEqual(recorded.skills, ["alpha"]);
@@ -99,6 +104,7 @@ test("preloaded skill bodies appear in the system prompt passed to the backend",
 	for await (const event of shift.events) {
 		if (event.type === "end") break;
 	}
+	await shift.close?.();
 
 	const system = await readFile(join(cwd, "shiftwork-system.md"), "utf8");
 	assert.match(system, /Worker prompt\./);
@@ -122,8 +128,51 @@ test("a missing skill path does not crash the shift and is reported as a warning
 	for await (const event of shift.events) {
 		if (event.type === "end") break;
 	}
+	await shift.close?.();
 
 	assert.ok(shift.warnings.some((w) => /missing skill path/.test(w)));
+});
+
+test("set_model mid-shift switches the live session", { timeout: 90_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-pi-swap-"));
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-home-"));
+	const backend = createPiBackend({
+		args: ["--offline", "-ns", "-ne", "-e", fixture],
+		env: {
+			PI_CODING_AGENT_DIR: agentDir,
+			SHIFTWORK_SCRIPT: JSON.stringify([
+				{ tool: { name: "write", args: { path: "one.txt", content: "a\n" } } },
+				{ text: "continuing after the tool" },
+				{ text: "after the swap" },
+				{ text: "settled" },
+			]),
+		},
+		timeoutMs: 60_000,
+	});
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "scripted/s1", thinking: "off" },
+		prompt: "Do the ticket.",
+		systemPrompt: "You are a test worker.",
+	});
+	const events = [];
+	let swapped = false;
+	for await (const event of shift.events) {
+		if (event.type === "raw") continue;
+		events.push(event);
+		if (!swapped && event.type === "turn") {
+			swapped = true;
+			await shift.swapModel("scripted/s2", "off");
+		}
+		if (event.type === "end") break;
+	}
+	const state = await shift.client.getState().catch(() => null);
+	await shift.close?.();
+
+	assert.equal(await readFile(join(cwd, "one.txt"), "utf8"), "a\n");
+	const models = events.filter((e) => e.type === "turn").map((e) => e.model);
+	const swappedToS2 = models.some((m) => m === "s2" || m === "scripted/s2") || state?.model?.id === "s2";
+	assert.ok(swappedToS2, `set_model mid-shift should land on s2; turns=${JSON.stringify(models)} state=${state?.model?.id ?? "none"}`);
 });
 
 test("mapPiEvent ignores everything but finished assistant messages", () => {

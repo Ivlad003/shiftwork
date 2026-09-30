@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createMeter } from "./meter.js";
-import { planShift, resolveTicketBudget } from "./planner.js";
+import { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, SOFT_LIMIT_STEER, WORKER_PROMPT } from "./prompt.js";
 
 const NEEDS_INFO = "needs-info";
@@ -99,7 +99,18 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
 		const shift = await runShift(
 			backend,
-			{ cwd, route, prompt, systemPrompt: config.workerPrompt ?? WORKER_PROMPT, softLimitPct, getDiffStat, ticketPath: ticket.path },
+			{
+				cwd,
+				route,
+				prompt,
+				systemPrompt: config.workerPrompt ?? WORKER_PROMPT,
+				softLimitPct,
+				getDiffStat,
+				ticketPath: ticket.path,
+				maxHandoffs,
+				planHandoff: (kind, fromRoute) =>
+					planShift({ ticket, config, history: { previousRoute: fromRoute, exceededKind: kind, ticketUsage } }),
+			},
 			(event) => log({ ticket, attempt, event }),
 		);
 
@@ -117,29 +128,46 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		});
 
 		const notes = [];
+		const inPlaceHandoffs = shift.handoffs ?? [];
+		const freshHandoff = shift.handoff && !shift.handoff.inPlace ? shift.handoff : null;
 		let nextRoute = undefined;
-		if (shift.handoff && decision.action !== "resolve") {
+		handoffCount += inPlaceHandoffs.length;
+		for (const handoff of inPlaceHandoffs) {
+			if (handoff.agentNote) continue;
+			notes.push(
+				await buildHandoffNote({
+					shiftNumber,
+					from: handoff.from ?? route,
+					to: handoff.to,
+					reason: handoff.reason,
+					shift,
+					verifyResult: verifyResult ?? lastVerifyFailure,
+					getDiffStat,
+				}),
+			);
+		}
+		if (freshHandoff && decision.action !== "resolve") {
 			// A handoff is not a failed attempt: only the verify gate after real work counts.
 			if (decision.action === "retry" || decision.reason?.startsWith("verify gate failed")) decision = { action: "retry" };
 			handoffCount++;
-			const handoffHistory = { previousRoute: route, exceededKind: shift.handoff.kind, ticketUsage };
+			const handoffHistory = { previousRoute: route, exceededKind: freshHandoff.kind, ticketUsage };
 			nextRoute = { ...planShift({ ticket, config, history: handoffHistory }), backend: backend.name };
-			if (!shift.handoff.agentNote) {
+			if (!freshHandoff.agentNote) {
 				const handoffNote = await buildHandoffNote({
 					shiftNumber,
-					from: route,
+					from: freshHandoff.from ?? route,
 					to: nextRoute,
-					reason: shift.handoff.reason,
+					reason: freshHandoff.reason,
 					shift,
 					verifyResult: verifyResult ?? lastVerifyFailure,
 					getDiffStat,
 				});
 				notes.push(handoffNote);
 			}
-			if (handoffCount > maxHandoffs) {
-				notes.push(`- Handoff limit: ${maxHandoffs} handoffs already used`);
-				decision = { action: NEEDS_INFO, reason: `maxHandoffs (${maxHandoffs}) exceeded` };
-			}
+		}
+		if (handoffCount > maxHandoffs && decision.action !== "resolve") {
+			notes.push(`- Handoff limit: ${maxHandoffs} handoffs already used`);
+			decision = { action: NEEDS_INFO, reason: `maxHandoffs (${maxHandoffs}) exceeded` };
 		}
 
 		if (workspace && decision.action === "resolve") {
@@ -163,9 +191,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: NEEDS_INFO, reason: decision.reason };
 		}
 
-		if (shift.handoff && decision.action === "retry" && handoffCount <= maxHandoffs) {
+		if (freshHandoff && decision.action === "retry" && handoffCount <= maxHandoffs) {
 			previousRoute = route;
-			exceededKind = shift.handoff.kind;
+			exceededKind = freshHandoff.kind;
 			// Before starting the next shift, make sure the ticket budget isn't exhausted.
 			const remainingTicket = remainingTicketBudget(ticket, config, ticketUsage);
 			if (remainingTicket.exhausted) {
@@ -206,6 +234,8 @@ function remainingTicketBudget(ticket, config, usage) {
 	return { exhausted: false };
 }
 
+const COMPACT_INSTRUCTIONS = "Keep the current task, files touched, hypotheses and next steps. Drop chatter.";
+
 /** Consume one shift's events into a result. */
 async function runShift(backend, request, log) {
 	const result = {
@@ -218,6 +248,7 @@ async function runShift(backend, request, log) {
 		needsInfo: null,
 		warnings: [],
 		handoff: null,
+		handoffs: [],
 	};
 	let shift;
 	try {
@@ -229,13 +260,15 @@ async function runShift(backend, request, log) {
 	}
 	result.warnings = shift.warnings ?? [];
 	const startedAt = Date.now();
-	const meter = createMeter(request.route.budget, request.softLimitPct ?? 80, { now: Date.now });
+	let currentRoute = request.route;
+	let meter = createMeter(currentRoute.budget, request.softLimitPct ?? 80, { now: Date.now });
 
 	let softFired = false;
 	let softFiredThisTurn = false;
 	let softGraceRemaining = 0;
 	let exceededKind = null;
 	let ticketSnapshot = null;
+	let contextTokens = 0;
 
 	async function hasAgentHandoff() {
 		if (!request.ticketPath) return false;
@@ -251,6 +284,54 @@ async function runShift(backend, request, log) {
 		}
 	}
 
+	async function freshHandoff(reason, kind) {
+		await shift.abort().catch(() => {});
+		result.stopReason = result.stopReason ?? "budget";
+		result.handoff = { reason, kind };
+	}
+
+	async function tryInPlace(reason, kind) {
+		const maxHandoffs = request.maxHandoffs ?? Infinity;
+		const next =
+			request.planHandoff && kind
+				? { ...request.planHandoff(kind, currentRoute), backend: currentRoute.backend }
+				: undefined;
+		const canSwap =
+			next &&
+			next.model !== currentRoute.model &&
+			result.handoffs.length < maxHandoffs &&
+			shift.capabilities?.inPlaceHandoff &&
+			typeof shift.swapModel === "function";
+		const targetWindow = canSwap && typeof shift.contextWindow === "function" ? await shift.contextWindow(next.model) : undefined;
+		const used = contextTokens || result.usage.totalTokens;
+		const decision = chooseHandoffMode({
+			mode: currentRoute.onExceed?.[kind]?.mode,
+			kind,
+			inPlaceHandoff: Boolean(canSwap),
+			contextTokens: used || undefined,
+			targetContextWindow: targetWindow,
+		});
+		if (decision.mode !== "same-process" || !canSwap) {
+			await freshHandoff(reason, kind);
+			return true;
+		}
+		try {
+			if (decision.compact && shift.compact) await shift.compact(COMPACT_INSTRUCTIONS);
+			await shift.swapModel(next.model, next.thinking);
+		} catch {
+			await freshHandoff(reason, kind);
+			return true;
+		}
+		result.handoffs.push({ inPlace: true, kind, reason, from: currentRoute, to: next, compacted: decision.compact });
+		currentRoute = next;
+		meter = createMeter(next.budget, request.softLimitPct ?? 80, { now: Date.now });
+		softFired = false;
+		softFiredThisTurn = false;
+		softGraceRemaining = 0;
+		exceededKind = null;
+		return false;
+	}
+
 	async function checkLimit(limit) {
 		if (!limit) return false;
 		if (limit.level === "soft" && shift.steer) {
@@ -264,64 +345,64 @@ async function runShift(backend, request, log) {
 				await shift.steer(SOFT_LIMIT_STEER).catch(() => {});
 			}
 		} else if (limit.level === "hard") {
-			await shift.abort().catch(() => {});
-			result.stopReason = "budget";
-			result.handoff = { reason: limit.reason, kind: limit.kind };
-			return true;
+			return tryInPlace(limit.reason, limit.kind);
 		}
 		return false;
 	}
-	for await (const event of shift.events) {
-		log(event);
-		let limit = null;
-		if (event.type === "turn") {
-			result.turns++;
-			result.usage.input += event.usage?.input ?? 0;
-			result.usage.output += event.usage?.output ?? 0;
-			result.usage.totalTokens += event.usage?.totalTokens ?? 0;
-			result.costUsd += event.costUsd ?? 0;
-			// Feed a diff-stat snapshot after each turn so stall detection can work.
-			if (request.getDiffStat) {
-				try {
-					const stat = await request.getDiffStat();
-					limit = meter.observe({ type: "diffStat", stat });
-				} catch {}
+	try {
+		for await (const event of shift.events) {
+			log(event);
+			let limit = null;
+			if (event.type === "turn") {
+				result.turns++;
+				result.usage.input += event.usage?.input ?? 0;
+				result.usage.output += event.usage?.output ?? 0;
+				result.usage.totalTokens += event.usage?.totalTokens ?? 0;
+				result.costUsd += event.costUsd ?? 0;
+				// Feed a diff-stat snapshot after each turn so stall detection can work.
+				if (request.getDiffStat) {
+					try {
+						const stat = await request.getDiffStat();
+						limit = meter.observe({ type: "diffStat", stat });
+					} catch {}
+				}
+			} else if (event.type === "context") {
+				contextTokens = event.tokens ?? contextTokens;
 			}
-		}
 
-		limit = meter.observe(event) ?? limit;
-		if (await checkLimit(limit)) break;
+			limit = meter.observe(event) ?? limit;
+			if (await checkLimit(limit)) break;
 
-		if (softFired) {
-			if (event.type === "turn" && !softFiredThisTurn) {
-				softGraceRemaining--;
+			if (softFired) {
+				if (event.type === "turn" && !softFiredThisTurn) {
+					softGraceRemaining--;
+				}
+				softFiredThisTurn = false;
+
+				if (await hasAgentHandoff()) {
+					// Stop the agent before anyone else touches its worktree.
+					await shift.abort().catch(() => {});
+					result.stopReason = result.stopReason ?? "agent-handoff";
+					result.handoff = { reason: "agent handoff", kind: exceededKind, agentNote: true };
+					break;
+				}
+
+				if (softGraceRemaining <= 0) {
+					if (await tryInPlace("soft-limit agent did not hand off", exceededKind)) break;
+				}
 			}
-			softFiredThisTurn = false;
 
-			if (await hasAgentHandoff()) {
-				// Stop the agent before anyone else touches its worktree.
-				await shift.abort().catch(() => {});
-				result.stopReason = result.stopReason ?? "agent-handoff";
-				result.handoff = { reason: "agent handoff", kind: exceededKind, agentNote: true };
+			if (event.type === "text") {
+				result.text += `${event.text}\n`;
+			} else if (event.type === "error") {
+				result.error = event.message;
+			} else if (event.type === "end") {
+				result.stopReason = event.stopReason;
 				break;
 			}
-
-			if (softGraceRemaining <= 0) {
-				await shift.abort().catch(() => {});
-				result.stopReason = "budget";
-				result.handoff = { reason: "soft-limit agent did not hand off", kind: exceededKind };
-				break;
-			}
 		}
-
-		if (event.type === "text") {
-			result.text += `${event.text}\n`;
-		} else if (event.type === "error") {
-			result.error = event.message;
-		} else if (event.type === "end") {
-			result.stopReason = event.stopReason;
-			break;
-		}
+	} finally {
+		await shift.close?.().catch(() => {});
 	}
 	result.wallMin = (Date.now() - startedAt) / 60_000;
 	const marker = result.text.match(MARKER);
