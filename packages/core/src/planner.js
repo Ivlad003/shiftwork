@@ -115,12 +115,14 @@ function pickModel(args) {
  */
 function preferWaitOverPaid(picked, { config, tierName, cooldowns, now, blockedModels = [] }) {
 	const paid = new Set(config.paidProviders ?? []);
-	if (!picked.model || !paid.has(providerOf(picked.model))) return picked;
+	// OpenRouter-style `:free` models cost nothing even when their provider is listed as paid.
+	const isPaid = (model) => paid.has(providerOf(model)) && !String(model).endsWith(":free");
+	if (!picked.model || !isPaid(picked.model)) return picked;
 	const t = now instanceof Date ? now.getTime() : new Date(now).getTime();
 	const limit = t + (config.preferWaitMin ?? 30) * 60_000;
 	const candidates = [tierName, ...Object.keys(config.tiers ?? {})]
 		.flatMap((name) => config.tiers?.[name]?.chain ?? [])
-		.filter((model) => !paid.has(providerOf(model)) && !isBlocked(model, blockedModels));
+		.filter((model) => !isPaid(model) && !isBlocked(model, blockedModels));
 	const soonest = candidates
 		.map((model) => cooldownUntil(model, cooldowns))
 		.filter((until) => until && until.getTime() > t && until.getTime() <= limit)

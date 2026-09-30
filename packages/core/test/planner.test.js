@@ -537,3 +537,15 @@ test("planShift: a cooled cli backend is skipped", () => {
 	assert.equal(route.model, "anthropic/sonnet");
 	assert.equal(route.provider, "anthropic");
 });
+
+test("planShift: a ':free' model of a paid provider is used without waiting", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "quick" } },
+		tiers: { quick: { chain: ["sub/a", "paid/model:free"] } },
+		paidProviders: ["paid"],
+		preferWaitMin: 30,
+	});
+	const now = new Date("2026-01-01T00:00:00Z");
+	const soon = [{ provider: "sub", until: "2026-01-01T00:05:00Z", kind: "server" }];
+	assert.equal(planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: soon, now }).model, "paid/model:free");
+});

@@ -33,17 +33,19 @@
         "opencode-go/space-bunny-free",
         "openrouter/poolside/laguna-s-2.1:free",
         "openrouter/thinkingmachines/inkling:free",
-        "opencode-go/longcat-2.5-preview-free"
+        "opencode-go/longcat-2.5-preview-free",
+        "openrouter/qwen/qwen3.8-27b:free",
+        "openrouter/google/gemma-4-31b-it:free"
       ],
       "thinking": "low"
     },
     "standard": {
       "chain": [
+        "opencode-go/glm-5.3",
+        "opencode-go/deepseek-v4-pro",
         "opencode-go/kimi-k3",
         "opencode-go/qwen3.8-max",
-        "opencode-go/deepseek-v4-pro",
         "xai/grok-4.6",
-        "opencode-go/glm-5.3",
         "opencode-go/minimax-m3",
         "opencode-go/mimo-v2.6-pro"
       ]
