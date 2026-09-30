@@ -500,7 +500,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 
 	const verifyResult = ticket.verify.length ? await verify(ticket.verify, root) : null;
 	let followUp;
-	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { type, reason });
+	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { type, reason, verify: ticket.verify });
 	await tracker.appendComment(
 		ticket,
 		formatReviewComment({ route: plan, verdict, reason, warning, verifyResult, shift, followUp }),
@@ -508,15 +508,15 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 	return { verdict, reason, warning, followUp };
 }
 
-/** File the follow-up ticket: a new ticket in the feature, blocked by nothing. */
-async function createFollowUp(tracker, ticket, { type, reason }) {
+/** File the follow-up ticket: a new ticket in the feature, blocked by nothing, with the reviewed ticket's verify gate. */
+async function createFollowUp(tracker, ticket, { type, reason, verify }) {
 	const title = truncate(`Follow-up to ${ticket.feature}/${ticket.number}: ${reason}`, 80);
 	const what =
 		`${/[.!?…]$/.test(reason) ? reason : `${reason}.`} Filed by the review of ${ticket.feature}/${ticket.number} — see its "### Review" block in ${ticket.path}.`;
 	if (typeof tracker.createTicket !== "function") {
 		return { created: false, feature: ticket.feature, title, what };
 	}
-	return { ...(await tracker.createTicket(ticket.feature, { title, what, type })), created: true };
+	return { ...(await tracker.createTicket(ticket.feature, { title, what, type, verify })), created: true };
 }
 
 function formatReviewComment({ route, verdict, reason, warning, verifyResult, shift, followUp }) {

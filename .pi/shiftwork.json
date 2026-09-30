@@ -101,5 +101,13 @@
   "paidProviders": [
     "openrouter"
   ],
-  "preferWaitMin": 30
+  "preferWaitMin": 30,
+  "review": {
+    "enabled": true,
+    "tier": "standard",
+    "features": [
+      "local-and-skills",
+      "parallel"
+    ]
+  }
 }

@@ -1271,6 +1271,8 @@ test("a follow-up verdict files a new ready ticket in the feature", async () => 
 	assert.match(created, /\*\*Status:\*\* ready-for-agent/);
 	assert.match(created, /\*\*Blocked by:\*\* None/);
 	assert.match(created, /add integration tests\. Filed by the review of f\/01/);
+	// Without a gate nothing could resolve the follow-up: it inherits the reviewed ticket's.
+	assert.match(created, /\*\*Verify:\*\* `done\.txt`/);
 });
 
 test("a review without the marker is treated as accept with a warning", async () => {

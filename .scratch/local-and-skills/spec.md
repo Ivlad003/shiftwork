@@ -65,7 +65,7 @@ Installing Ollama itself; model downloads; publishing to external skill registri
 | NN | title | status | last route |
 | -- | ----- | ------ | ---------- |
 | 01 | Local models through Ollama | resolved | opencode-go/glm-5.3 |
-| 02 | Review shifts in a fresh context | ready-for-agent |  |
+| 02 | Review shifts in a fresh context | resolved | opencode-go/glm-5.3 |
 | 03 | `llms.txt` and `llms-full.txt` | ready-for-agent |  |
 | 04 | Installable `shiftwork` skill for pi, Claude Code, OpenCode, Codex, Cursor | ready-for-agent |  |
 <!-- shiftwork:tickets:end -->
