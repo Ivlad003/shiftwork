@@ -221,7 +221,9 @@ export function parseModelRef(ref) {
 	for (const backend of CLI_BACKENDS) {
 		const prefix = `${backend}:`;
 		if (ref.startsWith(prefix)) {
-			return { backend, model: ref.slice(prefix.length), provider: backend };
+			const model = ref.slice(prefix.length);
+			const provider = model.includes("/") ? `${backend}:${model.split("/")[0]}` : backend;
+			return { backend, model, provider };
 		}
 	}
 	return { backend: "pi", model: ref, provider: ref.split("/")[0] };

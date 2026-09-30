@@ -500,7 +500,7 @@ const refCases = [
 	["pi provider/model", "anthropic/sonnet", { backend: "pi", model: "anthropic/sonnet", provider: "anthropic" }],
 	["claude prefix", "claude:sonnet", { backend: "claude", model: "sonnet", provider: "claude" }],
 	["codex prefix", "codex:gpt-5.6-terra", { backend: "codex", model: "gpt-5.6-terra", provider: "codex" }],
-	["opencode prefix with slash", "opencode:opencode-go/kimi-k3", { backend: "opencode", model: "opencode-go/kimi-k3", provider: "opencode" }],
+	["opencode prefix with slash", "opencode:opencode-go/kimi-k3", { backend: "opencode", model: "opencode-go/kimi-k3", provider: "opencode:opencode-go" }],
 	["grok prefix", "grok:grok-4.7", { backend: "grok", model: "grok-4.7", provider: "grok" }],
 	["cursor prefix", "cursor:claude-sonnet-4", { backend: "cursor", model: "claude-sonnet-4", provider: "cursor" }],
 	["empty ref", "", { backend: "pi", model: "", provider: "" }],
