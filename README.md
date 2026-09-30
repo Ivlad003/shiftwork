@@ -13,6 +13,18 @@
 - **Provider fallback on rate and usage limits,** with a shared cooldown for all workers.
 - **Backends:** [pi](https://pi.dev), Claude Code, Codex, OpenCode, OpenRouter, xAI.
 
+## The `shiftwork` skill
+
+One install command per harness (the same skill: writing tickets, running the runner, reviewing landed work):
+
+| Harness | Command |
+| --- | --- |
+| [pi](https://pi.dev) | `pi install npm:pi-shiftwork` |
+| Claude Code | `/plugin marketplace add Ivlad003/shiftwork`, then `/plugin install shiftwork@shiftwork` |
+| OpenCode · Codex · Cursor | `npx degit Ivlad003/shiftwork/skills/shiftwork .agents/skills/shiftwork` |
+
+The skill lives at [`skills/shiftwork/`](skills/shiftwork/SKILL.md) (packaged into [`packages/pi`](packages/pi) and the Claude Code plugin in [`plugins/shiftwork`](plugins/shiftwork); `npm run sync-skills` refreshes the copies). To keep it on a checkout instead of a one-off copy, link it: `ln -s <shiftwork-checkout>/skills/shiftwork .agents/skills/shiftwork`.
+
 ## Packages
 
 | Package | What |
