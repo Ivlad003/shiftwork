@@ -366,6 +366,33 @@ test("a compliant soft limit keeps the agent's handoff note and adds no runner n
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /### Handoff\n- Agent: finished step/);
 	assert.doesNotMatch(text, /### Handoff — shift 1/);
+	assert.equal(backend.shifts[0].aborted, true, "the handed-off shift must be stopped before the next one starts");
+});
+
+test("a handoff whose work already passes the verify gate resolves without another shift", async () => {
+	const config = {
+		defaultType: "code",
+		maxAttempts: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "fake/m2"], budget: { maxTurns: 2 } } },
+		onExceed: { maxTurns: { to: "next", mode: "new-process" } },
+	};
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const turn = { type: "turn", usage: { input: 1, output: 1, totalTokens: 2 }, costUsd: 0 };
+	const backend = fakeBackend([{ files: { "done.txt": "" }, events: [turn, turn, turn, { type: "end", stopReason: "stop" }] }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config });
+
+	assert.equal(backend.shifts.length, 1);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+});
+
+test("headings an agent writes itself never shift the runner's shift numbers", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) + "\n## Comments\n\n### Shift 7 — manual, some-model\n- my notes\n" });
+
+	await run(root, fakeBackend([{ files: { "done.txt": "" } }]));
+
+	assert.match(await ticketText(root, "f", "01-a.md"), /^### Shift 1 — fake fake\/m1 \(low\)$/m);
 });
 
 test("a non-compliant soft limit gets a runner handoff note at the hard limit", async () => {

@@ -9,6 +9,8 @@ const NEEDS_INFO = "needs-info";
 const RESOLVED = "resolved";
 const READY = "ready-for-agent";
 const STOP_FILE = "STOP";
+/** Only the runner's own shift reports: "### Shift N — <backend> <model> (<thinking>)". */
+const SHIFT_REPORT = /^### Shift (\d+) — \S+ \S+ \([^)]*\)$/gm;
 const MARKER = /<shiftwork:needs-info\s+reason="([^"]*)"\s*\/>/;
 
 /**
@@ -74,7 +76,7 @@ export async function runFrontier({ root, tracker, backend, verify, config, work
 
 async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log }) {
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
-	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(/^### Shift (\d+) — /gm)].map((m) => Number(m[1]));
+	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
 	let shiftNumber = firstShift;
 	let handoffCount = 0;
@@ -104,7 +106,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		accumulateUsage(ticketUsage, shift);
 
 		const hasVerify = ticket.verify.length > 0;
-		const verifyResult = shift.needsInfo === null && !shift.handoff && hasVerify ? await verify(ticket.verify, cwd) : null;
+		// A handed-off shift may already have finished the work: the gate decides either way.
+		const verifyResult = shift.needsInfo === null && hasVerify ? await verify(ticket.verify, cwd) : null;
 		let decision = decideNext({
 			attempt,
 			maxAttempts,
@@ -115,7 +118,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 		const notes = [];
 		let nextRoute = undefined;
-		if (shift.handoff) {
+		if (shift.handoff && decision.action !== "resolve") {
+			// A handoff is not a failed attempt: only the verify gate after real work counts.
+			if (decision.action === "retry" || decision.reason?.startsWith("verify gate failed")) decision = { action: "retry" };
 			handoffCount++;
 			const handoffHistory = { previousRoute: route, exceededKind: shift.handoff.kind, ticketUsage };
 			nextRoute = { ...planShift({ ticket, config, history: handoffHistory }), backend: backend.name };
@@ -158,7 +163,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: NEEDS_INFO, reason: decision.reason };
 		}
 
-		if (shift.handoff && handoffCount <= maxHandoffs) {
+		if (shift.handoff && decision.action === "retry" && handoffCount <= maxHandoffs) {
 			previousRoute = route;
 			exceededKind = shift.handoff.kind;
 			// Before starting the next shift, make sure the ticket budget isn't exhausted.
@@ -294,6 +299,8 @@ async function runShift(backend, request, log) {
 			softFiredThisTurn = false;
 
 			if (await hasAgentHandoff()) {
+				// Stop the agent before anyone else touches its worktree.
+				await shift.abort().catch(() => {});
 				result.stopReason = result.stopReason ?? "agent-handoff";
 				result.handoff = { reason: "agent handoff", kind: exceededKind, agentNote: true };
 				break;

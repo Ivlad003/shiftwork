@@ -20,7 +20,8 @@ export function fakeBackend(script) {
 		shifts,
 		async startShift(request) {
 			const step = script[shifts.length] ?? { text: "Nothing to do." };
-			shifts.push({ request, step });
+			const record = { request, step, aborted: false };
+			shifts.push(record);
 			for (const [rel, content] of Object.entries(step.files ?? {})) {
 				await writeFile(join(request.cwd, rel), content);
 			}
@@ -52,6 +53,7 @@ export function fakeBackend(script) {
 				},
 				async abort() {
 					aborted = true;
+					record.aborted = true;
 				},
 			};
 		},

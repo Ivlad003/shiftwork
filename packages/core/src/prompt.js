@@ -16,6 +16,7 @@ Rules:
 - Never edit the ticket's "Status:" line. You may tick checkboxes you completed.
 - If you can't continue without information only a human has, stop and write exactly:
   <shiftwork:needs-info reason="one sentence saying what you need"/>
+- If you add notes to the ticket, put them under "### Notes"; never write headings that start with "### Shift" (the runner writes those) and write "### Handoff" only when asked for a handoff.
 - End with a short summary of what you changed and what, if anything, is left.
 - Soft limit: when the runner sends "${SOFT_LIMIT_STEER}", you have up to 2 more turns. Finish your current step, append a \`### Handoff\` note to the ticket's Comments with what was done, what remains, hypotheses, and files touched, then stop.
 `;
