@@ -94,12 +94,8 @@ test("a missing grok binary returns an error shift that ends immediately", { tim
 	assert.ok(shift.warnings.some((w) => /not available/.test(w)));
 });
 
-test("preloaded skills are prepended to the prompt passed to grok", { timeout: 30_000 }, async () => {
-	const skill = await mkdtemp(join(tmpdir(), "sw-grok-skill-"));
-	await mkdir(skill, { recursive: true });
-	await writeFile(join(skill, "SKILL.md"), "---\nname: alpha\n---\nAlpha preloaded body.");
-
-	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-preload-"));
+/** Runs a shift against a fake grok that records its `-p` argument, and returns the prompt. */
+async function recordedPrompt({ cwd, skills = { paths: [], preload: [], restricted: false }, systemPrompt = "Worker prompt.", prompt = "Do the ticket." }) {
 	const binDir = await mkdtemp(join(tmpdir(), "sw-grok-bin-"));
 	const grokPath = join(binDir, "grok");
 	await writeFile(
@@ -115,21 +111,58 @@ console.log(JSON.stringify({ type: "usage", usage: { input_tokens: 1, output_tok
 
 	const record = join(cwd, "shiftwork-prompt.txt");
 	const backend = createGrokBackend({ command: "grok", env: { PATH: `${binDir}:${process.env.PATH}`, SHIFTWORK_RECORD_PROMPT: record } });
-	const shift = await backend.startShift({
-		cwd,
-		route: { model: "grok-4.7", skills: { paths: [skill], preload: [skill], restricted: true } },
-		prompt: "Do the ticket.",
-		systemPrompt: "Worker prompt.",
-	});
+	const shift = await backend.startShift({ cwd, route: { model: "grok-4.7", skills }, systemPrompt, prompt });
 	for await (const event of shift.events) {
 		if (event.type === "end") break;
 	}
 	await shift.close?.();
+	await rm(binDir, { recursive: true, force: true });
+	return readFile(record, "utf8");
+}
 
-	const prompt = await readFile(record, "utf8");
+test("preloaded skills are prepended to the prompt passed to grok", { timeout: 30_000 }, async () => {
+	const skill = await mkdtemp(join(tmpdir(), "sw-grok-skill-"));
+	await mkdir(skill, { recursive: true });
+	await writeFile(join(skill, "SKILL.md"), "---\nname: alpha\n---\nAlpha preloaded body.");
+
+	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-preload-"));
+	const prompt = await recordedPrompt({ cwd, skills: { paths: [skill], preload: [skill], restricted: true } });
 	assert.match(prompt, /Worker prompt\./);
 	assert.match(prompt, /Alpha preloaded body\./);
 	assert.match(prompt, /Do the ticket\./);
+});
+
+test("AGENTS.md in the cwd lands in the prompt between the worker prompt and the ticket prompt", { timeout: 30_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-agents-"));
+	await writeFile(join(cwd, "AGENTS.md"), "The project codeword is PELICAN.");
+
+	const prompt = await recordedPrompt({ cwd });
+	const worker = prompt.indexOf("Worker prompt.");
+	const instructions = prompt.indexOf("# Project instructions (AGENTS.md)");
+	const codeword = prompt.indexOf("The project codeword is PELICAN.");
+	const ticket = prompt.indexOf("Do the ticket.");
+	assert.ok(worker >= 0 && instructions > worker && codeword > instructions && ticket > codeword, prompt);
+});
+
+test("CLAUDE.md is used when AGENTS.md is absent, and a line that is exactly @<path> expands one level deep", { timeout: 30_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-claude-"));
+	await writeFile(join(cwd, "CLAUDE.md"), "@NOTES.md");
+	await writeFile(join(cwd, "NOTES.md"), "Nested instructions.");
+
+	const prompt = await recordedPrompt({ cwd });
+	assert.match(prompt, /# Project instructions \(CLAUDE\.md\)/);
+	assert.match(prompt, /Nested instructions\./);
+	assert.ok(!prompt.includes("@NOTES.md"), prompt);
+});
+
+test("a CLAUDE.md @import that is missing is kept as a line, and no instruction files leaves the prompt unchanged", { timeout: 30_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-none-"));
+	const bare = await recordedPrompt({ cwd });
+	assert.equal(bare, "Worker prompt.\n\nDo the ticket.");
+
+	await writeFile(join(cwd, "CLAUDE.md"), "@AGENTS.md");
+	const dangling = await recordedPrompt({ cwd });
+	assert.match(dangling, /# Project instructions \(CLAUDE\.md\)\n\n@AGENTS\.md/);
 });
 
 test("restricted skills are delivered as symlinks in .agents/skills and excluded from git", { timeout: 30_000 }, async () => {
@@ -200,6 +233,30 @@ live(
 		const backend = createGrokBackend();
 		const available = await backend.probe("grok-4.7");
 		assert.equal(typeof available, "boolean");
+	},
+);
+
+live(
+	"a live grok shift reads the project's AGENTS.md and answers the codeword",
+	{ timeout: 180_000 },
+	async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "sw-grok-live-agents-"));
+		await writeFile(join(cwd, "AGENTS.md"), "The project codeword is PELICAN.");
+		const backend = createGrokBackend();
+		const shift = await backend.startShift({
+			cwd,
+			route: { model: "grok-4.7", skills: { paths: [], preload: [], restricted: false } },
+			prompt: "What is the project codeword? Reply with the codeword only.",
+			systemPrompt: "You are a test worker.",
+		});
+		const events = [];
+		for await (const event of shift.events) {
+			events.push(event);
+			if (event.type === "end") break;
+		}
+		await shift.close?.();
+		const text = events.filter((e) => e.type === "text").map((e) => e.text).join("");
+		assert.match(text, /PELICAN/, text);
 	},
 );
 

@@ -10,7 +10,8 @@ import { classifyError } from "shiftwork-core";
  * (and crashes without a TTY). Always invoke the binary as `grok`, never `agent`: Grok Build
  * and Cursor both install an `agent` symlink, and which one runs depends on PATH order.
  * Skills are delivered as symlinks in `.agents/skills/` inside the worktree, excluded from git.
- * The worker prompt is prepended to the prompt.
+ * The worker prompt, preloaded skills and the project instructions (`AGENTS.md`, else
+ * `CLAUDE.md`, with one level of `@<path>` imports) are prepended to the prompt.
  * Options: { command?: "grok", args?: string[], env?: object, timeoutMs?: number }
  */
 const SAFETY_TIMEOUT_MS = 3 * 60 * 60_000;
@@ -54,7 +55,8 @@ export function createGrokBackend(options = {}) {
 			}
 
 			const preload = await loadPreload(route.skills?.preload ?? []);
-			const fullPrompt = [systemPrompt, preload.text, prompt].filter(Boolean).join("\n\n");
+			const projectInstructions = await loadProjectInstructions(cwd);
+			const fullPrompt = [systemPrompt, preload.text, projectInstructions, prompt].filter(Boolean).join("\n\n");
 
 			const skillPaths = route.skills?.restricted ? route.skills.paths ?? [] : [];
 			const skillsDir = join(cwd, ".agents", "skills");
@@ -243,6 +245,28 @@ function unavailableShift(reason) {
 		async abort() {},
 		async close() {},
 	};
+}
+
+const PROJECT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"];
+
+/**
+ * The project instructions grok itself never loads: `AGENTS.md`, else `CLAUDE.md`, from the
+ * shift's cwd (pi's file choice). A line that is exactly `@<path>` (as in this repo's
+ * `CLAUDE.md`) is replaced by that file's content, one level deep, paths relative to the
+ * instruction file. Missing files add nothing.
+ */
+async function loadProjectInstructions(cwd) {
+	for (const name of PROJECT_INSTRUCTION_FILES) {
+		const text = await readFile(join(cwd, name), "utf8").catch(() => null);
+		if (text === null) continue;
+		const lines = [];
+		for (const line of text.split("\n")) {
+			const imported = line.startsWith("@") && line.length > 1 ? await readFile(join(cwd, line.slice(1)), "utf8").catch(() => null) : null;
+			lines.push(imported ?? line);
+		}
+		return `# Project instructions (${name})\n\n${lines.join("\n")}`;
+	}
+	return "";
 }
 
 async function loadPreload(preloadPaths) {
