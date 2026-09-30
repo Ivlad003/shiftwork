@@ -105,6 +105,40 @@ test("dashboard: an empty state renders without crashing", () => {
 	assert.match(frame, /Log: no current shift log/);
 });
 
+test("dashboard: the header lists the control keys", () => {
+	const frame = renderDashboard({ now }).join("\n");
+	assert.match(frame, /r run · s stop · d dry-run · f filter · q quits/);
+});
+
+test("dashboard: a feature filter scopes the frontier and the ticket tables", () => {
+	const frame = renderDashboard({
+		...base,
+		tickets: [ticket("a", "01", "One"), ticket("b", "01", "Two")],
+		frontier: [ticket("a", "01", "One"), ticket("b", "01", "Two")],
+		featureFilter: "b",
+	}).join("\n");
+
+	assert.match(frame, /filter: b/);
+	assert.match(frame, /Frontier: b\/01 \(1 ready of 1\)/);
+	assert.match(frame, /\| 01 \| Two \|/);
+	assert.doesNotMatch(frame, /\| 01 \| One \|/);
+	assert.doesNotMatch(frame, /^a \(0\/1 resolved\)$/m);
+});
+
+test("dashboard: a notice and the dry-run panel render", () => {
+	const frame = renderDashboard({
+		...base,
+		notice: "runner started (pid 4242)",
+		dryRun: { lines: ["f/01  type=git  tier=quick  model=fake/m1"] },
+	}).join("\n");
+
+	assert.match(frame, /» runner started \(pid 4242\)/);
+	assert.match(frame, /Dry-run:\n {2}f\/01 {2}type=git/);
+
+	const pending = renderDashboard({ ...base, featureFilter: "f", dryRun: { pending: true } }).join("\n");
+	assert.match(pending, /Dry-run \(feature f\): planning…/);
+});
+
 test("collectDashboardState: an empty repo has no run, no log and no tickets", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-tui-empty-"));
 	const state = await collectDashboardState(root, { now });

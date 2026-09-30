@@ -85,16 +85,26 @@ function logDetail(event) {
  */
 export function renderDashboard(state) {
 	const now = state.now ?? new Date();
-	const tickets = state.tickets ?? [];
-	const frontier = state.frontier ?? [];
 	const claims = state.claims ?? [];
 	const cooldowns = state.cooldowns ?? [];
-	const lines = [`shiftwork tui ${VERSION} · ${stamp(now)} · q quits`, ""];
+	const filter = state.featureFilter ?? null;
+	const tickets = filter ? (state.tickets ?? []).filter((t) => t.feature === filter) : (state.tickets ?? []);
+	const frontier = filter ? (state.frontier ?? []).filter((t) => t.feature === filter) : (state.frontier ?? []);
+	const keys = `r run · s stop · d dry-run · f filter · q quits`;
+	const lines = [`shiftwork tui ${VERSION} · ${stamp(now)} · ${keys}${filter ? ` · filter: ${filter}` : ""}`];
+	if (state.notice) lines.push(`» ${state.notice}`);
+	lines.push("");
 	lines.push(...renderRunner(state.run, cooldowns, now), "");
 	lines.push(...renderFeatures(tickets, frontier, claims, now), "");
 	lines.push(...renderCooldowns(cooldowns, now), "");
 	lines.push(...renderLog(state.log));
+	if (state.dryRun) lines.push("", ...renderDryRun(state.dryRun, filter));
 	return lines;
+}
+
+function renderDryRun(dryRun, filter) {
+	if (dryRun.pending) return [`Dry-run${filter ? ` (feature ${filter})` : ""}: planning…`];
+	return [`Dry-run${filter ? ` (feature ${filter})` : ""}:`, ...(dryRun.lines ?? []).map((line) => `  ${line}`)];
 }
 
 function renderRunner(run, cooldowns, now) {

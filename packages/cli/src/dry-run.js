@@ -1,4 +1,8 @@
-import { planShift } from "shiftwork-core";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { loadConfig, openCooldowns, openRepoTracker, planShift, validateConfig } from "shiftwork-core";
+import { createJevClassifier } from "./jev.js";
 
 /** Plan each frontier ticket, classifying untyped ones, and print the route. Spends nothing besides classify. */
 export async function dryRunFrontier({ tickets, config, cooldowns = [], classifyTicket, log = console.log }) {
@@ -35,6 +39,29 @@ const BUDGET_PARTS = [
 	["maxContextPct", (v) => `${v}% ctx`],
 	["stallTurns", (v) => `${v} stall`],
 ];
+
+/**
+ * The dry-run of `shiftwork run` as an array of lines: what each frontier ticket would
+ * route to. Used by the CLI (`run --dry-run`) and the TUI's `d` key. Pass a ready
+ * `config` to skip loading `.pi/shiftwork.json`; `agentDir` keeps the jev classifier
+ * away from the user's real pi agent dir in tests.
+ */
+export async function collectDryRunLines(root, { feature, config, agentDir } = {}) {
+	agentDir ??= process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+	config ??= validateConfig({
+		...(await loadConfig(root, agentDir)),
+		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
+	});
+	const tickets = (await (await openRepoTracker(root, config)).frontier()).filter((t) => !feature || t.feature === feature);
+	const cooldowns = await openCooldowns(root).active();
+	const lines = [];
+	await dryRunFrontier({ tickets, config, cooldowns, classifyTicket: createJevClassifier({ config, agentDir }), log: (line) => lines.push(line) });
+	return lines;
+}
+
+function readOptional(path) {
+	return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+}
 
 export function formatBudget(budget) {
 	if (!budget) return "-";

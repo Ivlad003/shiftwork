@@ -14,7 +14,7 @@ Usage:
                                 List tickets and the frontier of ready ones
   shiftwork run [options]       Work the frontier until nothing is left
   shiftwork tui [--once] [--dir <path>]
-                                Read-only dashboard: tickets, the live runner, cooldowns and logs
+                                Dashboard: tickets, the live runner, cooldowns, logs; r runs, s stops, d dry-runs
   shiftwork --version
 
 Run options:
@@ -161,18 +161,9 @@ async function run(argv) {
 	});
 
 	if (values["dry-run"]) {
-		const { dryRunFrontier } = await import("../src/dry-run.js");
-		const { createJevClassifier } = await import("../src/jev.js");
-		const tickets = (await (await openRepoTracker(root, config)).frontier()).filter((t) => !values.feature || t.feature === values.feature);
-		const cooldowns = await openCooldowns(root).active();
+		const { collectDryRunLines } = await import("../src/dry-run.js");
 		const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-		await dryRunFrontier({
-			tickets,
-			config,
-			cooldowns,
-			classifyTicket: createJevClassifier({ config, agentDir }),
-			log: console.log,
-		});
+		for (const line of await collectDryRunLines(root, { feature: values.feature, config, agentDir })) console.log(line);
 		return 0;
 	}
 
