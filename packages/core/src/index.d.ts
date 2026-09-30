@@ -189,18 +189,8 @@ export declare function openCooldowns(root: string): {
 	add(provider: string, until: Date | string, kind?: string): Promise<void>;
 };
 
-export interface RunState {
-	pid?: number;
-	running?: boolean;
-	/** Whether the runner process that wrote this state is still alive. */
-	live?: boolean;
-	startedAt?: string;
-	updatedAt?: string;
-	finishedAt?: string | null;
-	feature?: string | null;
-	stoppedReason?: string | null;
-	/** Where a detached runner's output goes, when something started it that way. */
-	logFile?: string;
+/** One running shift in the run state: a worker entry per ticket being worked. */
+export interface RunStateWorker {
 	ticket?: { feature?: string; number?: string; title?: string; path?: string } | null;
 	attempt?: number;
 	shift?: number;
@@ -209,15 +199,53 @@ export interface RunState {
 	tier?: string | null;
 	budget?: Budget | null;
 	usage?: { tokens: number; costUsd: number; turns: number; contextPct: number };
+}
+
+/** One runner process's entry in the run state: its run and its running shifts. */
+export interface RunStateRunner extends RunStateWorker {
+	pid?: number;
+	running?: boolean;
+	/** Whether this runner process is still alive. */
+	live?: boolean;
+	startedAt?: string;
+	updatedAt?: string;
+	finishedAt?: string | null;
+	feature?: string | null;
+	stoppedReason?: string | null;
+	/** Where a detached runner's output goes, when something started it that way. */
+	logFile?: string;
+	workers?: RunStateWorker[];
 	summary?: { resolved: number; needsInfo: number; reopened?: number };
+}
+
+export interface RunState extends RunStateRunner {
+	/** Every running shift across the live runners. */
+	workers?: RunStateWorker[];
+	/** Every runner entry (newest last), each with its own workers. */
+	runners?: RunStateRunner[];
 }
 
 export interface RunStateStore {
 	path: string | undefined;
 	read(): Promise<RunState | null>;
-	update(patch: Partial<RunState>): Promise<void>;
+	/** Merge `patch` into `patch.pid`'s runner entry (this process's by default). */
+	update(patch: Partial<RunStateRunner> & { pid?: number }): Promise<void>;
+	/** Merge `patch` into this process's worker entry for `ticket`. */
+	updateWorker(ticket: { feature?: string; number?: string }, patch: Partial<RunStateWorker>): Promise<void>;
+	/** Remove this process's worker entry for `ticket` once the shift settles. */
+	removeWorker(ticket: { feature?: string; number?: string }): Promise<void>;
 	clear(): Promise<void>;
 }
 
 export declare function openRunState(root: string): RunStateStore;
 export declare function noRunState(): RunStateStore;
+
+/** The shared-state lock path: `.pi/shiftwork.lock`. */
+export declare function lockPath(root: string): string;
+/**
+ * Run `fn` while holding the repo's shared-state lock, so parallel shifts and a
+ * second runner process never interleave a read-modify-write of the shared state
+ * (cooldowns, run-state, the spec tickets table). A lock left by a dead pid is
+ * taken over at once; a live one is waited for.
+ */
+export declare function withLock(root: string, fn: () => Promise<T>, options?: { pid?: number; timeoutMs?: number; stepMs?: number }): Promise<T>;

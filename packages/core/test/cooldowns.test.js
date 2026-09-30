@@ -25,3 +25,18 @@ test("active() hides expired cooldowns", async () => {
 	await store.add("openai", new Date("2020-01-01T00:00:00Z"), "quota");
 	assert.deepEqual(await store.active(new Date("2026-01-01")), []);
 });
+
+test("two writers through separate stores never lose a cooldown (the shared lock)", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-cd-"));
+	const until = new Date(Date.now() + 60_000).toISOString();
+	const a = openCooldowns(root);
+	const b = openCooldowns(root);
+
+	await Promise.all([
+		...[...Array(50).keys()].map((i) => a.add(`provider-a-${i}`, until, "limit")),
+		...[...Array(50).keys()].map((i) => b.add(`provider-b-${i}`, until, "rate")),
+	]);
+
+	const active = await openCooldowns(root).active();
+	assert.equal(active.length, 100, "all 100 cooldowns of both writers must be present");
+});

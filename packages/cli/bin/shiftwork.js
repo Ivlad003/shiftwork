@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { formatTicketsTable, loadConfig, openCooldowns, openRepoTracker, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { formatTicketsTable, loadConfig, openCooldowns, openRepoTracker, openRunState, runFrontier, validateConfig, VERSION } from "shiftwork-core";
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
@@ -107,6 +107,20 @@ async function status(argv) {
 		console.log("\nActive claims:");
 		for (const c of claims) {
 			console.log(`  ${c.ticket.feature}/${c.ticket.number}  pid ${c.pid}  age ${formatAge(Date.now() - new Date(c.at).getTime())}`);
+		}
+	}
+
+	// Every running shift, across parallel workers and second runner processes.
+	const run = await openRunState(dir).read();
+	if (run?.live) {
+		const workers = run.workers ?? [];
+		console.log("\nRunning shifts:");
+		if (!workers.length) console.log(`  runner pid ${run.pid} · between tickets`);
+		for (const w of workers) {
+			const t = w.ticket ?? {};
+			console.log(
+				`  ${t.feature ?? "?"}/${t.number ?? "?"}  pid ${run.pid}  shift ${w.shift ?? "?"} · attempt ${w.attempt ?? "?"} · ${w.model ?? "?"}`,
+		);
 		}
 	}
 

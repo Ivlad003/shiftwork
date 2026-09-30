@@ -137,7 +137,7 @@ test("/shift run refuses to start a second runner", { timeout: 90_000 }, async (
 
 	assert.equal(await client.prompt("/shift run"), "handled");
 	await waitFor(() => ui.find((r) => r.method === "notify" && /runner started/.test(r.message)));
-	await waitFor(async () => (await openRunState(cwd).read())?.ticket);
+	await waitFor(async () => (await openRunState(cwd).read())?.workers?.length);
 
 	assert.equal(await client.prompt("/shift run"), "handled");
 	const warning = await waitFor(() => ui.find((r) => r.method === "notify" && r.notifyType === "warning"));

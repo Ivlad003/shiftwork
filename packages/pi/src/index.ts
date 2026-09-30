@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { frontier, loadConfig, loadTickets, openRunState, skillsForModel, type RunState } from "shiftwork-core";
+import { frontier, loadConfig, loadTickets, openRunState, skillsForModel, type RunState, type RunStateWorker } from "shiftwork-core";
 
 const WIDGET = "shiftwork";
 const POLL_MS = 1000;
@@ -111,7 +111,7 @@ async function applyTierSkills(
 async function showFrontier(ctx: ExtensionContext) {
 	const tickets = await loadTickets(ctx.cwd);
 	const state = await openRunState(ctx.cwd).read();
-	const runner = state?.live ? `\nRunner: pid ${state.pid} · ${describeTicket(state)}` : "";
+	const runner = state?.live ? `\nRunner: pid ${state.pid} · ${describeRun(state)}` : "";
 	if (tickets.length === 0) {
 		ctx.ui.notify(`Shiftwork: no tickets in .scratch/<feature>/issues/*.md${runner}`, "info");
 		return;
@@ -126,7 +126,7 @@ async function startRunner(ctx: ExtensionContext, args: string[], watch: (ctx: E
 	const runState = openRunState(ctx.cwd);
 	const state = await runState.read();
 	if (state?.live) {
-		ctx.ui.notify(`Shiftwork: a runner is already working (pid ${state.pid}) · ${describeTicket(state)}`, "warning");
+		ctx.ui.notify(`Shiftwork: a runner is already working (pid ${state.pid}) · ${describeRun(state)}`, "warning");
 		watch(ctx);
 		return;
 	}
@@ -159,7 +159,7 @@ async function startRunner(ctx: ExtensionContext, args: string[], watch: (ctx: E
 		startedAt: new Date().toISOString(),
 		finishedAt: null,
 		stoppedReason: null,
-		ticket: null,
+		workers: [],
 		summary: { resolved: 0, needsInfo: 0 },
 		logFile,
 	});
@@ -177,7 +177,7 @@ async function stopRunner(ctx: ExtensionContext) {
 	ctx.ui.notify(`Shiftwork: STOP file written${who}`, "info");
 }
 
-/** The status widget: current ticket, shift, model and budget use. */
+/** The status widget: every running shift — its ticket, shift, model and budget use. */
 function widgetLines(state: RunState): string[] {
 	if (!state.live) {
 		const counts = state.summary ?? { resolved: 0, needsInfo: 0 };
@@ -185,25 +185,32 @@ function widgetLines(state: RunState): string[] {
 		return [`Shiftwork: runner finished · ${counts.resolved} resolved, ${counts.needsInfo} need info${stopped}`];
 	}
 	const feature = state.feature ? ` · feature ${state.feature}` : "";
-	const head = `Shiftwork: ${describeTicket(state)}${feature}`;
-	if (!state.ticket) return [head];
-	const usage = state.usage ?? { tokens: 0, costUsd: 0, turns: 0, contextPct: 0 };
+	const workers = state.workers ?? [];
+	if (!workers.length) return [`Shiftwork: runner pid ${state.pid} · looking for work${feature}`];
+	const head = `Shiftwork: runner pid ${state.pid} · ${workers.length} worker${workers.length > 1 ? "s" : ""}${feature}`;
+	return [head, ...workers.flatMap(workerLines)];
+}
+
+function workerLines(worker: RunStateWorker): string[] {
+	const t = worker.ticket;
+	const head = `  ${t?.feature ?? "?"}/${t?.number ?? "?"} ${t?.title ?? ""}`.trimEnd() + ` · shift ${worker.shift ?? 1} · attempt ${worker.attempt ?? 1}`;
+	const usage = worker.usage ?? { tokens: 0, costUsd: 0, turns: 0, contextPct: 0 };
 	const parts = [
-		state.model ?? "?",
-		`${formatTokens(usage.tokens)} tokens${limit(state.budget?.maxTokens, usage.tokens, formatTokens)}`,
-		`$${usage.costUsd.toFixed(2)}${limit(state.budget?.maxCostUsd, usage.costUsd, (n) => `$${n.toFixed(2)}`)}`,
-		`${usage.turns} turns${limit(state.budget?.maxTurns, usage.turns, String)}`,
+		worker.model ?? "?",
+		`${formatTokens(usage.tokens)} tokens${limit(worker.budget?.maxTokens, usage.tokens, formatTokens)}`,
+		`$${usage.costUsd.toFixed(2)}${limit(worker.budget?.maxCostUsd, usage.costUsd, (n) => `$${n.toFixed(2)}`)}`,
+		`${usage.turns} turns${limit(worker.budget?.maxTurns, usage.turns, String)}`,
 	];
 	if (usage.contextPct) parts.push(`${Math.round(usage.contextPct)}% context`);
 	return [head, `  ${parts.join(" · ")}`];
 }
 
-function describeTicket(state: RunState): string {
-	if (!state?.ticket) return state?.live ? "looking for work" : "idle";
-	const { feature, number, title } = state.ticket;
-	const shift = state.shift ? ` · shift ${state.shift}` : "";
-	const attempt = state.attempt ? ` · attempt ${state.attempt}` : "";
-	return `${feature}/${number} ${title ?? ""}`.trim() + shift + attempt;
+/** What the runners are doing, for notices: one line naming every running shift. */
+function describeRun(state: RunState): string {
+	const workers = state?.workers ?? [];
+	if (!workers.length) return "looking for work";
+	const list = workers.map((w) => `${w.ticket?.feature ?? "?"}/${w.ticket?.number ?? "?"}`).join(", ");
+	return workers.length > 1 ? `${workers.length} workers: ${list}` : list;
 }
 
 function limit(max: number | undefined, used: number, format: (n: number) => string): string {

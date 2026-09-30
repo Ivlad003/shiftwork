@@ -125,7 +125,7 @@ test("r starts the stub runner detached; s stops it with a STOP file", async () 
 	// The runner is its own process, live in the run state, and got the feature filter.
 	const state = await waitFor(async () => {
 		const s = await openRunState(root).read();
-		return s?.ticket ? s : false;
+		return s?.workers?.length ? s : false;
 	});
 	assert.equal(state.live, true);
 	assert.notEqual(state.pid, process.pid);

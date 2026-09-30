@@ -40,6 +40,14 @@ _Avoid_: tests, checks, acceptance step
 The Shiftwork process that works the frontier until nothing is left or a limit stops it.
 _Avoid_: orchestrator, daemon, loop
 
+**Worker**:
+One running shift of a parallel run: the runner works one ticket per worker, up to its `parallel` count.
+_Avoid_: thread, job, child process
+
+**Shared-state lock**:
+The runner's short hold on `.pi/shiftwork.lock` around every read-modify-write of the shared state — cooldowns, the run state, the spec table — so parallel shifts and a second runner never lose an update. Stale when the pid holding it is gone.
+_Avoid_: mutex, semaphore, claim
+
 **Backend**:
 The agent program that carries out a shift, such as pi, Claude Code, Codex or OpenCode.
 _Avoid_: harness, engine, agent, provider

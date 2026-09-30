@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { CLAIMED, frontier, loadTickets, READY } from "./index.js";
+import { createExclusive, isAlive, readOwner, withLock } from "./lock.js";
 
 const TABLE_START = "<!-- shiftwork:tickets:start -->";
 const TABLE_END = "<!-- shiftwork:tickets:end -->";
@@ -130,17 +131,21 @@ function featureOf(ticketOrClaim, path) {
 
 async function syncSpecTable(root, feature) {
 	if (!feature) return;
-	const specPath = join(root, ".scratch", feature, "spec.md");
-	let spec;
-	try {
-		spec = await readFile(specPath, "utf8");
-	} catch (error) {
-		if (error.code === "ENOENT") return;
-		throw error;
-	}
-	const tickets = (await loadTickets(root)).filter((t) => t.feature === feature);
-	const next = applyTicketsTable(spec, formatTicketsTable(tickets));
-	if (next !== spec) await writeAtomic(specPath, next);
+	// The spec table is shared state: it is recomputed under the shared-state lock
+	// so parallel shifts and a second runner never lose a status change.
+	await withLock(root, async () => {
+		const specPath = join(root, ".scratch", feature, "spec.md");
+		let spec;
+		try {
+			spec = await readFile(specPath, "utf8");
+		} catch (error) {
+			if (error.code === "ENOENT") return;
+			throw error;
+		}
+		const tickets = (await loadTickets(root)).filter((t) => t.feature === feature);
+		const next = applyTicketsTable(spec, formatTicketsTable(tickets));
+		if (next !== spec) await writeAtomic(specPath, next);
+	});
 }
 
 function applyTicketsTable(spec, table) {
@@ -172,34 +177,5 @@ export async function writeAtomic(path, content) {
 	} catch (error) {
 		await unlink(tmp).catch(() => {});
 		throw error;
-	}
-}
-
-export async function createExclusive(path, owner) {
-	try {
-		const handle = await open(path, "wx");
-		await handle.writeFile(JSON.stringify(owner));
-		await handle.close();
-		return true;
-	} catch (error) {
-		if (error.code === "EEXIST") return false;
-		throw error;
-	}
-}
-
-export async function readOwner(path) {
-	try {
-		return JSON.parse(await readFile(path, "utf8"));
-	} catch {
-		return null;
-	}
-}
-
-export function isAlive(pid) {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return error.code === "EPERM";
 	}
 }

@@ -115,6 +115,7 @@ export async function loadTickets(root = process.cwd()) {
 export { formatTicketsTable, openTracker } from "./tracker.js";
 export { detectTracker, openOpenSpecTracker, openRepoTracker, parseTasks } from "./openspec.js";
 export { openCooldowns } from "./cooldowns.js";
+export { lockPath, withLock } from "./lock.js";
 export { noRunState, openRunState } from "./run-state.js";
 export { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, WORKER_PROMPT } from "./prompt.js";
 export { decideNext, runFrontier, shouldReview } from "./runner.js";

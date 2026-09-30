@@ -1,0 +1,59 @@
+{
+  "runners": [
+    {
+      "pid": 1760255,
+      "running": true,
+      "startedAt": "2026-09-30T16:22:48.299Z",
+      "finishedAt": null,
+      "feature": null,
+      "workers": [
+        {
+          "ticket": {
+            "feature": "parallel",
+            "number": "01",
+            "title": "First",
+            "path": "/tmp/sw-fixture-iOxvEP/.scratch/parallel/issues/01-first.md"
+          },
+          "attempt": 1,
+          "shift": 1,
+          "model": "fake/m1",
+          "thinking": "low",
+          "tier": null,
+          "budget": {},
+          "usage": {
+            "tokens": 120,
+            "costUsd": 0.01,
+            "turns": 1,
+            "contextPct": 0
+          }
+        },
+        {
+          "ticket": {
+            "feature": "parallel",
+            "number": "02",
+            "title": "Second",
+            "path": "/tmp/sw-fixture-iOxvEP/.scratch/parallel/issues/02-second.md"
+          },
+          "attempt": 1,
+          "shift": 1,
+          "model": "fake/m1",
+          "thinking": "low",
+          "tier": null,
+          "budget": {},
+          "usage": {
+            "tokens": 120,
+            "costUsd": 0.01,
+            "turns": 1,
+            "contextPct": 0
+          }
+        }
+      ],
+      "summary": {
+        "resolved": 0,
+        "needsInfo": 0,
+        "reopened": 0
+      },
+      "updatedAt": "2026-09-30T16:22:48.329Z"
+    }
+  ]
+}

@@ -27,9 +27,11 @@ export async function collectDashboardState(root, { now = new Date(), logTail = 
 
 /** The last `maxLines` events of the log the current attempt is writing; null when no shift is live. */
 export async function tailShiftLog(root, run, maxLines = LOG_TAIL) {
-	const ticket = run?.ticket;
-	if (!ticket?.feature || !ticket?.number || !run?.attempt) return null;
-	const path = join("logs", ticket.feature, ticket.number, `attempt-${run.attempt}.jsonl`);
+	// The first live worker's log: with several workers, one tail is shown.
+	const worker = (run?.workers ?? []).find((w) => w.ticket?.feature && w.ticket?.number && w.attempt);
+	if (!worker) return null;
+	const ticket = worker.ticket;
+	const path = join("logs", ticket.feature, ticket.number, `attempt-${worker.attempt}.jsonl`);
 	let text;
 	try {
 		text = await readFile(join(root, path), "utf8");
@@ -109,15 +111,30 @@ function renderDryRun(dryRun, filter) {
 
 function renderRunner(run, cooldowns, now) {
 	if (!run) return ["Runner: idle (no run state)"];
-	if (run.live && run.ticket) {
-		const t = run.ticket;
-		const lines = [
-			`Runner: working ${t.feature}/${t.number}${t.title ? ` · ${t.title}` : ""}`,
-			`  shift ${run.shift ?? 1} · attempt ${run.attempt ?? 1} · ${run.model ?? "?"}${run.thinking ? ` · thinking ${run.thinking}` : ""}`,
-			`  usage: ${formatUsage(run.usage ?? {})}`,
-		];
-		if (run.budget) lines.push(`  budget: ${formatBudget(run.budget)}`);
-		lines.push(`  started ${formatAge(now - new Date(run.startedAt ?? now))} ago`);
+	const workers = run.workers ?? [];
+	if (run.live && workers.length) {
+		const started = `  started ${formatAge(now - new Date(run.startedAt ?? now))} ago`;
+		if (workers.length === 1) {
+			const w = workers[0];
+			const t = w.ticket ?? {};
+			const lines = [
+				`Runner: working ${t.feature ?? "?"}/${t.number ?? "?"}${t.title ? ` · ${t.title}` : ""} (pid ${run.pid})`,
+				`  shift ${w.shift ?? 1} · attempt ${w.attempt ?? 1} · ${w.model ?? "?"}${w.thinking ? ` · thinking ${w.thinking}` : ""}`,
+				`  usage: ${formatUsage(w.usage ?? {})}`,
+			];
+			if (w.budget) lines.push(`  budget: ${formatBudget(w.budget)}`);
+			lines.push(started);
+			return lines;
+		}
+		const lines = [`Runner: running (pid ${run.pid}) · ${workers.length} workers`];
+		for (const w of workers) {
+			const t = w.ticket ?? {};
+			lines.push(
+				`  ${t.feature ?? "?"}/${t.number ?? "?"}${t.title ? ` · ${t.title}` : ""} · shift ${w.shift ?? 1} · attempt ${w.attempt ?? 1} · ${w.model ?? "?"}`,
+				`    usage: ${formatUsage(w.usage ?? {})}`,
+		);
+		}
+		lines.push(started);
 		return lines;
 	}
 	if (run.live || run.running) {

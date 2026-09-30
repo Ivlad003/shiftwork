@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { withLock } from "./lock.js";
 
 /**
  * Open the shared cooldown state at `.pi/shiftwork-state.json`.
@@ -19,9 +20,13 @@ export function openCooldowns(root) {
 	}
 
 	async function update(change) {
-		const state = await read();
-		state.cooldowns = change(state.cooldowns ?? []);
-		await writeAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
+		// Read-modify-write under the shared-state lock: parallel shifts in this
+		// process and a second runner never lose each other's cooldowns.
+		await withLock(root, async () => {
+			const state = await read();
+			state.cooldowns = change(state.cooldowns ?? []);
+			await writeAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
+		});
 	}
 
 	return {

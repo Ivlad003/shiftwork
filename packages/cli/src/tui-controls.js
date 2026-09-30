@@ -151,7 +151,7 @@ export async function startDetachedRunner(root, { feature, bin } = {}) {
 		startedAt: new Date().toISOString(),
 		finishedAt: null,
 		stoppedReason: null,
-		ticket: null,
+		workers: [],
 		summary: { resolved: 0, needsInfo: 0 },
 		logFile,
 	});

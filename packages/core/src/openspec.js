@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CLAIMED, frontier as computeFrontier, READY, RESOLVED } from "./index.js";
-import { createExclusive, isAlive, openTracker, readOwner, writeAtomic } from "./tracker.js";
+import { createExclusive, isAlive, readOwner } from "./lock.js";
+import { openTracker, writeAtomic } from "./tracker.js";
 
 /** Default verify gate of an OpenSpec task; `<change>` is replaced by the change name. */
 const DEFAULT_VERIFY = ["openspec validate <change>"];

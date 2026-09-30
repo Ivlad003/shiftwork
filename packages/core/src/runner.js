@@ -88,24 +88,30 @@ export async function runFrontier({
 		else if (outcome.action === "reopen") summary.reopened.push({ ...ticket, reason: outcome.reason, review: outcome.review });
 		else if (outcome.action === NEEDS_INFO) summary.needsInfo.push({ ...ticket, reason: outcome.reason });
 	};
-	const workOne = (ticket, ws = workspace) =>
-		workTicket({
-			root,
-			ticket,
-			tracker,
-			backend,
-			verify,
-			config,
-			workspace: ws,
-			maxAttempts,
-			log,
-			classify,
-			classifyTicket,
-			clock: time,
-			cooldowns: cooldownStore,
-			runState: state,
-			slots,
-		});
+	const workOne = async (ticket, ws = workspace) => {
+		try {
+			return await workTicket({
+				root,
+				ticket,
+				tracker,
+				backend,
+				verify,
+				config,
+				workspace: ws,
+				maxAttempts,
+				log,
+				classify,
+				classifyTicket,
+				clock: time,
+				cooldowns: cooldownStore,
+				runState: state,
+				slots,
+			});
+		} finally {
+			// The worker entry is gone once the shift settles: readers see only running shifts.
+			await state.removeWorker(ticket);
+		}
+	};
 	const frontierPage = async () =>
 		(await tracker.frontier()).filter((t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature));
 
@@ -115,12 +121,15 @@ export async function runFrontier({
 		startedAt: new Date().toISOString(),
 		finishedAt: null,
 		feature: options.feature ?? null,
-		ticket: null,
+		workers: [],
 		summary: { resolved: 0, needsInfo: 0, reopened: 0 },
 	});
 
 	// `once` is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
-	if (parallel > 1 && !options.once) await runInPool();
+	// One worker failing is not the end of the run's bookkeeping: the pool lets the
+	// others settle, the run state is finished, and only then the error propagates.
+	let failure = null;
+	if (parallel > 1 && !options.once) failure = await runInPool();
 	else
 		for (;;) {
 			if (checkStop(root)) {
@@ -157,27 +166,34 @@ export async function runFrontier({
 	await state.update({
 		running: false,
 		finishedAt: new Date().toISOString(),
-		ticket: null,
 		stoppedReason: summary.stoppedReason ?? null,
 		summary: counts(),
+		workers: [],
 	});
+	if (failure) throw failure;
 	return summary;
 
-	/** Work up to `parallel` frontier tickets at once; after any one finishes, re-read the frontier. */
+	/** Work up to `parallel` frontier tickets at once; after any one finishes, re-read the frontier.
+	 * Returns the first worker error, if any, for the caller to propagate once every
+	 * worker has settled. */
 	async function runInPool() {
 		// Landings (git merges in the root checkout) go through one in-process queue.
 		const ws = workspace ? withLandingQueue(workspace) : undefined;
 		const running = [];
 		let stopping = false;
+		let failure = null;
 		const startWorker = (ticket, claim) => {
 			const worker = (async () => {
-				let outcome;
+				let outcome = null;
+				let error = null;
 				try {
 					outcome = await workOne(ticket, ws);
+				} catch (thrown) {
+						error = thrown;
 				} finally {
 					await tracker.release(claim);
 				}
-				return { worker, ticket, outcome };
+				return { worker, ticket, outcome, error };
 			})();
 			return worker;
 		};
@@ -199,6 +215,12 @@ export async function runFrontier({
 			if (running.length === 0) break;
 			const done = await Promise.race(running);
 			running.splice(running.indexOf(done.worker), 1);
+			if (done.error) {
+				// A failed worker ends the run, but only after the running shifts settle.
+				failure ??= done.error;
+				stopping = true;
+				continue;
+			}
 			recordOutcome(done.ticket, done.outcome);
 			await state.update({ summary: counts() });
 			if (done.outcome.action === "stop") {
@@ -206,6 +228,7 @@ export async function runFrontier({
 				stopping = true;
 			}
 		}
+		return failure;
 	}
 }
 
@@ -684,14 +707,15 @@ function truncate(text, max) {
 }
 
 /**
- * Publish what the runner is doing now, so a reader of the run state sees the
- * current ticket, shift, model and budget use as they change.
+ * Publish what the runner is doing now, so a reader of the run state sees every
+ * running shift — its ticket, shift, model and budget use — as they change.
+ * One worker entry per running shift: the runner's `workers` list.
  * @returns {Promise<(event: object) => void>} a sink for the shift's events
  */
 async function publishShift(runState, { ticket, attempt, shift, route }) {
 	const usage = { tokens: 0, costUsd: 0, turns: 0, contextPct: 0 };
 	const write = () =>
-		runState.update({
+		runState.updateWorker(ticket, {
 			ticket: { feature: ticket.feature, number: ticket.number, title: ticket.title, path: ticket.path },
 			attempt,
 			shift,

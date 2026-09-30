@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const bin = fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
+const parallelRunState = fileURLToPath(new URL("./fixtures/parallel-run-state.json", import.meta.url));
 const exec = async (args, env = {}) => {
 	const agentDir = await mkdtemp(join(tmpdir(), "sw-agent-"));
 	return promisify(execFile)(process.execPath, [bin, ...args], { env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, ...env } });
@@ -59,6 +60,25 @@ test("status shows the frontier, active claims and cooldowns", async () => {
 	assert.match(stdout, /Active claims:\s*\n  f\/01\s+pid/);
 	assert.match(stdout, /Cooldowns:\s*\n  fake\/provider \(rate\)/);
 	assert.match(stdout, /remaining/);
+});
+
+test("status lists every running shift of a parallel: 2 run (fixture from a real run)", async () => {
+	const root = await repo({
+		"parallel/01-first.md": t("01", "First"),
+		"parallel/02-second.md": t("02", "Second"),
+	});
+	const fixture = JSON.parse(await readFile(parallelRunState, "utf8"));
+	// The fixture was captured while two shifts ran; this process stands in for the
+	// runner pid so the child `status` process sees the run as live.
+	for (const runner of fixture.runners) runner.pid = process.pid;
+	await mkdir(join(root, ".pi"), { recursive: true });
+	await writeFile(join(root, ".pi", "shiftwork-run.json"), JSON.stringify(fixture));
+
+	const { stdout, stderr } = await exec(["status", "--dir", root]);
+
+	assert.equal(stderr, "");
+	assert.match(stdout, /Running shifts:\s*\n  parallel\/01\s+pid \d+\s+shift 1 · attempt 1 · fake\/m1/);
+	assert.match(stdout, /  parallel\/02\s+pid \d+\s+shift 1 · attempt 1 · fake\/m1/);
 });
 
 test("status prints a per-feature table with last route", async () => {

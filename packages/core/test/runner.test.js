@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { openCooldowns, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
+import { openCooldowns, openRunState, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
 import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { formatDuration } from "../src/runner.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
@@ -1569,4 +1569,101 @@ test("parallel landings go through one queue: one landing at a time", async () =
 	// Parallel tickets finish in their own time: the pool records them as they settle.
 	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
 	assert.equal(maxInLanding, 1, "only one landing runs at a time");
+});
+
+test("parallel: 2 lists both workers in the run state while they run", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	const state = openRunState(root);
+	const running = runParallel(root, backend);
+
+	// Wait until the run state lists both workers, then let both shifts finish.
+	let read = null;
+	for (let i = 0; i < 2000 && (read = await state.read())?.workers?.length !== 2; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assert.equal(read.live, true);
+	assert.deepEqual(
+		read.workers.map((w) => `${w.ticket.feature}/${w.ticket.number}`).sort(),
+		["f/01", "f/02"],
+		"both workers are listed while they run",
+	);
+
+	backend.shifts[0].open();
+	backend.shifts[1].open();
+	const summary = await running;
+	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
+	const after = await state.read();
+	assert.equal(after.running, false);
+	assert.deepEqual(after.workers, [], "settled workers are no longer listed");
+});
+
+test("a STOP file hands off both parallel workers", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	const state = openRunState(root);
+	const running = runParallel(root, backend);
+	await waitFor(() => backend.shifts.length === 2 && backend.shifts.every((s) => s.startedAt));
+
+	// Both workers see the STOP file on their next event and hand off.
+	await writeFile(join(root, "STOP"), "");
+	backend.shifts[0].open();
+	backend.shifts[1].open();
+	const summary = await running;
+
+	assert.equal(summary.stoppedReason, "STOP file");
+	assert.equal(summary.exitCode, 3);
+	for (const file of ["01-a.md", "02-b.md"]) {
+		const text = await ticketText(root, "f", file);
+		assert.match(text, /\*\*Status:\*\* ready-for-agent/);
+		assert.match(text, /### Handoff[\s\S]*reason: STOP file/);
+	}
+	const claims = await readdir(join(root, ".scratch", ".claims"));
+	assert.deepEqual(claims, [], "both claims are released");
+	const after = await state.read();
+	assert.equal(after.running, false);
+	assert.deepEqual(after.workers, []);
+});
+
+test("a failed worker lets the others settle before the error propagates", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a.txt": "" } }, { files: { "b.txt": "" } }]);
+	const state = openRunState(root);
+	// Ticket 01's verify gate throws; ticket 02's settles slowly, after it.
+	const verify = async (commands, cwd) => {
+		const result = await fileVerify()(commands, cwd);
+		if (result.results.some((r) => r.cmd.includes("a.txt"))) throw new Error("verify exploded");
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		return result;
+	};
+	const running = runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify,
+		config,
+		options: { parallel: 2 },
+	});
+	await waitFor(() => backend.shifts.length === 2 && backend.shifts.every((s) => s.startedAt));
+	backend.shifts[0].open();
+	backend.shifts[1].open();
+
+	await assert.rejects(running, /verify exploded/);
+
+	// The error propagated only after the other worker settled and the run state finished.
+	assert.match(await ticketText(root, "f", "02-b.md"), /\*\*Status:\*\* resolved/);
+	const claims = await readdir(join(root, ".scratch", ".claims"));
+	assert.deepEqual(claims, [], "both claims are released");
+	const after = await state.read();
+	assert.equal(after.running, false);
+	assert.deepEqual(after.workers, []);
 });
