@@ -132,6 +132,7 @@ function checkBudget(value, path) {
 	}
 }
 
+const ON_EXCEED_KINDS = [...BUDGET_FIELDS, "verifyFailed"];
 const ON_EXCEED_TARGETS = ["next", "downgrade", "escalate", "same-tier"];
 const ON_EXCEED_MODES = ["same-process", "new-process", "auto"];
 const CROSS_TIER = ["none", "up", "down"];
@@ -141,7 +142,7 @@ function checkOnExceed(value, path) {
 	if (value === undefined) return;
 	if (!isPlainObject(value)) fail(path, "must be an object");
 	for (const [kind, rule] of Object.entries(value)) {
-		if (!BUDGET_FIELDS.includes(kind)) fail(`${path}.${kind}`, `unknown budget kind; expected one of ${BUDGET_FIELDS.join(", ")}`);
+		if (!ON_EXCEED_KINDS.includes(kind)) fail(`${path}.${kind}`, `unknown kind; expected one of ${ON_EXCEED_KINDS.join(", ")}`);
 		if (!isPlainObject(rule)) fail(`${path}.${kind}`, "must be an object");
 		if (rule.to !== undefined && !ON_EXCEED_TARGETS.includes(rule.to)) {
 			fail(`${path}.${kind}.to`, `must be one of ${ON_EXCEED_TARGETS.join(", ")}`);

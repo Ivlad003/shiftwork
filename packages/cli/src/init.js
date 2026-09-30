@@ -22,12 +22,12 @@ export function starterConfig(model) {
 			refactor: { tier: "premium" },
 		},
 		tiers: {
-			quick: { chain: chain("quick"), thinking: "low", budget: { maxTurns: 40, maxContextPct: 60 } },
+			quick: { chain: chain("quick"), thinking: "low", budget: { maxTurns: 40, maxContextPct: 60, stallTurns: 5 } },
 			standard: { chain: chain("standard"), budget: { maxCostUsd: 1.5, maxTokens: 3_000_000 } },
 			premium: { chain: chain("premium"), thinking: "high", budget: { maxCostUsd: 3, maxContextPct: 70 } },
 		},
 		budgets: {
-			default: { maxTurns: 60, maxWallMin: 45 },
+			default: { maxTurns: 60, maxWallMin: 45, stallTurns: 8 },
 			tiers: {},
 			models: {},
 			ticket: { maxCostUsd: 8, maxWallMin: 120 },
@@ -37,6 +37,8 @@ export function starterConfig(model) {
 			maxTokens: { to: "downgrade", mode: "same-process" },
 			maxTurns: { to: "next", mode: "auto" },
 			maxContextPct: { to: "same-tier", mode: "new-process" },
+			stallTurns: { to: "escalate", mode: "new-process" },
+			verifyFailed: { to: "escalate", mode: "new-process" },
 			maxWallMin: { to: "next", mode: "new-process" },
 		},
 		cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },

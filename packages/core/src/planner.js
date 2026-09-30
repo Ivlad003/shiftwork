@@ -13,6 +13,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 	const tierName = routing?.model ? undefined : (routing?.tier ?? config.defaultTier);
 	const at = now instanceof Date ? now : new Date(now);
 	const onExceed = config.onExceed ?? {};
+	const blockedModels = history.blockedModels ?? [];
 
 	if (history.exceededKind && history.previousRoute) {
 		const nextModel = chooseHandoffTarget({
@@ -21,13 +22,18 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 			config,
 			cooldowns,
 			now: at,
+			blockedModels,
 		});
 		if (nextModel) return buildRoute({ ticket, config, type, model: nextModel, history, onExceed, capRemaining: true });
 	}
 
-	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at });
+	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at, blockedModels });
 	if (picked.wait) return picked;
-	if (!picked.model) throw new Error(`no route for ticket ${ticket.feature}/${ticket.number} (type "${type}")`);
+	if (picked.stop) return picked;
+	if (!picked.model) {
+		if (blockedModels.length) return { stop: "no eligible model: stalled models excluded" };
+		throw new Error(`no route for ticket ${ticket.feature}/${ticket.number} (type "${type}")`);
+	}
 	const thinking =
 		routing?.thinking ?? config.tiers?.[picked.tier ?? tierName]?.thinking ?? config.thinking;
 	return buildRoute({
@@ -59,26 +65,32 @@ function buildRoute({ ticket, config, type, model, tierName, thinking, history, 
 	return { backend: "pi", type, tier, model, thinking: think, skills, budget, onExceed };
 }
 
-function pickModel({ ticket, config, routing, tierName, cooldowns, now }) {
+function pickModel({ ticket, config, routing, tierName, cooldowns, now, blockedModels = [] }) {
 	const pinned = ticket.model ?? routing?.model;
-	if (pinned) {
+	if (pinned && !isBlocked(pinned, blockedModels)) {
 		if (isCooling(pinned, cooldowns, now)) return { wait: cooldownUntil(pinned, cooldowns) };
 		return { model: pinned, tier: tierName };
 	}
 	const chain = config.tiers?.[tierName]?.chain ?? [];
-	const free = firstFree(chain, cooldowns, now);
+	const free = firstFree(chain, cooldowns, now, blockedModels);
 	if (free) return { model: free, tier: tierName };
 	if (chain.length) {
-		const neighbour = crossTierPick(tierName, config, cooldowns, now);
+		const neighbour = crossTierPick(tierName, config, cooldowns, now, blockedModels);
 		if (neighbour) return neighbour;
 		const until = earliestCooldown(chain, cooldowns, now);
 		if (until) return { wait: until };
+		if (blockedModels.length) return { stop: "no eligible model: stalled models excluded" };
 	}
-	if (config.model) {
+	if (config.model && !isBlocked(config.model, blockedModels)) {
 		if (isCooling(config.model, cooldowns, now)) return { wait: cooldownUntil(config.model, cooldowns) };
 		return { model: config.model, tier: tierName };
 	}
+	if (blockedModels.length) return { stop: "no eligible model: stalled models excluded" };
 	return {};
+}
+
+function isBlocked(model, blocked) {
+	return (blocked ?? []).includes(model);
 }
 
 function providerOf(model) {
@@ -91,8 +103,8 @@ function isCooling(model, cooldowns, now) {
 	return (cooldowns ?? []).some((c) => c.provider === provider && new Date(c.until).getTime() > t);
 }
 
-function firstFree(chain, cooldowns, now) {
-	return (chain ?? []).find((model) => !isCooling(model, cooldowns, now));
+function firstFree(chain, cooldowns, now, blocked = []) {
+	return (chain ?? []).find((model) => !isCooling(model, cooldowns, now) && !isBlocked(model, blocked));
 }
 
 function cooldownUntil(model, cooldowns) {
@@ -111,7 +123,7 @@ function earliestCooldown(models, cooldowns, now) {
 	return new Date(Math.min(...times));
 }
 
-function crossTierPick(tierName, config, cooldowns, now) {
+function crossTierPick(tierName, config, cooldowns, now, blockedModels) {
 	const dir = config.crossTier;
 	if (dir !== "up" && dir !== "down") return undefined;
 	const order = ["quick", "standard", "premium"];
@@ -119,7 +131,7 @@ function crossTierPick(tierName, config, cooldowns, now) {
 	if (idx < 0) return undefined;
 	const next = order[idx + (dir === "up" ? 1 : -1)];
 	if (!next) return undefined;
-	const free = firstFree(config.tiers?.[next]?.chain, cooldowns, now);
+	const free = firstFree(config.tiers?.[next]?.chain, cooldowns, now, blockedModels);
 	if (!free) return undefined;
 	return { model: free, tier: next };
 }
@@ -208,7 +220,7 @@ function parseTicketBudget(value) {
 	return Object.keys(out).length ? out : undefined;
 }
 
-function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now = new Date() }) {
+function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now = new Date(), blockedModels = [] }) {
 	const rule = config.onExceed?.[kind];
 	if (!rule?.to) return undefined;
 	const tier = config.tiers?.[previousRoute.tier];
@@ -216,13 +228,13 @@ function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now 
 	const idx = chain.indexOf(previousRoute.model);
 	if (rule.to === "next") {
 		if (idx < 0) return undefined;
-		return firstFree(chain.slice(idx + 1), cooldowns, now);
+		return firstFree(chain.slice(idx + 1), cooldowns, now, blockedModels);
 	}
 	if (rule.to === "same-tier") {
 		if (idx < 0 || chain.length < 2) return undefined;
 		for (let step = 1; step < chain.length; step++) {
 			const model = chain[(idx + step) % chain.length];
-			if (!isCooling(model, cooldowns, now)) return model;
+			if (!isCooling(model, cooldowns, now) && !isBlocked(model, blockedModels)) return model;
 		}
 		return undefined;
 	}
@@ -233,7 +245,7 @@ function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now 
 		const delta = rule.to === "escalate" ? 1 : -1;
 		const nextTier = order[currentIdx + delta];
 		if (!nextTier) return undefined;
-		return firstFree(config.tiers?.[nextTier]?.chain, cooldowns, now);
+		return firstFree(config.tiers?.[nextTier]?.chain, cooldowns, now, blockedModels);
 	}
 	return undefined;
 }

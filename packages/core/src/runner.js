@@ -117,8 +117,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	let previousRoute = undefined;
 	let exceededKind = undefined;
 	let lastVerifyFailure = undefined;
+	const blockedModels = [];
 	const ticketUsage = { maxTokens: 0, maxCostUsd: 0, maxTurns: 0, maxWallMin: 0 };
 	const maxHandoffs = config.maxHandoffs ?? 3;
+	const historyOf = (extra = {}) => ({ previousRoute, exceededKind, ticketUsage, blockedModels, ...extra });
 
 	for (;;) {
 		if (checkStop(root)) {
@@ -129,7 +131,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const plan = planShift({
 			ticket,
 			config,
-			history: { previousRoute, exceededKind, ticketUsage },
+			history: historyOf(),
 			cooldowns: await cooldowns.active(now),
 			now,
 		});
@@ -139,6 +141,14 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			// Wake at least once a minute so a STOP file is noticed during long cooldowns.
 			await clock.sleep(Math.min(ms, WAIT_STEP_MS));
 			continue;
+		}
+		if (plan.stop) {
+			const notes = [];
+			if (workspace) notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+			notes.push(`- Stopped: ${plan.stop}`);
+			await tracker.appendComment(ticket, notes.join("\n"));
+			await tracker.setStatus(ticket, NEEDS_INFO);
+			return { action: NEEDS_INFO, reason: plan.stop };
 		}
 		const route = { ...plan, backend: backend.name };
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
@@ -156,7 +166,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				ticketPath: ticket.path,
 				maxHandoffs,
 				planHandoff: (kind, fromRoute) =>
-					planShift({ ticket, config, history: { previousRoute: fromRoute, exceededKind: kind, ticketUsage } }),
+					planShift({ ticket, config, history: historyOf({ previousRoute: fromRoute, exceededKind: kind }) }),
 			},
 			(event) => log({ ticket, attempt, event }),
 		);
@@ -200,7 +210,16 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 		const notes = [];
 		const inPlaceHandoffs = shift.handoffs ?? [];
-		const freshHandoff = shift.handoff && !shift.handoff.inPlace ? shift.handoff : null;
+		let freshHandoff = shift.handoff && !shift.handoff.inPlace ? shift.handoff : null;
+		if (
+			!freshHandoff &&
+			verifyResult &&
+			!verifyResult.ok &&
+			config.onExceed?.verifyFailed &&
+			decision.action === "retry"
+		) {
+			freshHandoff = { reason: "verify gate failed", kind: "verifyFailed" };
+		}
 		let nextRoute = undefined;
 		handoffCount += inPlaceHandoffs.length;
 		for (const handoff of inPlaceHandoffs) {
@@ -219,9 +238,11 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		}
 		if (freshHandoff && decision.action !== "resolve") {
 			// A handoff is not a failed attempt: only the verify gate after real work counts.
+			// verifyFailed is the exception: the gate did fail, so the attempt still counts.
 			if (decision.action === "retry" || decision.reason?.startsWith("verify gate failed")) decision = { action: "retry" };
 			handoffCount++;
-			const handoffHistory = { previousRoute: route, exceededKind: freshHandoff.kind, ticketUsage };
+			rememberBlocked(blockedModels, route, freshHandoff.kind);
+			const handoffHistory = historyOf({ previousRoute: route, exceededKind: freshHandoff.kind });
 			nextRoute = { ...planShift({ ticket, config, history: handoffHistory }), backend: backend.name };
 			if (!freshHandoff.agentNote) {
 				const handoffNote = await buildHandoffNote({
@@ -268,6 +289,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		if (freshHandoff && decision.action === "retry" && handoffCount <= maxHandoffs) {
 			previousRoute = route;
 			exceededKind = freshHandoff.kind;
+			if (freshHandoff.kind === "verifyFailed" && verifyResult && !verifyResult.ok) {
+				lastVerifyFailure = verifyResult.results.find((r) => r.code !== 0) ?? null;
+				attempt++;
+			}
 			// Before starting the next shift, make sure the ticket budget isn't exhausted.
 			const remainingTicket = remainingTicketBudget(ticket, config, ticketUsage);
 			if (remainingTicket.exhausted) {
@@ -281,6 +306,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		if (verifyResult && !verifyResult.ok) {
 			lastVerifyFailure = verifyResult.results.find((r) => r.code !== 0) ?? null;
 			attempt++;
+			previousRoute = undefined;
+			exceededKind = undefined;
 		}
 
 		if (checkStop(root)) {
@@ -295,6 +322,13 @@ function accumulateUsage(target, shift) {
 	target.maxCostUsd += shift.costUsd ?? 0;
 	target.maxTurns += shift.turns ?? 0;
 	target.maxWallMin += shift.wallMin ?? 0;
+}
+
+const BLOCKING_KINDS = new Set(["stallTurns", "verifyFailed"]);
+
+function rememberBlocked(blockedModels, route, kind) {
+	if (!BLOCKING_KINDS.has(kind) || !route?.model) return;
+	if (!blockedModels.includes(route.model)) blockedModels.push(route.model);
 }
 
 function remainingTicketBudget(ticket, config, usage) {

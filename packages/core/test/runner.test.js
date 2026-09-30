@@ -132,12 +132,15 @@ test("a shift error is reported and counts as a failed attempt", async () => {
 	assert.match(await ticketText(root, "f", "01-a.md"), /### Shift 1[\s\S]*error: boom/);
 });
 
-function fakeWorkspace({ landOk = true, changed = true } = {}) {
+function fakeWorkspace({ landOk = true, changed = true, diffStat = "" } = {}) {
 	const calls = [];
 	return {
 		calls,
 		async hasChanges() {
 			return changed;
+		},
+		async diffStat() {
+			return typeof diffStat === "function" ? diffStat() : diffStat;
 		},
 		async prepare(t) {
 			calls.push(["prepare", t.number]);
@@ -688,4 +691,100 @@ test("a passing verify gate with no change in the worktree doesn't resolve the t
 	assert.deepEqual(summary.resolved, []);
 	assert.match(summary.needsInfo[0].reason, /no shift changed anything/);
 	assert.ok(!workspace.calls.some(([op]) => op === "land"));
+});
+
+function stallConfig(extra = {}) {
+	return {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 3,
+		maxHandoffs: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: {
+			standard: { chain: ["fake/m1", "fake/m2"], thinking: "low", budget: { stallTurns: 2, maxTurns: 100 } },
+			premium: { chain: ["fake/m3"], thinking: "high", budget: { maxTurns: 50 } },
+		},
+		onExceed: {
+			stallTurns: { to: "escalate", mode: "new-process" },
+			verifyFailed: { to: "escalate", mode: "new-process" },
+			maxTurns: { to: "downgrade", mode: "new-process" },
+		},
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+		...extra,
+	};
+}
+
+const stallTurn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+
+test("a stall leads to a fresh handoff to an escalated tier", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ events: [stallTurn, stallTurn, stallTurn, { type: "end", stopReason: "stop" }] },
+		{ files: { "done.txt": "ok" } },
+	]);
+	const workspace = fakeWorkspace({ diffStat: " M src/loop.js" });
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: stallConfig(),
+		workspace,
+	});
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m3");
+	assert.equal(backend.shifts[0].aborted, true);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Handoff — shift 1, fake\/m1 → fake\/m3, reason: budget\.stallTurns/);
+});
+
+test("a model left because of a stall is not chosen again for that ticket", async () => {
+	const cfg = stallConfig();
+	cfg.tiers.premium.budget = { maxTurns: 2 };
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ events: [stallTurn, stallTurn, stallTurn, { type: "end", stopReason: "stop" }] },
+		{ events: [stallTurn, stallTurn, { type: "end", stopReason: "stop" }] },
+		{ files: { "done.txt": "ok" } },
+	]);
+	const workspace = fakeWorkspace({ diffStat: " M src/loop.js" });
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: cfg,
+		workspace,
+	});
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(
+		backend.shifts.map((s) => s.request.route.model),
+		["fake/m1", "fake/m3", "fake/m2"],
+	);
+});
+
+test("repeated verify failures escalate to the next tier", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ text: "Tried." }, { files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: stallConfig(),
+	});
+
+	assert.equal(summary.exitCode, 0);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m3");
+	assert.match(await ticketText(root, "f", "01-a.md"), /fake\/m1 → fake\/m3/);
 });

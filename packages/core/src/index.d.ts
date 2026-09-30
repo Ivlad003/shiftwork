@@ -97,6 +97,7 @@ export declare function createMeter(
     contextPct: number;
     stallTurns: number;
     lastDiffStat: string | null;
+    lastFailingOutput: string | null;
     softFired: Set<string>;
     hardFired: Set<string>;
   };

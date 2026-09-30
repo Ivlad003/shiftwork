@@ -242,3 +242,76 @@ test("planShift: a pinned Model whose provider is cooling waits", () => {
 	});
 	assert.equal(new Date(plan.wait).toISOString(), "2026-01-01T00:05:00.000Z");
 });
+
+const stallConfig = validateConfig({
+	defaultType: "code",
+	thinking: "low",
+	routing: { code: { tier: "standard" } },
+	tiers: {
+		standard: { chain: ["fake/m1", "fake/m2"], thinking: "low" },
+		premium: { chain: ["fake/m3"], thinking: "high" },
+	},
+	onExceed: {
+		stallTurns: { to: "escalate", mode: "new-process" },
+		verifyFailed: { to: "escalate", mode: "new-process" },
+		maxTurns: { to: "downgrade", mode: "new-process" },
+	},
+});
+
+test("planShift: a stall escalates to the next tier", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: stallConfig });
+	const second = planShift({
+		ticket: t({ type: "code" }),
+		config: stallConfig,
+		history: { previousRoute: first, exceededKind: "stallTurns", blockedModels: [first.model] },
+	});
+	assert.equal(first.model, "fake/m1");
+	assert.equal(second.model, "fake/m3");
+	assert.equal(second.tier, "premium");
+});
+
+test("planShift: a stalled model is not chosen again for the ticket", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: stallConfig });
+	const afterStall = planShift({
+		ticket: t({ type: "code" }),
+		config: stallConfig,
+		history: { previousRoute: first, exceededKind: "stallTurns", blockedModels: ["fake/m1"] },
+	});
+	const later = planShift({
+		ticket: t({ type: "code" }),
+		config: stallConfig,
+		history: {
+			previousRoute: afterStall,
+			exceededKind: "maxTurns",
+			blockedModels: ["fake/m1"],
+		},
+	});
+	assert.equal(afterStall.model, "fake/m3");
+	assert.equal(later.model, "fake/m2", "downgrade skips the stalled model and takes the rest of the chain");
+});
+
+test("planShift: repeated verify failures escalate to the next tier", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: stallConfig });
+	const second = planShift({
+		ticket: t({ type: "code" }),
+		config: stallConfig,
+		history: { previousRoute: first, exceededKind: "verifyFailed", blockedModels: [first.model] },
+	});
+	assert.equal(second.model, "fake/m3");
+	assert.equal(second.tier, "premium");
+});
+
+test("planShift: stops when every candidate has stalled", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: stallConfig });
+	const plan = planShift({
+		ticket: t({ type: "code" }),
+		config: stallConfig,
+		history: {
+			previousRoute: { ...first, model: "fake/m3", tier: "premium" },
+			exceededKind: "stallTurns",
+			blockedModels: ["fake/m1", "fake/m2", "fake/m3"],
+		},
+	});
+	assert.equal(plan.model, undefined);
+	assert.match(plan.stop, /stalled/);
+});

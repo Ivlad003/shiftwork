@@ -71,6 +71,39 @@ test("meter: a changing diff stat resets stall turns", () => {
 	assert.equal(last, null, "stall should not trigger because diff stat changed");
 });
 
+test("meter: stallTurns hard when failing output stops changing", () => {
+	const meter = createMeter({ stallTurns: 2 }, 80);
+	const events = [
+		{ type: "failingOutput", output: "done.txt: missing" },
+		turn(),
+		{ type: "failingOutput", output: "done.txt: missing" },
+		turn(),
+		{ type: "failingOutput", output: "done.txt: missing" },
+		turn(),
+	];
+	let last = null;
+	for (const event of events) {
+		const r = meter.observe(event);
+		if (r) last = r;
+	}
+	assert.ok(last);
+	assert.equal(last.level, "hard");
+	assert.equal(last.kind, "stallTurns");
+	assert.equal(last.current, 2);
+});
+
+test("meter: stallTurns is hard-only, no soft limit", () => {
+	const meter = createMeter({ stallTurns: 5 }, 80);
+	const results = [];
+	for (let i = 0; i < 6; i++) {
+		const r = meter.observe({ type: "diffStat", stat: "same" });
+		if (r) results.push(r);
+	}
+	assert.equal(results.length, 1);
+	assert.equal(results[0].level, "hard");
+	assert.equal(results[0].kind, "stallTurns");
+});
+
 function advancingNow(start, step) {
 	let t = start;
 	return () => {

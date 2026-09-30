@@ -12,6 +12,7 @@ export function createMeter(budget, softLimitPct = 80, { now = () => Date.now() 
 		contextPct: 0,
 		stallTurns: 0,
 		lastDiffStat: null,
+		lastFailingOutput: null,
 		softFired: new Set(),
 		hardFired: new Set(),
 	};
@@ -32,9 +33,11 @@ export function createMeter(budget, softLimitPct = 80, { now = () => Date.now() 
 			state.costUsd += event.costUsd ?? 0;
 		} else if (event.type === "context") {
 			state.contextPct = event.percent ?? 0;
-		} else if (event.type === "diffStat") {
-			const changed = event.stat !== state.lastDiffStat;
-			state.lastDiffStat = event.stat;
+		} else if (event.type === "diffStat" || event.type === "failingOutput") {
+			const key = event.type === "diffStat" ? "lastDiffStat" : "lastFailingOutput";
+			const snap = event.type === "diffStat" ? event.stat : event.output;
+			const changed = snap !== state[key];
+			state[key] = snap;
 			state.stallTurns = changed ? 0 : state.stallTurns + 1;
 		}
 		state.wallMin = (now() - startAt) / 60_000;
@@ -54,6 +57,8 @@ export function createMeter(budget, softLimitPct = 80, { now = () => Date.now() 
 					limit,
 				};
 			}
+			// A stall is a clean break: no soft steer, just a fresh handoff at N.
+			if (kind === "stallTurns") continue;
 			const soft = (limit * softLimitPct) / 100;
 			if (current >= soft && !state.softFired.has(kind)) {
 				state.softFired.add(kind);
