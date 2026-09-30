@@ -34,7 +34,7 @@ function checkStop(root) {
 
 /**
  * Work the frontier until nothing is left (or one ticket with `once`).
- * Every dependency is injected: tracker, backend, verify, log, classify, clock, cooldowns.
+ * Every dependency is injected: tracker, backend, verify, log, classify, classifyTicket, clock, cooldowns.
  */
 export async function runFrontier({
 	root,
@@ -46,6 +46,7 @@ export async function runFrontier({
 	log = () => {},
 	options = {},
 	classify = classifyError,
+	classifyTicket,
 	clock,
 	cooldowns,
 }) {
@@ -84,6 +85,7 @@ export async function runFrontier({
 				maxAttempts,
 				log,
 				classify,
+				classifyTicket,
 				clock: time,
 				cooldowns: cooldownStore,
 			});
@@ -107,7 +109,7 @@ export async function runFrontier({
 	return summary;
 }
 
-async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, clock, cooldowns }) {
+async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns }) {
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
@@ -120,6 +122,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	const blockedModels = [];
 	const ticketUsage = { maxTokens: 0, maxCostUsd: 0, maxTurns: 0, maxWallMin: 0 };
 	const maxHandoffs = config.maxHandoffs ?? 3;
+	const { classification, classificationNote } = await classifyUntyped(ticket, config, classifyTicket);
 	const historyOf = (extra = {}) => ({ previousRoute, exceededKind, ticketUsage, blockedModels, ...extra });
 
 	for (;;) {
@@ -131,6 +134,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const plan = planShift({
 			ticket,
 			config,
+			classification,
 			history: historyOf(),
 			cooldowns: await cooldowns.active(now),
 			now,
@@ -166,7 +170,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				ticketPath: ticket.path,
 				maxHandoffs,
 				planHandoff: (kind, fromRoute) =>
-					planShift({ ticket, config, history: historyOf({ previousRoute: fromRoute, exceededKind: kind }) }),
+					planShift({ ticket, config, classification, history: historyOf({ previousRoute: fromRoute, exceededKind: kind }) }),
 			},
 			(event) => log({ ticket, attempt, event }),
 		);
@@ -189,6 +193,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 						shift,
 						verifyResult: null,
 						decision: { action: "retry", reason: `provider ${limit.kind} limit` },
+						classificationNote,
 					}),
 					`- Provider limit: ${limit.kind} on ${provider}, cooling until ${until instanceof Date ? until.toISOString() : until}; continuing without counting an attempt`,
 				].join("\n"),
@@ -243,7 +248,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			handoffCount++;
 			rememberBlocked(blockedModels, route, freshHandoff.kind);
 			const handoffHistory = historyOf({ previousRoute: route, exceededKind: freshHandoff.kind });
-			nextRoute = { ...planShift({ ticket, config, history: handoffHistory }), backend: backend.name };
+			nextRoute = { ...planShift({ ticket, config, classification, history: handoffHistory }), backend: backend.name };
 			if (!freshHandoff.agentNote) {
 				const handoffNote = await buildHandoffNote({
 					shiftNumber,
@@ -274,7 +279,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
 		}
 
-		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision }), ...notes].join("\n"));
+		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision, classificationNote }), ...notes].join("\n"));
 		shiftNumber++;
 
 		if (decision.action === "resolve") {
@@ -538,8 +543,26 @@ async function buildHandoffNote({ shiftNumber, from, to, reason, shift, verifyRe
 	return lines.join("\n");
 }
 
-function shiftReport({ number, route, shift, verifyResult, decision }) {
+async function classifyUntyped(ticket, config, classifyTicket) {
+	if (ticket.type || !classifyTicket || config.jev?.enabled === false) {
+		return { classification: undefined, classificationNote: undefined };
+	}
+	try {
+		const classification = (await classifyTicket(ticket)) ?? null;
+		if (!classification) return { classification: null, classificationNote: "Jev unavailable, used default type" };
+		return { classification, classificationNote: undefined };
+	} catch {
+		return { classification: null, classificationNote: "Jev unavailable, used default type" };
+	}
+}
+
+function shiftReport({ number, route, shift, verifyResult, decision, classificationNote }) {
 	const lines = [`### Shift ${number} — ${route.backend} ${route.model} (${route.thinking})`];
+	if (route.typeSource === "jev") {
+		lines.push(`- Type: ${route.type} (jev)`);
+	} else if (classificationNote) {
+		lines.push(`- Type: ${route.type} (default); ${classificationNote}`);
+	}
 	lines.push(`- Ended: ${shift.stopReason ?? "unknown"}${shift.error ? `, error: ${shift.error}` : ""}`);
 	lines.push(
 		`- Usage: ${shift.usage.input} in / ${shift.usage.output} out tokens, $${shift.costUsd.toFixed(4)}, ${shift.turns} turns`,

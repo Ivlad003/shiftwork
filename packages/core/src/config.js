@@ -16,6 +16,7 @@ const DEFAULTS = {
 	skillSources: {},
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
 	onExceed: {},
+	jev: { enabled: true, model: "typesafe/jev-latest" },
 };
 
 /**
@@ -53,6 +54,7 @@ export function validateConfig(input) {
 	checkOnExceed(config.onExceed, "onExceed");
 	checkCrossTier(config.crossTier, "crossTier");
 	config.cooldown = checkCooldown({ ...DEFAULTS.cooldown, ...config.cooldown }, "cooldown");
+	config.jev = checkJev(config.jev, "jev");
 
 	for (const [name, sources] of Object.entries(skillGroups)) {
 		if (!Array.isArray(sources) || !sources.every((s) => typeof s === "string")) {
@@ -156,6 +158,17 @@ function checkOnExceed(value, path) {
 function checkCrossTier(value, path) {
 	if (value === undefined) return;
 	if (!CROSS_TIER.includes(value)) fail(path, `must be one of ${CROSS_TIER.join(", ")}`);
+}
+
+function checkJev(value, path) {
+	if (value === undefined) return { ...DEFAULTS.jev };
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	const out = { ...DEFAULTS.jev, ...value };
+	if (typeof out.enabled !== "boolean") fail(`${path}.enabled`, "must be true or false");
+	const models = Array.isArray(out.model) ? out.model : out.model !== undefined ? [out.model] : [];
+	if (models.length === 0) fail(`${path}.model`, "must be a model or a non-empty list");
+	models.forEach((model, i) => checkModel(model, Array.isArray(out.model) ? `${path}.model[${i}]` : `${path}.model`));
+	return out;
 }
 
 function checkCooldown(value, path) {

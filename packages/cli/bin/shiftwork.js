@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { loadConfig, openCooldowns, openTracker, planShift, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { loadConfig, openCooldowns, openTracker, runFrontier, validateConfig, VERSION } from "shiftwork-core";
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
@@ -147,23 +147,27 @@ async function run(argv) {
 	});
 
 	if (values["dry-run"]) {
+		const { dryRunFrontier } = await import("../src/dry-run.js");
+		const { createJevClassifier } = await import("../src/jev.js");
 		const tickets = (await openTracker(root).frontier()).filter((t) => !values.feature || t.feature === values.feature);
-		if (!tickets.length) console.log("Nothing to do: the frontier is empty.");
 		const cooldowns = await openCooldowns(root).active();
-		for (const t of tickets) {
-			const r = planShift({ ticket: t, config, cooldowns });
-			if (r.wait) {
-				console.log(`${t.feature}/${t.number}  wait until ${new Date(r.wait).toISOString()}  ${t.title ?? ""}`);
-				continue;
-			}
-			console.log(`${t.feature}/${t.number}  type=${r.type}${t.type ? "" : " (default)"}  tier=${r.tier ?? "-"}  model=${r.model}  thinking=${r.thinking}  ${t.title ?? ""}`);
-		}
+		const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+		await dryRunFrontier({
+			tickets,
+			config,
+			cooldowns,
+			classifyTicket: createJevClassifier({ config, agentDir }),
+			log: console.log,
+		});
 		return 0;
 	}
 
 	const { createPiBackend } = await import("../src/pi-backend.js");
+	const { createJevClassifier } = await import("../src/jev.js");
 	const { runVerify } = await import("../src/verify.js");
 	const backend = createPiBackend(config.pi ?? {});
+	const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+	const classifyTicket = createJevClassifier({ config, agentDir });
 	const workspace = await createWorkspace(root, config, values["no-worktree"]);
 	console.log(`shiftwork: pi ${backend.pi.version} · max ${config.maxAttempts} attempts per ticket`);
 
@@ -174,6 +178,7 @@ async function run(argv) {
 		verify: (commands, cwd) => runVerify(commands, cwd),
 		config,
 		workspace,
+		classifyTicket,
 		log: shiftLogger(root),
 		options: { once: values.once, feature: values.feature },
 	});

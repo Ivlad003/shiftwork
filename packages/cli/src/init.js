@@ -43,6 +43,10 @@ export function starterConfig(model) {
 		},
 		cooldown: { rate: "15m", usage: "5h", quota: "24h", server: "5m" },
 		crossTier: "none",
+		jev: {
+			enabled: true,
+			model: ["typesafe/jev-latest", "openrouter/typesafe/jev-1.13", "opencode/jev-1.13-free"],
+		},
 	};
 }
 

@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { validateConfig } from "shiftwork-core";
+import { dryRunFrontier, formatDryRunLine } from "../src/dry-run.js";
 
 const bin = fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
 const exec = async (args, env = {}) => {
@@ -68,4 +70,29 @@ test("run refuses a config with CHANGE-ME placeholders, naming the field", async
 	const root = await repo({ "f/01-a.md": t("01", "A") });
 	await exec(["init", "--dir", root]);
 	await assert.rejects(exec(["run", "--dry-run", "--dir", root]), (error) => /tiers\.quick\.chain\[0\]: replace the CHANGE-ME/.test(error.stderr));
+});
+
+test("a dry run shows type (jev) for classified tickets", async () => {
+	const config = validateConfig({
+		defaultType: "code",
+		thinking: "medium",
+		routing: { git: { tier: "quick", thinking: "low" }, code: { tier: "standard" } },
+		tiers: {
+			quick: { chain: ["prov/model-a"], thinking: "low" },
+			standard: { chain: ["prov/model-a"] },
+		},
+	});
+	const lines = [];
+	await dryRunFrontier({
+		tickets: [
+			{ feature: "f", number: "01", title: "Commit it", type: "git", skills: [], verify: [], blockedBy: [] },
+			{ feature: "f", number: "02", title: "Build it", skills: [], verify: [], blockedBy: [] },
+		],
+		config,
+		classifyTicket: async () => ({ type: "git", complexity: "standard" }),
+		log: (line) => lines.push(line),
+	});
+	assert.match(lines[0], /f\/01 {2}type=git {2}tier=quick/);
+	assert.match(lines[1], /f\/02 {2}type=git \(jev\) {2}tier=quick {2}model=prov\/model-a {2}thinking=low/);
+	assert.equal(formatDryRunLine({ feature: "f", number: "02", title: "Build it" }, { type: "git", typeSource: "jev", tier: "quick", model: "prov/model-a", thinking: "low" }), "f/02  type=git (jev)  tier=quick  model=prov/model-a  thinking=low  Build it");
 });

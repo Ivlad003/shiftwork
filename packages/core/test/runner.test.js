@@ -788,3 +788,77 @@ test("repeated verify failures escalate to the next tier", async () => {
 	assert.equal(backend.shifts[1].request.route.model, "fake/m3");
 	assert.match(await ticketText(root, "f", "01-a.md"), /fake\/m1 → fake\/m3/);
 });
+
+function jevConfig() {
+	return {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: {
+			git: { tier: "quick", thinking: "low" },
+			code: { tier: "standard" },
+		},
+		tiers: {
+			quick: { chain: ["fake/quick"], thinking: "low" },
+			standard: { chain: ["fake/m1"], thinking: "low" },
+			premium: { chain: ["fake/premium"], thinking: "high" },
+		},
+	};
+}
+
+test("an untyped ticket uses the classified type", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const classifyTicket = async () => ({ type: "git", complexity: "standard" });
+
+	await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: jevConfig(),
+		classifyTicket,
+	});
+
+	assert.equal(backend.shifts[0].request.route.type, "git");
+	assert.equal(backend.shifts[0].request.route.model, "fake/quick");
+	assert.match(await ticketText(root, "f", "01-a.md"), /Type: git \(jev\)/);
+});
+
+test("complexity=complex raises the classified ticket's tier by one", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+
+	await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: jevConfig(),
+		classifyTicket: async () => ({ type: "git", complexity: "complex" }),
+	});
+
+	assert.equal(backend.shifts[0].request.route.type, "git");
+	assert.equal(backend.shifts[0].request.route.tier, "standard");
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+});
+
+test("a failing classifier falls back to the default type and notes it", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+
+	await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: jevConfig(),
+		classifyTicket: async () => {
+			throw new Error("Jev down");
+		},
+	});
+
+	assert.equal(backend.shifts[0].request.route.type, "code");
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.match(await ticketText(root, "f", "01-a.md"), /Type: code \(default\); Jev unavailable, used default type/);
+});

@@ -46,6 +46,50 @@ for (const [name, ticket, expected] of cases) {
 	});
 }
 
+test("planShift: classified type is used for an untyped ticket", () => {
+	const route = planShift({ ticket: t(), config, classification: { type: "git", complexity: "standard" } });
+	assert.deepEqual({ model: route.model, thinking: route.thinking, tier: route.tier, type: route.type, typeSource: route.typeSource }, {
+		model: "opencode-go/small",
+		thinking: "low",
+		tier: "quick",
+		type: "git",
+		typeSource: "jev",
+	});
+});
+
+test("planShift: complexity=complex raises the classified type's tier by one", () => {
+	const route = planShift({ ticket: t(), config, classification: { type: "git", complexity: "complex" } });
+	assert.equal(route.type, "git");
+	assert.equal(route.typeSource, "jev");
+	assert.equal(route.tier, "standard");
+	assert.equal(route.model, "anthropic/sonnet");
+});
+
+test("planShift: complexity=complex on a standard type raises to premium", () => {
+	const route = planShift({ ticket: t(), config, classification: { type: "code", complexity: "complex" } });
+	assert.equal(route.type, "code");
+	assert.equal(route.tier, "premium");
+	assert.equal(route.model, "anthropic/opus");
+});
+
+test("planShift: a ticket Type wins over classification and is not raised", () => {
+	const route = planShift({
+		ticket: t({ type: "git" }),
+		config,
+		classification: { type: "code", complexity: "complex" },
+	});
+	assert.equal(route.type, "git");
+	assert.equal(route.typeSource, "ticket");
+	assert.equal(route.tier, "quick");
+});
+
+test("planShift: a null classification uses defaultType", () => {
+	const route = planShift({ ticket: t(), config, classification: null });
+	assert.equal(route.type, "code");
+	assert.equal(route.typeSource, "default");
+	assert.equal(route.tier, "standard");
+});
+
 test("planShift: tier skills resolve to paths and preload is a subset", () => {
 	const route = planShift({ ticket: t({ type: "code" }), config });
 	assert.deepEqual(route.skills.paths, ["/skills/shiftwork", "/skills/design-system"]);
@@ -97,6 +141,7 @@ const invalid = [
 	[{ model: "fake/m1", tiers: { quick: { chain: ["fake/m1"], skills: ["missing"] } } }, /tiers\.quick\.skills: unknown skill group "missing"/],
 
 	[{ model: "fake/m1", tiers: { quick: { chain: ["fake/m1"], skills: ["g"], preload: ["other"] } }, skillGroups: { g: [], other: [] } }, /tiers\.quick\.preload: preload group "other" is not in tier skills/],
+	[{ model: "fake/m1", jev: { model: "no-slash" } }, /jev\.model: expected "provider\/model"/],
 ];
 
 for (const [input, message] of invalid) {

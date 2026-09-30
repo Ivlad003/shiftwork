@@ -1,16 +1,20 @@
 /**
  * Choose the route for a ticket's next shift. Pure.
  * Order: the ticket's Model → routing[Type] → defaultTier → top-level model.
- * Unknown or missing Types use `defaultType`.
+ * Unknown or missing Types use `defaultType`, unless `classification` supplies a routed type.
+ * Untyped tickets with classification.complexity=complex raise the tier by one.
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
  * Budgets merge model → tier → default, then are capped by the ticket budget.
  * @returns {object} a Route, or `{ wait: Date }` when every candidate is cooling down
  */
-export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date() }) {
-	const type = ticket.type && config.routing?.[ticket.type] ? ticket.type : config.defaultType;
+export function planShift({ ticket, config, history = {}, cooldowns = [], now = new Date(), classification } = {}) {
+	const { type, typeSource } = resolveType(ticket, config, classification);
 	const routing = config.routing?.[type];
-	const tierName = routing?.model ? undefined : (routing?.tier ?? config.defaultTier);
+	let tierName = routing?.model ? undefined : (routing?.tier ?? config.defaultTier);
+	if (!ticket.type && classification?.complexity === "complex") {
+		tierName = raiseTier(tierName, config);
+	}
 	const at = now instanceof Date ? now : new Date(now);
 	const onExceed = config.onExceed ?? {};
 	const blockedModels = history.blockedModels ?? [];
@@ -24,7 +28,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 			now: at,
 			blockedModels,
 		});
-		if (nextModel) return buildRoute({ ticket, config, type, model: nextModel, history, onExceed, capRemaining: true });
+		if (nextModel) return buildRoute({ ticket, config, type, typeSource, model: nextModel, history, onExceed, capRemaining: true });
 	}
 
 	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at, blockedModels });
@@ -40,6 +44,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 		ticket,
 		config,
 		type,
+		typeSource,
 		model: picked.model,
 		tierName: picked.tier ?? tierName,
 		thinking,
@@ -48,7 +53,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 	});
 }
 
-function buildRoute({ ticket, config, type, model, tierName, thinking, history, onExceed, capRemaining = false }) {
+function buildRoute({ ticket, config, type, typeSource, model, tierName, thinking, history, onExceed, capRemaining = false }) {
 	const tier = tierName ?? tierForModel(model, config);
 	const think = thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
 	const skills = resolveSkills({
@@ -62,7 +67,26 @@ function buildRoute({ ticket, config, type, model, tierName, thinking, history, 
 		mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model]),
 		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
 	);
-	return { backend: "pi", type, tier, model, thinking: think, skills, budget, onExceed };
+	return { backend: "pi", type, typeSource, tier, model, thinking: think, skills, budget, onExceed };
+}
+
+/** Conventional tier ladder. Jev `complexity=complex` raises one step. */
+export const TIER_ORDER = ["quick", "standard", "premium"];
+
+function resolveType(ticket, config, classification) {
+	if (ticket.type && config.routing?.[ticket.type]) return { type: ticket.type, typeSource: "ticket" };
+	if (!ticket.type && classification?.type && config.routing?.[classification.type]) {
+		return { type: classification.type, typeSource: "jev" };
+	}
+	return { type: config.defaultType, typeSource: "default" };
+}
+
+function raiseTier(tierName, config) {
+	if (!tierName) return tierName;
+	const idx = TIER_ORDER.indexOf(tierName);
+	if (idx < 0) return tierName;
+	const next = TIER_ORDER[idx + 1];
+	return next && config.tiers?.[next] ? next : tierName;
 }
 
 function pickModel({ ticket, config, routing, tierName, cooldowns, now, blockedModels = [] }) {

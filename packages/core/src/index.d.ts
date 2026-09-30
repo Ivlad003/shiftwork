@@ -18,9 +18,15 @@ export interface Ticket {
 	checkboxes: { done: boolean; text: string }[];
 }
 
+export interface TicketClassification {
+	type: string;
+	complexity?: string;
+}
+
 export interface Route {
 	backend: string;
 	type: string;
+	typeSource?: "ticket" | "jev" | "default";
 	tier?: string;
 	model: string;
 	thinking: string;
@@ -43,7 +49,9 @@ export declare function planShift(options: {
 	history?: Record<string, unknown>;
 	cooldowns?: Cooldown[];
 	now?: Date | number;
+	classification?: TicketClassification | null;
 }): Plan;
+export declare const TIER_ORDER: readonly string[];
 
 export type LimitKind = "rate" | "usage" | "quota" | "server";
 
