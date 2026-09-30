@@ -1,6 +1,6 @@
 # 10: OpenSpec tracker
 
-**What to build:** Work OpenSpec changes through the same Tracker interface, configured with `tracker: "openspec"` or auto-detected when `openspec/changes/` exists. Each change is a feature, each unchecked `- [ ] N.M` task in `tasks.md` is a ticket blocked by the previous task, and status beyond done/undone plus comments live in `openspec/changes/<change>/.shiftwork.md`. Resolving a task ticks its checkbox. The verify gate comes from `openspec.verify` (default `["openspec validate <change>"]`) plus a task's own Verify (spec stories 22–24).
+**What to build:** Work OpenSpec changes through the same Tracker interface, configured with `tracker: "openspec"` or auto-detected when `openspec/changes/` exists. Each change is a feature, each unchecked `- [ ] N.M` task in `tasks.md` is a ticket blocked by the previous task, and status beyond done/undone plus comments live in `openspec/changes/<change>/.shiftwork.md`. Resolving a task ticks its checkbox. The verify gate comes from `openspec.verify` (default `["openspec validate <change>"]`) plus a task's own Verify (spec stories 22–24). This is as adition option you can you or current tracker system or openspec.
 
 **Blocked by:** 04
 

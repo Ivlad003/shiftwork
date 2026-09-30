@@ -7,7 +7,7 @@ Source: the operator's review notes in `idea.md` (2026-09-30), written after dog
 ## Problem Statement
 
 Phase 1 made Shiftwork work tickets on pi. Using it on its own repo showed what's missing:
-- **Only pi runs shifts.** I also pay for Claude Code, Codex and Grok Build (`agent`) and use OpenCode and Cursor, but Shiftwork can't give a ticket to any of them.
+- **Only pi runs shifts.** I also pay for Claude Code, Codex and Grok Build (`grok`) and use OpenCode and Cursor, but Shiftwork can't give a ticket to any of them.
 - **Model swaps keep the old context.** A swap in the same session carries the previous model's context and doesn't leave a handoff note, so the next model inherits confusion instead of a clean brief.
 - **STOP loses context.** STOP ends the run after the current shift without asking the agent what it was in the middle of.
 - **Settings are scattered by kind, not by model.** I can't give each model its own context window, money, time and token limits in one place.
@@ -41,7 +41,7 @@ Phase 1 made Shiftwork work tickets on pi. Using it on its own repo showed what'
 12. As an operator, I want Claude Code shifts to run on my subscription (`claude -p`), so that they use plan limits, not API billing.
 13. As an operator, I want Codex shifts through `codex exec`, so that my ChatGPT subscription works tickets.
 14. As an operator, I want OpenCode shifts through `opencode run`, so that its providers and agents are available.
-15. As an operator, I want Grok Build shifts through `agent` in headless mode, so that my xAI subscription works tickets with Grok's own harness.
+15. As an operator, I want Grok Build shifts through `grok` in headless mode, so that my xAI subscription works tickets with Grok's own harness.
 16. As an operator, I want Cursor CLI shifts through `cursor-agent`, so that Cursor's models are available when it's installed.
 17. As an operator, I want a backend that isn't installed to be skipped like a cooling provider, with a warning, so that a missing CLI never stops the run.
 18. As an operator, I want every backend's usage, cost when reported, turns and errors mapped to the same shift events, so that budgets and reports work the same everywhere.
@@ -75,7 +75,7 @@ Phase 1 made Shiftwork work tickets on pi. Using it on its own repo showed what'
   - **claude:** `claude -p --model <m> --output-format stream-json --verbose --append-system-prompt <worker> --dangerously-skip-permissions [--plugin-dir <generated>] <prompt>`.
   - **codex:** `codex exec -m <m> --json --sandbox workspace-write -o <last> <prompt>`. The worker prompt goes through an `AGENTS.md` override or the prompt prefix.
   - **opencode:** `opencode run -m <provider/model> --format json --auto <prompt>`.
-  - **grok:** `agent -m <m> --output-format streaming-json --always-approve <prompt>`, headless.
+  - **grok:** `grok -m <m> --output-format streaming-json --always-approve <prompt>`, headless. Always invoke Grok Build as `grok` and Cursor as `cursor-agent`, never `agent`: both installers link an `agent` binary, and the one that runs depends on PATH order.
   - **cursor:** `cursor-agent -p --output-format stream-json --model <m> <prompt>`.
 - **Skill delivery.**
   - **claude:** a temporary plugin directory whose `skills/` holds symlinks to the granted skills, passed with `--plugin-dir`.
