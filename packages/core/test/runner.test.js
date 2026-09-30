@@ -119,3 +119,66 @@ test("a shift error is reported and counts as a failed attempt", async () => {
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
 	assert.match(await ticketText(root, "f", "01-a.md"), /### Shift 1[\s\S]*error: boom/);
 });
+
+function fakeWorkspace({ landOk = true } = {}) {
+	const calls = [];
+	return {
+		calls,
+		async prepare(t) {
+			calls.push(["prepare", t.number]);
+			const { mkdtemp } = await import("node:fs/promises");
+			const { tmpdir } = await import("node:os");
+			this.cwd = await mkdtemp(`${tmpdir()}/sw-ws-`);
+			return { cwd: this.cwd };
+		},
+		async land(t) {
+			calls.push(["land", t.number]);
+			return landOk ? { ok: true, message: "merged" } : { ok: false, message: "merge conflict in README.md" };
+		},
+		async keep(t) {
+			calls.push(["keep", t.number]);
+			return { branch: `shiftwork/${t.feature}-${t.number}` };
+		},
+	};
+}
+
+test("with a workspace, shifts and verify run in the ticket's worktree and a resolve lands it", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const workspace = fakeWorkspace();
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config, workspace });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts[0].request.cwd, workspace.cwd);
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["land", "01"]]);
+	assert.match(backend.shifts[0].request.prompt, new RegExp(`Ticket: ${root}/\\.scratch/f/issues/01-a\\.md`));
+	assert.match(await ticketText(root, "f", "01-a.md"), /- Landed: merged/);
+});
+
+test("a ticket that needs info keeps its branch", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A") });
+	const workspace = fakeWorkspace();
+
+	await runFrontier({ root, tracker: openTracker(root), backend: fakeBackend([{}]), verify: fileVerify(), config, workspace });
+
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["keep", "01"]]);
+	assert.match(await ticketText(root, "f", "01-a.md"), /Branch kept: shiftwork\/f-01/);
+});
+
+test("a failed landing turns a passing ticket into needs-info with the reason", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const workspace = fakeWorkspace({ landOk: false });
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend: fakeBackend([{ files: { "done.txt": "" } }]),
+		verify: fileVerify(),
+		config,
+		workspace,
+	});
+
+	assert.equal(summary.needsInfo[0].reason, "verify gate passed but landing failed: merge conflict in README.md");
+	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* needs-info/);
+});

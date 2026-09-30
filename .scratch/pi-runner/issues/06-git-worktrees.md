@@ -4,11 +4,22 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** code
 **Verify:** `npm test`
 
-- [ ] Tested on a temp git repo: the resolve path lands the commit on the target branch
-- [ ] The needs-info path keeps the branch and removes nothing
-- [ ] A re-run of a ticket reuses its existing branch
-- [ ] A dirty main checkout doesn't block the run (worktrees isolate it)
+- [x] Tested on a temp git repo: the resolve path lands the commit on the target branch
+- [x] The needs-info path keeps the branch and removes nothing
+- [x] A re-run of a ticket reuses its existing branch
+- [x] A dirty main checkout doesn't block the run (worktrees isolate it)
+
+## Comments
+
+### Shift 1 — Claude Code (claude-opus-5-5), manual (pre-runner)
+- Verify: `npm test` → 65 passed
+- Git workspace (CLI adapter): `prepare` (worktree on `shiftwork/<feature>-<NN>` from the target branch, reused on re-run; runs `worktree.setup` commands), `land` (commits everything except `.scratch/` and setup output, `--ff-only` else a merge commit, conflict → `merge --abort` + branch kept), `keep` (WIP commit, branch kept), `diffStat` (for stall detection in 11)
+- Worktrees live outside the repo (`~/.cache/shiftwork/worktrees/<repo>-<hash>/`, configurable `worktree.dir`) so nothing that walks up from the worktree finds the main checkout
+- Runner: shift and verify run in the worktree; the ticket file stays in the main checkout and the prompt gives absolute paths plus a warning about the worktree copy; resolve → land (a failed landing becomes needs-info with the reason); needs-info → keep
+- CLI: on by default in git repos, `worktree.enabled: false` or `--no-worktree` to turn off
+- **Found and fixed:** `land` would have committed setup output (e.g. `node_modules` in repos that don't ignore it); setup-created paths are now recorded in the worktree's git dir and excluded from every commit
+- **Gotcha for this repo:** worktrees have no `node_modules`; dogfooding needs `worktree.setup: ["npm install --prefer-offline --no-audit --no-fund --ignore-scripts"]`

@@ -21,7 +21,7 @@ export function decideNext({ attempt, maxAttempts, needsInfo, hasVerify, verifyO
  * Work the frontier until nothing is left (or one ticket with `once`).
  * Every dependency is injected: tracker, backend, verify, log.
  */
-export async function runFrontier({ root, tracker, backend, verify, config, log = () => {}, options = {} }) {
+export async function runFrontier({ root, tracker, backend, verify, config, workspace, log = () => {}, options = {} }) {
 	const maxAttempts = config.maxAttempts ?? 3;
 	const summary = { resolved: [], needsInfo: [] };
 	const seen = new Set();
@@ -37,7 +37,7 @@ export async function runFrontier({ root, tracker, backend, verify, config, log 
 		const claim = await tracker.claim(ticket);
 		if (!claim) continue;
 		try {
-			const outcome = await workTicket({ root, ticket, tracker, backend, verify, config, maxAttempts, log });
+			const outcome = await workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log });
 			if (outcome.action === "resolve") summary.resolved.push(ticket);
 			else summary.needsInfo.push({ ...ticket, reason: outcome.reason });
 		} finally {
@@ -50,17 +50,18 @@ export async function runFrontier({ root, tracker, backend, verify, config, log 
 	return summary;
 }
 
-async function workTicket({ root, ticket, tracker, backend, verify, config, maxAttempts, log }) {
+async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log }) {
+	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	for (let attempt = 1; ; attempt++) {
 		const route = { ...planShift({ ticket, config }), backend: backend.name };
-		const prompt = buildShiftPrompt(ticket, { root, attempt });
-		const shift = await runShift(backend, { cwd: root, route, prompt, systemPrompt: config.workerPrompt ?? WORKER_PROMPT }, (event) =>
+		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
+		const shift = await runShift(backend, { cwd, route, prompt, systemPrompt: config.workerPrompt ?? WORKER_PROMPT }, (event) =>
 			log({ ticket, attempt, event }),
 		);
 
 		const hasVerify = ticket.verify.length > 0;
-		const verifyResult = shift.needsInfo === null && hasVerify ? await verify(ticket.verify, root) : null;
-		const decision = decideNext({
+		const verifyResult = shift.needsInfo === null && hasVerify ? await verify(ticket.verify, cwd) : null;
+		let decision = decideNext({
 			attempt,
 			maxAttempts,
 			needsInfo: shift.needsInfo,
@@ -68,7 +69,17 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, maxA
 			verifyOk: verifyResult?.ok ?? false,
 		});
 
-		await tracker.appendComment(ticket, shiftReport({ attempt, route, shift, verifyResult, decision }));
+		const notes = [];
+		if (workspace && decision.action === "resolve") {
+			const landed = await workspace.land(ticket);
+			notes.push(`- Landed: ${landed.message}`);
+			if (!landed.ok) decision = { action: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
+		}
+		if (workspace && decision.action === NEEDS_INFO && notes.length === 0) {
+			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+		}
+
+		await tracker.appendComment(ticket, [shiftReport({ attempt, route, shift, verifyResult, decision }), ...notes].join("\n"));
 		if (decision.action === "resolve") {
 			await tracker.setStatus(ticket, RESOLVED);
 			return decision;

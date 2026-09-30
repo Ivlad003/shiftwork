@@ -17,14 +17,20 @@ Rules:
 `;
 
 /** The user prompt that starts a shift: pointers, not copies. */
-export function buildShiftPrompt(ticket, { root, attempt }) {
-	const ticketPath = relative(root, ticket.path);
-	const specPath = relative(root, join(dirname(dirname(ticket.path)), "spec.md"));
+export function buildShiftPrompt(ticket, { root, attempt, absolute = false }) {
+	const spec = join(dirname(dirname(ticket.path)), "spec.md");
+	const ticketPath = absolute ? ticket.path : relative(root, ticket.path);
+	const specPath = absolute ? spec : relative(root, spec);
 	const lines = [
 		`Work Shiftwork ticket ${ticket.feature}/${ticket.number}: ${ticket.title ?? ""}`.trim(),
 		"",
 		`- Ticket: ${ticketPath}`,
 		`- Spec: ${specPath}`,
+		...(absolute
+			? [
+					"- You are in this ticket's own git worktree. Read and update the ticket at the path above, never the copy of .scratch/ inside the worktree.",
+				]
+			: []),
 		`- This is attempt ${attempt}.${attempt > 1 ? " Earlier attempts failed; read the ticket's Comments before you start." : ""}`,
 	];
 	if (ticket.verify.length) lines.push(`- Verify gate: ${ticket.verify.map((c) => `\`${c}\``).join(" · ")}`);

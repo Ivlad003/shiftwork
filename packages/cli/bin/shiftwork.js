@@ -21,6 +21,7 @@ Run options:
   --model <provider/id>  Default model (else "model" in .pi/shiftwork.json)
   --thinking <level>     Default thinking level (default: medium)
   --max-attempts <n>     Attempts per ticket before needs-info (default: 3)
+  --no-worktree          Work in the main checkout instead of a git worktree per ticket
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 
@@ -78,6 +79,7 @@ async function run(argv) {
 			model: { type: "string" },
 			thinking: { type: "string" },
 			"max-attempts": { type: "string" },
+			"no-worktree": { type: "boolean" },
 			dir: { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
@@ -109,6 +111,7 @@ async function run(argv) {
 	const { createPiBackend } = await import("../src/pi-backend.js");
 	const { runVerify } = await import("../src/verify.js");
 	const backend = createPiBackend(config.pi ?? {});
+	const workspace = await createWorkspace(root, config, values["no-worktree"]);
 	console.log(`shiftwork: pi ${backend.pi.version} · max ${config.maxAttempts} attempts per ticket`);
 
 	const summary = await runFrontier({
@@ -117,6 +120,7 @@ async function run(argv) {
 		backend,
 		verify: (commands, cwd) => runVerify(commands, cwd),
 		config,
+		workspace,
 		log: shiftLogger(root),
 		options: { once: values.once, feature: values.feature },
 	});
@@ -125,6 +129,21 @@ async function run(argv) {
 	for (const t of summary.needsInfo) console.log(`✖ ${t.feature}/${t.number} needs-info: ${t.reason}`);
 	if (!summary.resolved.length && !summary.needsInfo.length) console.log("Nothing to do: the frontier is empty.");
 	return summary.exitCode;
+}
+
+/** A git worktree per ticket when root is a git repo, unless disabled (ticket 06). */
+async function createWorkspace(root, config, disabled) {
+	const settings = config.worktree ?? {};
+	if (disabled || settings.enabled === false) return undefined;
+	const { execFileSync } = await import("node:child_process");
+	try {
+		execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, stdio: "ignore" });
+	} catch {
+		if (settings.enabled === true) throw new Error(`worktree.enabled is true but ${root} is not a git repository`);
+		return undefined;
+	}
+	const { createGitWorkspace } = await import("../src/git.js");
+	return createGitWorkspace({ root, target: settings.target, setup: settings.setup, dir: settings.dir });
 }
 
 function readOptional(path) {

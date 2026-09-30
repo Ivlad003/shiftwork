@@ -11,6 +11,7 @@ export function starterConfig(model) {
 		defaultType: "code",
 		thinking: "medium",
 		maxAttempts: 3,
+		worktree: { enabled: true, setup: [] },
 		routing: {
 			git: { tier: "quick", thinking: "low" },
 			docs: { tier: "quick", thinking: "low" },

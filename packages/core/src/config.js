@@ -42,6 +42,11 @@ export function validateConfig(input) {
 		if (!route.tier && !route.model) fail(`routing.${type}`, "needs a tier or a model");
 	}
 	if (config.defaultTier !== undefined && !tiers[config.defaultTier]) fail("defaultTier", `unknown tier "${config.defaultTier}"`);
+	const worktree = config.worktree ?? {};
+	if (worktree.enabled !== undefined && typeof worktree.enabled !== "boolean") fail("worktree.enabled", "must be true or false");
+	if (worktree.setup !== undefined && !(Array.isArray(worktree.setup) && worktree.setup.every((c) => typeof c === "string"))) {
+		fail("worktree.setup", "must be an array of shell commands");
+	}
 
 	const fallback = config.routing?.[config.defaultType];
 	if (!fallback && !config.defaultTier && !config.model) {
