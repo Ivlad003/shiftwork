@@ -55,5 +55,32 @@
       ],
       "thinking": "high"
     }
+  },
+  "budgets": {
+    "default": {
+      "maxTurns": 150,
+      "maxWallMin": 60,
+      "maxContextPct": 80
+    },
+    "ticket": {
+      "maxTurns": 400,
+      "maxWallMin": 180
+    }
+  },
+  "softLimitPct": 85,
+  "maxHandoffs": 3,
+  "onExceed": {
+    "maxTurns": {
+      "to": "next",
+      "mode": "new-process"
+    },
+    "maxWallMin": {
+      "to": "next",
+      "mode": "new-process"
+    },
+    "maxContextPct": {
+      "to": "same-tier",
+      "mode": "new-process"
+    }
   }
 }
