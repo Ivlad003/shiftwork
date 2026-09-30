@@ -5,7 +5,7 @@ import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { createMeter } from "./meter.js";
 import { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
-import { buildShiftPrompt, SOFT_LIMIT_STEER, WORKER_PROMPT } from "./prompt.js";
+import { buildShiftPrompt, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
 
 const NEEDS_INFO = "needs-info";
@@ -183,6 +183,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const shift = await runShift(
 			backend,
 			{
+				root,
 				cwd,
 				route,
 				prompt,
@@ -202,6 +203,39 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		);
 
 		accumulateUsage(ticketUsage, shift);
+
+		if (shift.handoff?.kind === "stop") {
+			const notes = [];
+			if (!shift.handoff.agentNote) {
+				notes.push(
+					await buildHandoffNote({
+						shiftNumber,
+						from: route,
+						to: undefined,
+						reason: shift.handoff.reason ?? "STOP file",
+						shift,
+						verifyResult: null,
+						getDiffStat,
+					}),
+				);
+			}
+			await tracker.appendComment(
+				ticket,
+				[
+					shiftReport({
+						number: shiftNumber,
+						route,
+						shift,
+						verifyResult: null,
+						decision: { action: "stop", reason: "STOP file" },
+						classificationNote,
+					}),
+					...notes,
+				].join("\n"),
+			);
+			await tracker.setStatus(ticket, READY);
+			return { action: "stop", reason: "STOP file" };
+		}
 
 		const limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
 		const provider = route.model.split("/")[0];
@@ -505,18 +539,27 @@ async function runShift(backend, request, log) {
 		return false;
 	}
 
+	async function beginGrace(steerText, kind) {
+		softFired = true;
+		softFiredThisTurn = true;
+		softGraceRemaining = 2;
+		exceededKind = kind;
+		if (ticketSnapshot === null) ticketSnapshot = await readFile(request.ticketPath, "utf8").catch(() => "");
+		if (shift.steer) await shift.steer(steerText).catch(() => {});
+	}
+
+	async function finishStop(agentNote) {
+		await shift.abort().catch(() => {});
+		result.stopReason = "STOP file";
+		result.handoff = { reason: "STOP file", kind: "stop", agentNote };
+	}
+
 	async function checkLimit(limit) {
-		if (!limit) return false;
+		if (!limit || exceededKind === "stop") return false;
 		if (limit.level === "soft" && shift.steer) {
 			const isFirst = !softFired;
 			softFired = true;
-			if (isFirst) {
-				softFiredThisTurn = true;
-				softGraceRemaining = 2;
-				exceededKind = limit.kind;
-				ticketSnapshot = await readFile(request.ticketPath, "utf8").catch(() => "");
-				await shift.steer(SOFT_LIMIT_STEER).catch(() => {});
-			}
+			if (isFirst) await beginGrace(SOFT_LIMIT_STEER, limit.kind);
 		} else if (limit.level === "hard") {
 			return tryInPlace(limit.reason, limit.kind);
 		}
@@ -544,6 +587,9 @@ async function runShift(backend, request, log) {
 			}
 
 			limit = meter.observe(event) ?? limit;
+			if (exceededKind !== "stop" && request.root && checkStop(request.root)) {
+				await beginGrace(STOP_STEER, "stop");
+			}
 			if (await checkLimit(limit)) break;
 
 			if (softFired) {
@@ -554,13 +600,21 @@ async function runShift(backend, request, log) {
 
 				if (await hasAgentHandoff()) {
 					// Stop the agent before anyone else touches its worktree.
-					await shift.abort().catch(() => {});
-					result.stopReason = result.stopReason ?? "agent-handoff";
-					result.handoff = { reason: "agent handoff", kind: exceededKind, agentNote: true };
+					if (exceededKind === "stop") {
+						await finishStop(true);
+					} else {
+						await shift.abort().catch(() => {});
+						result.stopReason = result.stopReason ?? "agent-handoff";
+						result.handoff = { reason: "agent handoff", kind: exceededKind, agentNote: true };
+					}
 					break;
 				}
 
 				if (softGraceRemaining <= 0) {
+					if (exceededKind === "stop") {
+						await finishStop(false);
+						break;
+					}
 					if (await tryInPlace("soft-limit agent did not hand off", exceededKind)) break;
 				}
 			}
@@ -577,6 +631,10 @@ async function runShift(backend, request, log) {
 		}
 	} finally {
 		await shift.close?.().catch(() => {});
+	}
+	if (exceededKind === "stop" && !result.handoff) {
+		result.stopReason = "STOP file";
+		result.handoff = { reason: "STOP file", kind: "stop", agentNote: await hasAgentHandoff() };
 	}
 	result.wallMin = (Date.now() - startedAt) / 60_000;
 	const marker = result.text.match(MARKER);
@@ -639,7 +697,14 @@ function shiftReport({ number, route, shift, verifyResult, decision, classificat
 	for (const warning of shift.warnings ?? []) {
 		lines.push(`- Warning: ${warning}`);
 	}
-	const outcome = decision.action === "resolve" ? "resolved" : decision.action === "retry" ? "new attempt" : `needs-info: ${decision.reason}`;
+	const outcome =
+		decision.action === "resolve"
+			? "resolved"
+			: decision.action === "retry"
+				? "new attempt"
+				: decision.action === "stop"
+					? `stopped: ${decision.reason}`
+					: `needs-info: ${decision.reason}`;
 	lines.push(`- Outcome: ${outcome}`);
 	return lines.join("\n");
 }

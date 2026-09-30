@@ -3,6 +3,9 @@ import { dirname, join, relative } from "node:path";
 /** Sent to the agent when a shift budget reaches its soft limit. Must stay in sync with WORKER_PROMPT. */
 export const SOFT_LIMIT_STEER = `You are near a Shiftwork budget limit. Finish your current step, then append a \`### Handoff\` note to the ticket describing what was done, what remains, hypotheses, and files touched, then stop.`;
 
+/** Sent to the agent when a STOP file appears during a shift. Must stay in sync with WORKER_PROMPT. */
+export const STOP_STEER = `The operator asked Shiftwork to stop. Finish your current step, then append a \`### Handoff\` note to the ticket describing what was done, what remains, hypotheses, and files touched, then stop.`;
+
 /** Appended to the backend's system prompt for every shift. */
 export const WORKER_PROMPT = `# Shiftwork worker
 
@@ -19,6 +22,7 @@ Rules:
 - If you add notes to the ticket, put them under "### Notes"; never write headings that start with "### Shift" (the runner writes those) and write "### Handoff" only when asked for a handoff.
 - End with a short summary of what you changed and what, if anything, is left.
 - Soft limit: when the runner sends "${SOFT_LIMIT_STEER}", you have up to 2 more turns. Finish your current step, append a \`### Handoff\` note to the ticket's Comments with what was done, what remains, hypotheses, and files touched, then stop.
+- STOP: when the runner sends "${STOP_STEER}", you have up to 2 more turns. Finish your current step, append a \`### Handoff\` note to the ticket's Comments with what was done, what remains, hypotheses, and files touched, then stop.
 `;
 
 /** The user prompt that starts a shift: pointers, not copies. */

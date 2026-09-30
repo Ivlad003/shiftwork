@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { openCooldowns, openTracker, runFrontier } from "../src/index.js";
-import { SOFT_LIMIT_STEER, WORKER_PROMPT } from "../src/prompt.js";
+import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
 
@@ -201,19 +201,61 @@ test("a failed landing turns a passing ticket into needs-info with the reason", 
 	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* needs-info/);
 });
 
-test("a STOP file created mid-shift stops after the current shift with exit code 3 and no leftover claim", async () => {
+const stopTurn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+
+test("a STOP file created mid-shift keeps the agent's Handoff note and adds no runner note", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
-	const backend = fakeBackend([{ text: "Tried.", files: { STOP: "" } }]);
+	const ticketPath = `${root}/.scratch/f/issues/01-a.md`;
+	const { appendFile } = await import("node:fs/promises");
+	const steered = [];
+	const backend = fakeBackend([
+		{
+			files: { STOP: "" },
+			events: [stopTurn, stopTurn, stopTurn, { type: "end", stopReason: "stop" }],
+			steer: async (text) => {
+				steered.push(text);
+				await appendFile(ticketPath, "\n### Handoff\n- Agent: paused on STOP, files touched: src/runner.js\n");
+			},
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
 
 	const summary = await run(root, backend);
 
 	assert.equal(summary.exitCode, 3);
 	assert.equal(summary.stoppedReason, "STOP file");
-	assert.equal(backend.shifts.length, 1);
+	assert.deepEqual(steered, [STOP_STEER]);
+	assert.equal(backend.shifts.length, 1, "STOP must not start another shift");
+	assert.equal(backend.shifts[0].aborted, true);
 	const tracker = openTracker(root);
 	assert.equal((await tracker.activeClaims()).length, 0);
-	assert.equal((await tracker.frontier()).length, 1);
 	assert.equal((await tracker.list())[0].status, "ready-for-agent");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Handoff\n- Agent: paused on STOP/);
+	assert.doesNotMatch(text, /### Handoff — shift 1/);
+});
+
+test("a non-compliant STOP agent gets a runner Handoff note after the grace turns", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			files: { STOP: "" },
+			events: [stopTurn, stopTurn, stopTurn, stopTurn, { type: "end", stopReason: "stop" }],
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await run(root, backend);
+
+	assert.equal(summary.exitCode, 3);
+	assert.equal(summary.stoppedReason, "STOP file");
+	assert.equal(backend.shifts.length, 1, "STOP must not start another shift");
+	assert.equal(backend.shifts[0].aborted, true);
+	assert.equal((await openTracker(root).activeClaims()).length, 0);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* ready-for-agent/);
+	assert.match(text, /### Handoff — shift 1, fake\/m1 → \(no target\), reason: STOP file/);
+	assert.doesNotMatch(text, /### Handoff\n- Agent:/);
 });
 
 test("a STOP file present before the run starts works no ticket and exits 3", async () => {
@@ -437,10 +479,11 @@ test("a non-compliant soft limit gets a runner handoff note at the hard limit", 
 	assert.match(text, /### Handoff — shift 1, fake\/m1 → fake\/m2, reason: budget\.maxTurns/);
 });
 
-test("the worker prompt documents the fixed soft-limit steer text", () => {
+test("the worker prompt documents the fixed soft-limit and STOP steer text", () => {
 	assert.match(WORKER_PROMPT, /Soft limit:/);
 	assert.match(WORKER_PROMPT, /### Handoff/);
 	assert.ok(WORKER_PROMPT.includes(SOFT_LIMIT_STEER));
+	assert.ok(WORKER_PROMPT.includes(STOP_STEER));
 });
 
 test("shift numbers continue from the reports already in the ticket after a re-run", async () => {
