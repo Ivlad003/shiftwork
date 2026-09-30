@@ -5,6 +5,8 @@ export declare const RESOLVED: "resolved";
 
 export interface Ticket {
 	path: string;
+	/** Spec of the feature, when it isn't the sibling spec.md of the mattpocock tracker (OpenSpec: proposal.md). */
+	specPath?: string;
 	feature?: string;
 	number?: string;
 	title?: string;
@@ -140,7 +142,8 @@ export interface Cooldown {
 }
 
 export declare function formatTicketsTable(tickets: Ticket[]): string;
-export declare function openTracker(root: string): {
+
+export interface Tracker {
 	list(): Promise<(Ticket & { feature: string })[]>;
 	frontier(): Promise<(Ticket & { feature: string })[]>;
 	claim(ticket: Ticket, options?: { pid?: number }): Promise<Claim | null>;
@@ -148,7 +151,19 @@ export declare function openTracker(root: string): {
 	activeClaims(): Promise<Claim[]>;
 	setStatus(ticketOrClaim: Ticket | Claim, status: string): Promise<void>;
 	appendComment(ticketOrClaim: Ticket | Claim, markdown: string): Promise<void>;
-};
+}
+
+export declare function openTracker(root: string): Tracker;
+
+/** Tracker on an OpenSpec layout (`openspec/changes/<change>/tasks.md` + `.shiftwork.md`). */
+export declare function openOpenSpecTracker(root: string, options?: { verify?: string[] }): Tracker;
+
+/** The tracker of the repo: `config.tracker` when set, else auto-detected (`.scratch/` wins over `openspec/changes/`). */
+export declare function openRepoTracker(root: string, config?: Record<string, unknown>): Promise<Tracker>;
+export declare function detectTracker(root: string, config?: Record<string, unknown>): Promise<"scratch" | "openspec">;
+
+/** Parse the numbered `- [ ] N.M title` tasks of an OpenSpec tasks.md, in file order. */
+export declare function parseTasks(text: string): { done: boolean; number: string; title: string; verify: string[] }[];
 
 export declare function openCooldowns(root: string): {
 	path: string;

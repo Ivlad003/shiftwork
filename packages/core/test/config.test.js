@@ -41,3 +41,19 @@ test("broken JSON names the file", async () => {
 	await writeFile(join(root, ".pi", "shiftwork.json"), "{ nope");
 	await assert.rejects(loadConfig(root, userDir), /\.pi\/shiftwork\.json/);
 });
+
+test("tracker and openspec.verify are validated", async () => {
+	const good = await dirs({ model: "a/1", tracker: "openspec", openspec: { verify: ["make check"] } });
+	const config = await loadConfig(good.root, good.userDir);
+	assert.equal(config.tracker, "openspec");
+	assert.deepEqual(config.openspec.verify, ["make check"]);
+
+	const badTracker = await dirs({ model: "a/1", tracker: "jira" });
+	await assert.rejects(loadConfig(badTracker.root, badTracker.userDir), /tracker: must be "scratch" or "openspec"/);
+
+	const badVerify = await dirs({ model: "a/1", openspec: { verify: "npm test" } });
+	await assert.rejects(loadConfig(badVerify.root, badVerify.userDir), /openspec\.verify: must be an array of shell commands/);
+
+	const badField = await dirs({ model: "a/1", openspec: { strict: true } });
+	await assert.rejects(loadConfig(badField.root, badField.userDir), /openspec\.strict: unknown openspec field/);
+});

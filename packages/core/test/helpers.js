@@ -17,3 +17,19 @@ export async function makeRepo(tickets) {
 export function ticket(number, title, { status = "ready-for-agent", blockedBy = "None (can start immediately)", extra = "" } = {}) {
 	return `# ${number}: ${title}\n\n**What to build:** something.\n\n**Blocked by:** ${blockedBy}\n\n**Status:** ${status}\n${extra}\n- [ ] It works\n`;
 }
+
+/**
+ * Create a temp repo root with an OpenSpec layout: { "change": { tasks, proposal?, state? } }
+ * writes openspec/changes/<change>/tasks.md (+ optional proposal.md and .shiftwork.md).
+ */
+export async function makeOpenSpecRepo(changes) {
+	const root = await mkdtemp(join(tmpdir(), "shiftwork-opspec-"));
+	for (const [change, spec] of Object.entries(changes)) {
+		const dir = join(root, "openspec", "changes", change);
+		await mkdir(dir, { recursive: true });
+		await writeFile(join(dir, "tasks.md"), spec.tasks);
+		if (spec.proposal) await writeFile(join(dir, "proposal.md"), spec.proposal);
+		if (spec.state) await writeFile(join(dir, ".shiftwork.md"), spec.state);
+	}
+	return root;
+}

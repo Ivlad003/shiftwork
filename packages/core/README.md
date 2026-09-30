@@ -25,4 +25,14 @@ The format is the [mattpocock-skills](https://github.com/mattpocock/skills) loca
 - [ ] Invalid email → 400
 ```
 
+## OpenSpec tracker
+
+`openRepoTracker(root, config)` opens the repo's tracker: the mattpocock one above, or the OpenSpec tracker when `config.tracker` is `"openspec"` or `openspec/changes/` exists (`.scratch/` wins when both exist). Each change in `openspec/changes/` is a feature; each unchecked `- [ ] N.M` task in its `tasks.md` is a ticket blocked by the previous task. Status, shift reports and comments live in `.shiftwork.md` next to `tasks.md`, one `## N.M` section per task; resolving a task ticks its checkbox. The verify gate is `openspec.verify` (default `openspec validate <change>`) plus a task's own indented `Verify:` line.
+
+```js
+import { openRepoTracker } from "shiftwork-core";
+const tracker = await openRepoTracker(process.cwd(), { tracker: "openspec" });
+const next = (await tracker.frontier())[0];
+```
+
 Status: early development.

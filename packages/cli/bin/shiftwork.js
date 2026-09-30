@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { formatTicketsTable, loadConfig, openCooldowns, openTracker, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { formatTicketsTable, loadConfig, openCooldowns, openRepoTracker, runFrontier, validateConfig, VERSION } from "shiftwork-core";
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
@@ -62,7 +62,7 @@ async function status(argv) {
 		options: { dir: { type: "string" } },
 	});
 	const dir = values.dir ?? positionals[0] ?? process.cwd();
-	const tracker = openTracker(dir);
+	const tracker = await openRepoTracker(dir);
 	const tickets = await tracker.list();
 	const frontier = await tracker.frontier();
 	const ready = new Set(frontier.map((t) => t.path));
@@ -154,7 +154,7 @@ async function run(argv) {
 	if (values["dry-run"]) {
 		const { dryRunFrontier } = await import("../src/dry-run.js");
 		const { createJevClassifier } = await import("../src/jev.js");
-		const tickets = (await openTracker(root).frontier()).filter((t) => !values.feature || t.feature === values.feature);
+		const tickets = (await (await openRepoTracker(root, config)).frontier()).filter((t) => !values.feature || t.feature === values.feature);
 		const cooldowns = await openCooldowns(root).active();
 		const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 		await dryRunFrontier({
@@ -178,7 +178,7 @@ async function run(argv) {
 
 	const summary = await runFrontier({
 		root,
-		tracker: openTracker(root),
+		tracker: await openRepoTracker(root, config),
 		backend,
 		verify: (commands, cwd) => runVerify(commands, cwd),
 		config,

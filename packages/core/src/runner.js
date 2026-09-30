@@ -55,6 +55,9 @@ export async function runFrontier({
 	const maxAttempts = config.maxAttempts ?? 3;
 	const summary = { resolved: [], needsInfo: [], stoppedReason: undefined };
 	const seen = new Set();
+	// A tracker ticket is identified by feature + number: the OpenSpec tracker shares
+	// one .shiftwork.md path between all tasks of a change.
+	const seenKey = (t) => (t.number === undefined ? t.path : `${t.feature}/${t.number}`);
 	const time = clock ?? {
 		now: () => new Date(),
 		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -77,11 +80,11 @@ export async function runFrontier({
 			break;
 		}
 		const frontier = (await tracker.frontier()).filter(
-			(t) => !seen.has(t.path) && (!options.feature || t.feature === options.feature),
+			(t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature),
 		);
 		if (frontier.length === 0) break;
 		const ticket = frontier[0];
-		seen.add(ticket.path);
+		seen.add(seenKey(ticket));
 
 		const claim = await tracker.claim(ticket);
 		if (!claim) continue;

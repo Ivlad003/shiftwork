@@ -46,6 +46,10 @@ export function validateConfig(input) {
 
 	checkModel(config.model, "model", { optional: true });
 	checkThinking(config.thinking, "thinking");
+	if (config.tracker !== undefined && !["scratch", "openspec"].includes(config.tracker)) {
+		fail("tracker", 'must be "scratch" or "openspec"');
+	}
+	checkOpenSpec(config.openspec, "openspec");
 	if (!Number.isInteger(config.maxAttempts) || config.maxAttempts < 1) fail("maxAttempts", "must be a positive integer");
 	if (!Number.isInteger(config.maxHandoffs) || config.maxHandoffs < 0) fail("maxHandoffs", "must be a non-negative integer");
 	if (typeof config.softLimitPct !== "number" || config.softLimitPct < 0 || config.softLimitPct > 100) {
@@ -116,6 +120,17 @@ export function validateConfig(input) {
 	}
 
 	return config;
+}
+
+function checkOpenSpec(value, path) {
+	if (value === undefined) return;
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const key of Object.keys(value)) {
+		if (key !== "verify") fail(`${path}.${key}`, "unknown openspec field; expected verify");
+	}
+	if (value.verify !== undefined && !(Array.isArray(value.verify) && value.verify.every((c) => typeof c === "string" && c.length > 0))) {
+		fail(`${path}.verify`, "must be an array of shell commands");
+	}
 }
 
 const PROFILE_FIELDS = ["contextWindow", "thinking", "budget"];

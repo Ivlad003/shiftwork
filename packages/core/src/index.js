@@ -113,6 +113,7 @@ export async function loadTickets(root = process.cwd()) {
 	return tickets;
 }
 export { formatTicketsTable, openTracker } from "./tracker.js";
+export { detectTracker, openOpenSpecTracker, openRepoTracker, parseTasks } from "./openspec.js";
 export { openCooldowns } from "./cooldowns.js";
 export { noRunState, openRunState } from "./run-state.js";
 export { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";

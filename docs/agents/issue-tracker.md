@@ -42,3 +42,12 @@ Shiftwork executes these tickets itself (see `CONTEXT.md` and ADR-0001). A ticke
 Besides the triage roles, the runner writes two statuses: `claimed` (the runner holds the ticket) and `resolved` (the verify gate passed). It appends shift reports and handoff notes under `## Comments`.
 
 **Write every ticket with a `**Verify:**` line.** A ticket without one can't be resolved automatically.
+
+## OpenSpec tracker
+
+Shiftwork can also work [OpenSpec](https://openspec.dev) changes through the same tracker interface. Set `"tracker": "openspec"` in `.pi/shiftwork.json`, or let it auto-detect: `openspec/changes/` is used when `.scratch/` doesn't exist (`.scratch/` wins when both exist).
+
+- One feature per change: `openspec/changes/<change>/`. The `archive/` folder is ignored.
+- Each unchecked `- [ ] N.M` task in `tasks.md` is a ticket, blocked by the previous task (so sections follow each other). A checked box is a resolved ticket; resolving a task ticks its box.
+- Status beyond done/undone (`claimed`, `needs-info`, …), shift reports and comments live in `openspec/changes/<change>/.shiftwork.md`, one `## N.M` section per task. The runner owns this file.
+- The verify gate is `openspec.verify` from the config (default `["openspec validate <change>"]`, `<change>` substituted) plus a task's own indented `Verify:` line under the task.

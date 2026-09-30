@@ -136,7 +136,7 @@ async function setStatusLine(path, status) {
 	await writeAtomic(path, next);
 }
 
-async function writeAtomic(path, content) {
+export async function writeAtomic(path, content) {
 	const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
 	try {
 		await writeFile(tmp, content);
@@ -147,7 +147,7 @@ async function writeAtomic(path, content) {
 	}
 }
 
-async function createExclusive(path, owner) {
+export async function createExclusive(path, owner) {
 	try {
 		const handle = await open(path, "wx");
 		await handle.writeFile(JSON.stringify(owner));
@@ -159,7 +159,7 @@ async function createExclusive(path, owner) {
 	}
 }
 
-async function readOwner(path) {
+export async function readOwner(path) {
 	try {
 		return JSON.parse(await readFile(path, "utf8"));
 	} catch {
@@ -167,7 +167,7 @@ async function readOwner(path) {
 	}
 }
 
-function isAlive(pid) {
+export function isAlive(pid) {
 	try {
 		process.kill(pid, 0);
 		return true;
