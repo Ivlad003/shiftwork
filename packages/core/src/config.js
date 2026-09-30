@@ -60,6 +60,10 @@ export function validateConfig(input) {
 	if (config.paidProviders !== undefined && !(Array.isArray(config.paidProviders) && config.paidProviders.every((p) => typeof p === "string"))) {
 		fail("paidProviders", "must be an array of provider names");
 	}
+	if (config.probeEveryMin !== undefined && !(typeof config.probeEveryMin === "number" && config.probeEveryMin > 0)) {
+		fail("probeEveryMin", "must be a number of minutes > 0");
+	}
+	if (config.probeBeforeTicket !== undefined && typeof config.probeBeforeTicket !== "boolean") fail("probeBeforeTicket", "must be true or false");
 	if (config.preferWaitMin !== undefined && !(typeof config.preferWaitMin === "number" && config.preferWaitMin >= 0)) {
 		fail("preferWaitMin", "must be a number of minutes ≥ 0");
 	}

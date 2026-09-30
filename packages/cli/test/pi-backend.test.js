@@ -191,3 +191,15 @@ test("mapPiEvent ignores everything but finished assistant messages", () => {
 	assert.deepEqual(turn, { type: "turn", model: "m", stopReason: "stop", usage: { input: 5, output: 2, totalTokens: 7 }, costUsd: 0.5 });
 	assert.deepEqual(text, { type: "text", text: "done" });
 });
+
+test("probe reports a model that answers as available and a limit error as unavailable", { timeout: 120_000 }, async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-probe-"));
+	const backendWith = (script) =>
+		createPiBackend({
+			args: ["--offline", "-ne", "-e", fixture],
+			env: { PI_CODING_AGENT_DIR: agentDir, SHIFTWORK_SCRIPT: JSON.stringify(script) },
+		});
+
+	assert.equal(await backendWith([{ text: "OK" }]).probe("scripted/s1"), true);
+	assert.equal(await backendWith([{ error: '429: {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}' }]).probe("scripted/s1"), false);
+});

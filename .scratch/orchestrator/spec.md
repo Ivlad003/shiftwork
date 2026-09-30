@@ -115,4 +115,18 @@ Phase 1 made Shiftwork work tickets on pi. Using it on its own repo showed what'
 - **Backends not installed on this machine:** `cursor-agent`. Its ticket will end in needs-info if the verify gate can't be satisfied without it; the fake-binary tests should still pass.
 
 <!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Fresh handoffs only by default (ADR-0005) | resolved | xai/grok-4.6 |
+| 02 | STOP asks the agent for a handoff note | resolved | xai/grok-4.6 |
+| 03 | Per-model profiles: context window, budget, thinking | resolved | xai/grok-4.6 |
+| 04 | Ticket status table in the feature spec | resolved | xai/grok-4.6 |
+| 05 | Backend registry and the Claude Code backend | ready-for-agent |  |
+| 06 | Codex backend | ready-for-agent |  |
+| 07 | OpenCode backend | ready-for-agent |  |
+| 08 | Grok Build (`grok`) backend | ready-for-agent |  |
+| 09 | Cursor CLI (`cursor-agent`) backend | ready-for-agent |  |
+| 10 | OpenSpec tracker | ready-for-agent |  |
+| 11 | `shiftwork tui`: read-only dashboard | ready-for-agent |  |
+| 12 | `shiftwork tui`: run, stop with handoff, dry-run | ready-for-agent |  |
 <!-- shiftwork:tickets:end -->

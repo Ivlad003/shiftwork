@@ -18,6 +18,12 @@ export function openCooldowns(root) {
 		}
 	}
 
+	async function update(change) {
+		const state = await read();
+		state.cooldowns = change(state.cooldowns ?? []);
+		await writeAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
+	}
+
 	return {
 		path,
 
@@ -27,15 +33,31 @@ export function openCooldowns(root) {
 			return (state.cooldowns ?? []).filter((c) => new Date(c.until) > now);
 		},
 
-		/** Add or refresh a cooldown and write the state file atomically. */
-		async add(provider, until, kind = "limit") {
-			const state = await read();
-			const cooldowns = (state.cooldowns ?? []).filter((c) => c.provider !== provider);
-			cooldowns.push({ provider, until: until instanceof Date ? until.toISOString() : until, kind });
-			state.cooldowns = cooldowns;
-			await writeAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
+		/**
+		 * Add or refresh a cooldown and write the state file atomically.
+		 * `exact` marks an end time the provider gave us; guessed ones may be probed early.
+		 */
+		async add(provider, until, kind = "limit", { at = new Date(), exact = false } = {}) {
+			await update((cooldowns) => [
+				...cooldowns.filter((c) => c.provider !== provider),
+				{ provider, until: iso(until), kind, at: iso(at), exact },
+			]);
+		},
+
+		/** End a cooldown early (a probe found the provider answering again). */
+		async remove(provider) {
+			await update((cooldowns) => cooldowns.filter((c) => c.provider !== provider));
+		},
+
+		/** Remember when a guessed cooldown was last probed. */
+		async markProbed(provider, at = new Date()) {
+			await update((cooldowns) => cooldowns.map((c) => (c.provider === provider ? { ...c, probedAt: iso(at) } : c)));
 		},
 	};
+}
+
+function iso(value) {
+	return value instanceof Date ? value.toISOString() : value;
 }
 
 async function writeAtomic(path, content) {

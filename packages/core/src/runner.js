@@ -135,6 +135,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
 	let shiftNumber = firstShift;
+	let firstPlan = true;
 	let handoffCount = 0;
 	let attempt = 1;
 	let previousRoute = undefined;
@@ -152,6 +153,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: "stop", reason: "STOP file" };
 		}
 		const now = clock.now();
+		// Before every ticket, check every guessed cooldown; between its shifts, every probeEveryMin.
+		await probeCooldowns({ backend, cooldowns, config, now, force: firstPlan && config.probeBeforeTicket !== false, log: (event) => log({ ticket, attempt, event }) });
+		firstPlan = false;
 		const plan = planShift({
 			ticket,
 			config,
@@ -240,7 +244,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
 		const provider = route.model.split("/")[0];
 		const until = limit ? (limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
-		if (limit) await cooldowns.add(provider, until, limit.kind);
+		if (limit) await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(limit.resetAt) });
 		// The limit may have hit after the work was done: if the gate passes, the ticket is resolved.
 		const limitGate = limit && ticket.verify.length > 0 && shift.needsInfo === null ? await verify(ticket.verify, cwd) : null;
 		if (limit && !limitGate?.ok) {
@@ -413,6 +417,27 @@ async function publishShift(runState, { ticket, attempt, shift, route }) {
 		}
 		write();
 	};
+}
+
+/**
+ * Guessed cooldowns (no reset time from the provider) are probed every `probeEveryMin` minutes
+ * with one tiny request through the backend; a provider that answers is available again.
+ */
+async function probeCooldowns({ backend, cooldowns, config, now, force = false, log }) {
+	if (typeof backend.probe !== "function") return;
+	const everyMs = (config.probeEveryMin ?? 15) * 60_000;
+	const models = Object.values(config.tiers ?? {}).flatMap((tier) => tier.chain ?? []);
+	for (const cooldown of await cooldowns.active(now)) {
+		if (cooldown.exact) continue;
+		const last = new Date(cooldown.probedAt ?? cooldown.at ?? 0).getTime();
+		if (!force && now.getTime() - last < everyMs) continue;
+		const model = models.find((m) => m.split("/")[0] === cooldown.provider);
+		if (!model) continue;
+		const ok = await backend.probe(model).catch(() => false);
+		log({ type: "probe", provider: cooldown.provider, model, ok });
+		if (ok) await cooldowns.remove(cooldown.provider);
+		else await cooldowns.markProbed(cooldown.provider, now);
+	}
 }
 
 function accumulateUsage(target, shift) {

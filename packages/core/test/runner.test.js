@@ -970,3 +970,65 @@ test("a profile contextWindow rescales fake-backend context fill from tokens", a
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /budget\.maxContextPct/);
 });
+
+test("a guessed cooldown is probed after probeEveryMin and cleared when the provider answers again", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const cfg = { ...chainTwoProviders(), probeEveryMin: 15 };
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const store = openCooldowns(root);
+	await store.add("fake", new Date(t0 + 5 * 3600_000), "usage", { at: new Date(t0 - 20 * 60_000) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const probed = [];
+	backend.probe = async (model) => {
+		probed.push(model);
+		return true;
+	};
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg, clock });
+
+	assert.deepEqual(probed, ["fake/m1"]);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1", "the first chain model is back");
+	assert.deepEqual(await store.active(new Date(t0)), []);
+});
+
+test("a cooldown with the provider's own reset time is never probed; a failed probe keeps the cooldown", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const cfg = { ...chainTwoProviders(), probeEveryMin: 15 };
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const store = openCooldowns(root);
+	await store.add("fake", new Date(t0 + 3600_000), "usage", { at: new Date(t0 - 3600_000), exact: true });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const probed = [];
+	backend.probe = async (model) => {
+		probed.push(model);
+		return false;
+	};
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg, clock });
+
+	assert.deepEqual(probed, []);
+	assert.equal(backend.shifts[0].request.route.model, "other/m2");
+	assert.equal((await store.active(new Date(t0))).length, 1);
+});
+
+test("before every ticket all guessed cooldowns are probed, even a fresh one", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const cfg = { ...chainTwoProviders(), probeEveryMin: 15 };
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const store = openCooldowns(root);
+	await store.add("fake", new Date(t0 + 5 * 3600_000), "usage", { at: new Date(t0 - 60_000) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const probed = [];
+	backend.probe = async (model) => {
+		probed.push(model);
+		return true;
+	};
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg, clock });
+
+	assert.deepEqual(probed, ["fake/m1"], "a cooldown only a minute old is still checked at ticket start");
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+});

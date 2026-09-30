@@ -116,11 +116,9 @@ async function syncSpecTable(root, feature) {
 }
 
 function applyTicketsTable(spec, table) {
-	const startIdx = spec.indexOf(TABLE_START);
-	const endIdx = spec.indexOf(TABLE_END);
-	if (startIdx !== -1 && endIdx >= startIdx + TABLE_START.length) {
-		return `${spec.slice(0, startIdx)}${TABLE_START}\n${table}\n${TABLE_END}${spec.slice(endIdx + TABLE_END.length)}`;
-	}
+	// Markers count only on a line of their own, so prose that mentions them is never touched.
+	const block = /^<!-- shiftwork:tickets:start -->[ \t]*$[\s\S]*?^<!-- shiftwork:tickets:end -->[ \t]*$/m;
+	if (block.test(spec)) return spec.replace(block, () => `${TABLE_START}\n${table}\n${TABLE_END}`);
 	const prefix = spec.endsWith("\n") ? spec : `${spec}\n`;
 	return `${prefix}\n${TABLE_START}\n${table}\n${TABLE_END}\n`;
 }

@@ -4,11 +4,24 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** code
 **Verify:** `npm test`
 
-- [ ] Tracker test: setStatus updates the table; bytes outside the markers are unchanged
-- [ ] Missing markers are appended once, and a missing spec.md is left alone
-- [ ] The last route column shows the model of the latest shift report
-- [ ] `shiftwork status` also prints the per-feature table
+- [x] Tracker test: setStatus updates the table; bytes outside the markers are unchanged
+- [x] Missing markers are appended once, and a missing spec.md is left alone
+- [x] The last route column shows the model of the latest shift report
+- [x] `shiftwork status` also prints the per-feature table
+
+## Comments
+
+### Shift 1 — pi xai/grok-4.6 (medium)
+- Ended: stop
+- Usage: 62486 in / 17390 out tokens, $0.5533, 22 turns
+- Verify: passed
+- Outcome: resolved
+- Landed: merged shiftwork/orchestrator-04 into main
+
+### Review — Claude Code (claude-opus-5-5)
+- Accepted: table `NN · title · status · last route` rewritten on every status change, markers appended once when missing, `shiftwork status` prints it
+- Fixed: the markers were found with `indexOf`, so this very spec — which mentions them in backticks in its Implementation Decisions — had a prose line replaced by the table. Markers now count only on a line of their own (test added with markers in prose)

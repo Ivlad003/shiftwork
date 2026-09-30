@@ -1,9 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { classifyError } from "shiftwork-core";
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 
@@ -53,6 +54,22 @@ export function createPiBackend(options = {}) {
 	return {
 		name: "pi",
 		pi,
+
+		/**
+		 * Availability check before a ticket: one tiny `pi -p` request to `model`.
+		 * True when pi exits cleanly and prints no provider limit.
+		 */
+		probe(model, { timeoutMs = 60_000 } = {}) {
+			const args = [pi.cli, "-p", "--no-session", "-ns", "-nc", "--model", model, "--thinking", "off", ...(options.args ?? []), "Reply with exactly: OK"];
+			return new Promise((resolve) => {
+				const child = execFile(process.execPath, args, { env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+					const output = `${stdout}\n${stderr}`;
+					resolve(!error && classifyError(output) === null);
+				});
+				// pi -p reads piped stdin as extra prompt text; close it so the probe doesn't wait.
+				child.stdin?.end();
+			});
+		},
 		async startShift({ cwd, route, prompt, systemPrompt }) {
 			RpcClient ??= (await import(pathToFileURL(pi.index).href)).RpcClient;
 			const dir = await mkdtemp(join(tmpdir(), "shiftwork-shift-"));

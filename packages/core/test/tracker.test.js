@@ -204,3 +204,25 @@ function deadPid() {
 		child.on("exit", () => resolve(child.pid));
 	});
 }
+
+test("the spec table ignores markers mentioned in prose and fills the block on its own lines", async () => {
+	const { writeFile, readFile: rf } = await import("node:fs/promises");
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A") });
+	const spec = [
+		"# Spec",
+		"",
+		"The table lives between `<!-- shiftwork:tickets:start -->` and `<!-- shiftwork:tickets:end -->`.",
+		"",
+		"<!-- shiftwork:tickets:start -->",
+		"<!-- shiftwork:tickets:end -->",
+		"",
+	].join("\n");
+	await writeFile(`${root}/.scratch/f/spec.md`, spec);
+	const tracker = openTracker(root);
+
+	await tracker.setStatus((await tracker.list())[0], "claimed");
+
+	const text = await rf(`${root}/.scratch/f/spec.md`, "utf8");
+	assert.ok(text.includes("The table lives between `<!-- shiftwork:tickets:start -->` and `<!-- shiftwork:tickets:end -->`."));
+	assert.match(text, /<!-- shiftwork:tickets:start -->\n\| NN \|[\s\S]*\| 01 \| A \| claimed \|[\s\S]*\n<!-- shiftwork:tickets:end -->\n$/);
+});
