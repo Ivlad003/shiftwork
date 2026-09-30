@@ -66,6 +66,11 @@
     "ticket": {
       "maxTurns": 400,
       "maxWallMin": 180
+    },
+    "models": {
+      "openrouter/anthropic/claude-opus-5": {
+        "maxCostUsd": 3
+      }
     }
   },
   "softLimitPct": 85,
@@ -91,5 +96,9 @@
       "openrouter/~typesafe/jev-latest",
       "typesafe/jev-latest"
     ]
-  }
+  },
+  "paidProviders": [
+    "openrouter"
+  ],
+  "preferWaitMin": 30
 }

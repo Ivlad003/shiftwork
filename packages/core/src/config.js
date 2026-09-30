@@ -53,6 +53,12 @@ export function validateConfig(input) {
 	checkBudgets(config.budgets, "budgets");
 	checkOnExceed(config.onExceed, "onExceed");
 	checkCrossTier(config.crossTier, "crossTier");
+	if (config.paidProviders !== undefined && !(Array.isArray(config.paidProviders) && config.paidProviders.every((p) => typeof p === "string"))) {
+		fail("paidProviders", "must be an array of provider names");
+	}
+	if (config.preferWaitMin !== undefined && !(typeof config.preferWaitMin === "number" && config.preferWaitMin >= 0)) {
+		fail("preferWaitMin", "must be a number of minutes ≥ 0");
+	}
 	config.cooldown = checkCooldown({ ...DEFAULTS.cooldown, ...config.cooldown }, "cooldown");
 	config.jev = checkJev(config.jev, "jev");
 

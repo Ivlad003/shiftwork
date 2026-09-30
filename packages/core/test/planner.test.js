@@ -360,3 +360,21 @@ test("planShift: stops when every candidate has stalled", () => {
 	assert.equal(plan.model, undefined);
 	assert.match(plan.stop, /stalled/);
 });
+
+test("planShift: a paid provider is used only when no subscription provider frees up within preferWaitMin", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["sub/a", "paid/b"] } },
+		paidProviders: ["paid"],
+		preferWaitMin: 30,
+	});
+	const now = new Date("2026-01-01T00:00:00Z");
+	const soon = [{ provider: "sub", until: "2026-01-01T00:05:00Z", kind: "server" }];
+	const late = [{ provider: "sub", until: "2026-01-01T05:00:00Z", kind: "usage" }];
+
+	const waiting = planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: soon, now });
+	const paying = planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: late, now });
+
+	assert.equal(new Date(waiting.wait).toISOString(), "2026-01-01T00:05:00.000Z", "a 5-minute server cooldown is waited out");
+	assert.equal(paying.model, "paid/b", "a 5-hour usage limit falls through to the paid provider");
+});

@@ -89,7 +89,31 @@ function raiseTier(tierName, config) {
 	return next && config.tiers?.[next] ? next : tierName;
 }
 
-function pickModel({ ticket, config, routing, tierName, cooldowns, now, blockedModels = [] }) {
+function pickModel(args) {
+	const picked = pickAnyModel(args);
+	return preferWaitOverPaid(picked, args);
+}
+
+/**
+ * Paid providers (`paidProviders`, pay per token) are a last resort: when a subscription provider of
+ * the candidate chains frees up within `preferWaitMin`, wait for it instead of paying.
+ */
+function preferWaitOverPaid(picked, { config, tierName, cooldowns, now, blockedModels = [] }) {
+	const paid = new Set(config.paidProviders ?? []);
+	if (!picked.model || !paid.has(providerOf(picked.model))) return picked;
+	const t = now instanceof Date ? now.getTime() : new Date(now).getTime();
+	const limit = t + (config.preferWaitMin ?? 30) * 60_000;
+	const candidates = [tierName, ...Object.keys(config.tiers ?? {})]
+		.flatMap((name) => config.tiers?.[name]?.chain ?? [])
+		.filter((model) => !paid.has(providerOf(model)) && !isBlocked(model, blockedModels));
+	const soonest = candidates
+		.map((model) => cooldownUntil(model, cooldowns))
+		.filter((until) => until && until.getTime() > t && until.getTime() <= limit)
+		.sort((a, b) => a - b)[0];
+	return soonest ? { wait: soonest } : picked;
+}
+
+function pickAnyModel({ ticket, config, routing, tierName, cooldowns, now, blockedModels = [] }) {
 	const pinned = ticket.model ?? routing?.model;
 	if (pinned && !isBlocked(pinned, blockedModels)) {
 		if (isCooling(pinned, cooldowns, now)) return { wait: cooldownUntil(pinned, cooldowns) };
