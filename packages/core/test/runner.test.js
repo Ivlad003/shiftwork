@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { openCooldowns, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
 import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
+import { formatDuration } from "../src/runner.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
 
@@ -1379,4 +1380,30 @@ test("a review whose tier is all cooling is recorded as not run", async () => {
 	assert.equal(backend.shifts.length, 1);
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
 	assert.match(await ticketText(root, "f", "01-a.md"), /### Review\n- Not run: every premium model is cooling until 2026-01-01T01:00:00\.000Z/);
+});
+
+test("shift reports say how long the shift took, and the ticket total from the second shift on", async () => {
+	const cfg = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "low" } },
+	});
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ text: "not yet" }, { files: { "done.txt": "ok" } }]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	const text = await ticketText(root, "f", "01-a.md");
+	const times = [...text.matchAll(/^- Time: .*$/gm)].map((m) => m[0]);
+	assert.equal(times.length, 2);
+	assert.match(times[0], /^- Time: (?:\d+m )?\d+s$/);
+	assert.match(times[1], /^- Time: (?:\d+m )?\d+s \(ticket total (?:\d+h )?(?:\d+m )?\d+s\)$/);
+});
+
+test("formatDuration renders seconds, minutes and hours", () => {
+	assert.equal(formatDuration(0.5), "30s");
+	assert.equal(formatDuration(12 + 34 / 60), "12m 34s");
+	assert.equal(formatDuration(125), "2h 5m");
 });

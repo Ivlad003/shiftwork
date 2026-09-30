@@ -262,6 +262,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 						verifyResult: null,
 						decision: { action: "stop", reason: "STOP file" },
 						classificationNote,
+						ticketUsage,
 					}),
 					...notes,
 				].join("\n"),
@@ -291,6 +292,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 						verifyResult: null,
 						decision: { action: "retry", reason: `provider ${limit.kind} limit` },
 						classificationNote,
+						ticketUsage,
 					}),
 					`- Provider limit: ${limit.kind} on ${provider}, cooling until ${until instanceof Date ? until.toISOString() : until}; continuing without counting an attempt`,
 				].join("\n"),
@@ -377,7 +379,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
 		}
 
-		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision, classificationNote }), ...notes].join("\n"));
+		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision, classificationNote, ticketUsage }), ...notes].join("\n"));
 		shiftNumber++;
 
 		if (decision.action === "resolve") {
@@ -520,7 +522,7 @@ async function createFollowUp(tracker, ticket, { type, reason, verify }) {
 }
 
 function formatReviewComment({ route, verdict, reason, warning, verifyResult, shift, followUp }) {
-	const lines = [`### Review — ${route.backend} ${route.model} (${route.thinking})`, `- Verdict: ${verdict} — ${reason}`];
+	const lines = [`### Review — ${route.backend} ${route.model} (${route.thinking})`, `- Verdict: ${verdict} — ${reason}`, `- Time: ${formatDuration(shift.wallMin)}`];
 	if (verifyResult?.ok) lines.push("- Verify: passed");
 	else if (verifyResult) {
 		const failed = verifyResult.results.find((r) => r.code !== 0) ?? verifyResult;
@@ -884,7 +886,17 @@ function isBackendUnavailable(message, route) {
 	return LOCAL_PROVIDERS.has(route?.provider) && CONNECTION_ERROR.test(message.trim());
 }
 
-function shiftReport({ number, route, shift, verifyResult, decision, classificationNote }) {
+/** A wall-clock duration in minutes as "45s", "12m 34s" or "2h 5m". */
+export function formatDuration(minutes) {
+	const seconds = Math.max(0, Math.round((minutes ?? 0) * 60));
+	const h = Math.floor(seconds / 3600);
+	const m = Math.floor((seconds % 3600) / 60);
+	const s = seconds % 60;
+	if (h) return `${h}h ${m}m`;
+	return m ? `${m}m ${s}s` : `${s}s`;
+}
+
+function shiftReport({ number, route, shift, verifyResult, decision, classificationNote, ticketUsage }) {
 	const lines = [`### Shift ${number} — ${route.backend} ${route.model} (${route.thinking})`];
 	if (route.typeSource === "jev") {
 		lines.push(`- Type: ${route.type} (jev)`);
@@ -895,6 +907,9 @@ function shiftReport({ number, route, shift, verifyResult, decision, classificat
 	lines.push(
 		`- Usage: ${shift.usage.input} in / ${shift.usage.output} out tokens, $${shift.costUsd.toFixed(4)}, ${shift.turns} turns`,
 	);
+	// From the second shift on, the ticket's total time across shifts too.
+	const total = number > 1 && ticketUsage ? ` (ticket total ${formatDuration(ticketUsage.maxWallMin)})` : "";
+	lines.push(`- Time: ${formatDuration(shift.wallMin)}${total}`);
 	if (verifyResult?.ok) {
 		lines.push("- Verify: passed");
 	} else if (verifyResult) {

@@ -2,7 +2,7 @@
 
 > Autonomous coding agents that work in **shifts**. Every ticket gets a fresh shift (a clean context). When a model uses up its budget or hits a provider limit, it hands the shift over to the next model, possibly from another provider.
 
-**Status: early development (0.0.x).** Right now only ticket parsing and `shiftwork status` work. The design is in [RESEARCH.md](RESEARCH.md) (Ukrainian).
+**Status: early development (0.0.x).** How to set it up and use it: [docs/guide.md](docs/guide.md). The design is in [RESEARCH.md](RESEARCH.md) (Ukrainian).
 
 ## Planned
 
