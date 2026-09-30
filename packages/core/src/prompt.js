@@ -1,5 +1,8 @@
 import { dirname, join, relative } from "node:path";
 
+/** Sent to the agent when a shift budget reaches its soft limit. Must stay in sync with WORKER_PROMPT. */
+export const SOFT_LIMIT_STEER = `You are near a Shiftwork budget limit. Finish your current step, then append a \`### Handoff\` note to the ticket describing what was done, what remains, hypotheses, and files touched, then stop.`;
+
 /** Appended to the backend's system prompt for every shift. */
 export const WORKER_PROMPT = `# Shiftwork worker
 
@@ -14,6 +17,7 @@ Rules:
 - If you can't continue without information only a human has, stop and write exactly:
   <shiftwork:needs-info reason="one sentence saying what you need"/>
 - End with a short summary of what you changed and what, if anything, is left.
+- Soft limit: when the runner sends "${SOFT_LIMIT_STEER}", you have up to 2 more turns. Finish your current step, append a \`### Handoff\` note to the ticket's Comments with what was done, what remains, hypotheses, and files touched, then stop.
 `;
 
 /** The user prompt that starts a shift: pointers, not copies. */

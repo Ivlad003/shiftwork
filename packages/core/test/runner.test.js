@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { openTracker, runFrontier } from "../src/index.js";
+import { SOFT_LIMIT_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
 
@@ -322,6 +323,91 @@ test("maxHandoffs is respected", async () => {
 	assert.equal(backend.shifts.length, 2);
 	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
 	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
+});
+
+test("a compliant soft limit keeps the agent's handoff note and adds no runner note", async () => {
+	const budgetConfig = {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 3,
+		maxHandoffs: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "fake/m2"], thinking: "low", budget: { maxTurns: 5 } } },
+		onExceed: { maxTurns: { to: "next", mode: "new-process" } },
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+		softLimitPct: 60,
+	};
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const ticketPath = `${root}/.scratch/f/issues/01-a.md`;
+	const { appendFile } = await import("node:fs/promises");
+	const backend = fakeBackend([
+		{
+			events: [
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "end", stopReason: "stop" },
+			],
+			steer: async (text) => {
+				await appendFile(ticketPath, "\n### Handoff\n- Agent: finished step, files touched: src/runner.js\n");
+			},
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: budgetConfig });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Handoff\n- Agent: finished step/);
+	assert.doesNotMatch(text, /### Handoff — shift 1/);
+});
+
+test("a non-compliant soft limit gets a runner handoff note at the hard limit", async () => {
+	const budgetConfig = {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 3,
+		maxHandoffs: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "fake/m2"], thinking: "low", budget: { maxTurns: 5 } } },
+		onExceed: { maxTurns: { to: "next", mode: "new-process" } },
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+		softLimitPct: 60,
+	};
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			events: [
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "end", stopReason: "stop" },
+			],
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: budgetConfig });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Handoff — shift 1, fake\/m1 → fake\/m2, reason: budget\.maxTurns/);
+});
+
+test("the worker prompt documents the fixed soft-limit steer text", () => {
+	assert.match(WORKER_PROMPT, /Soft limit:/);
+	assert.match(WORKER_PROMPT, /### Handoff/);
+	assert.ok(WORKER_PROMPT.includes(SOFT_LIMIT_STEER));
 });
 
 test("shift numbers continue from the reports already in the ticket after a re-run", async () => {

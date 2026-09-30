@@ -46,7 +46,7 @@ export function fakeBackend(script) {
 				warnings: step.warnings ?? [],
 				async steer(text) {
 					if (step.steer) {
-						const reply = step.steer(text);
+						const reply = await step.steer(text);
 						if (reply) events.push({ type: "text", text: reply });
 					}
 				},
