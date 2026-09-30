@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { openCooldowns, openTracker, runFrontier, validateConfig } from "../src/index.js";
+import { openCooldowns, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
 import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
@@ -1162,4 +1162,219 @@ test("a 429 on a free model cools that model only, and the next free model of th
 	assert.deepEqual(backend.shifts.map((s) => s.request.route.model), ["or/a:free", "or/b:free"]);
 	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
 	assert.deepEqual(state.cooldowns.map((c) => c.provider), ["or/a:free"]);
+});
+
+// Review shifts: one review shift in a fresh context after a ticket lands (review: { enabled, tier, when, features?, types? }).
+
+function reviewConfig(review = {}) {
+	return validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: {
+			standard: { chain: ["fake/m1"], thinking: "low" },
+			premium: { chain: ["fake/r1"], thinking: "high" },
+		},
+		review: { enabled: true, tier: "premium", ...review },
+	});
+}
+
+const reviewMarker = (verdict, reason) => `<shiftwork:review verdict="${verdict}" reason="${reason}"/>`;
+
+test("shouldReview is off by default and respects the when/features/types filters", () => {
+	assert.equal(shouldReview(validateConfig({ model: "fake/m1" }), { feature: "f", type: "code" }), false);
+	const base = { review: { enabled: true, tier: "premium", when: "resolve" } };
+	assert.equal(shouldReview(base, { feature: "f", type: "code" }), true);
+	assert.equal(shouldReview({ review: { ...base.review, features: ["g"] } }, { feature: "f", type: "code" }), false);
+	assert.equal(shouldReview({ review: { ...base.review, features: ["f"] } }, { feature: "f", type: "code" }), true);
+	assert.equal(shouldReview({ review: { ...base.review, types: ["git"] } }, { feature: "f", type: "code" }), false);
+	assert.equal(shouldReview({ review: { ...base.review, types: ["git"] } }, { feature: "f", type: "git" }), true);
+	assert.equal(shouldReview({ review: { ...base.review, when: "land" } }, { feature: "f", type: "code" }), false);
+});
+
+test("an accepted review runs on the review tier and records ### Review", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: `Looks good overall.\n\n${reviewMarker("accept", "matches the spec")}` },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(summary.resolved[0].review.verdict, "accept");
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[1].request.route.tier, "premium");
+	assert.equal(backend.shifts[1].request.route.model, "fake/r1");
+	assert.equal(backend.shifts[1].request.cwd, root, "the review reads the landed change in the main repo");
+	assert.match(backend.shifts[1].request.prompt, /Review the landed Shiftwork ticket f\/01: A/);
+	assert.match(backend.shifts[1].request.prompt, /- Ticket: \.scratch\/f\/issues\/01-a\.md/);
+	assert.match(backend.shifts[1].request.prompt, /- Spec: \.scratch\/f\/spec\.md/);
+	assert.match(backend.shifts[1].request.prompt, /- Diff: /);
+	assert.match(backend.shifts[1].request.prompt, /- Verify gate: `done\.txt`/);
+	assert.match(backend.shifts[1].request.systemPrompt, /shiftwork:review verdict="accept\|reopen\|follow-up"/);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/);
+	assert.match(text, /### Review — pi fake\/r1 \(high\)[\s\S]*- Verdict: accept — matches the spec/);
+	assert.match(text, /- Verify: passed/);
+	assert.match(text, /> Looks good overall\./);
+});
+
+test("a reopen verdict sends the ticket back to ready-for-agent with the reason", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: `The diff regressed X.\n\n${reviewMarker("reopen", "the landed change breaks the spec")}` },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	assert.equal(summary.exitCode, 2);
+	assert.deepEqual(summary.reopened.map((t) => t.number), ["01"]);
+	assert.deepEqual(summary.resolved, []);
+	assert.equal(backend.shifts.length, 2, "a reopened ticket is not re-worked within the same run");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* ready-for-agent/);
+	assert.match(text, /- Verdict: reopen — the landed change breaks the spec/);
+	assert.match(text, /- Verify: passed/);
+});
+
+test("a follow-up verdict files a new ready ticket in the feature", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: reviewMarker("follow-up", "add integration tests") },
+	]);
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: reviewConfig(),
+		options: { once: true },
+	});
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/);
+	assert.match(text, /- Verdict: follow-up — add integration tests/);
+	assert.match(text, /- Follow-up: f\/02 — Follow-up to f\/01: add integration tests/);
+	const { readdir } = await import("node:fs/promises");
+	const files = (await readdir(`${root}/.scratch/f/issues`)).filter((f) => f.startsWith("02-"));
+	assert.equal(files.length, 1);
+	const created = await readFile(`${root}/.scratch/f/issues/${files[0]}`, "utf8");
+	assert.match(created, /^# 02: Follow-up to f\/01: add integration tests$/m);
+	assert.match(created, /\*\*Status:\*\* ready-for-agent/);
+	assert.match(created, /\*\*Blocked by:\*\* None/);
+	assert.match(created, /add integration tests\. Filed by the review of f\/01/);
+});
+
+test("a review without the marker is treated as accept with a warning", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }, { text: "Looks good, but I forgot the marker." }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Verdict: accept — no verdict given/);
+	assert.match(text, /- Warning: review ended without a verdict marker; treated as accept/);
+});
+
+test("an unknown review verdict is treated as accept with a warning", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }, { text: reviewMarker("reject", "not a verdict") }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Verdict: accept — not a verdict/);
+	assert.match(text, /- Warning: unknown review verdict "reject"; treated as accept/);
+});
+
+test("reviews are off by default", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const config = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "low" }, premium: { chain: ["fake/r1"], thinking: "high" } },
+	});
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 1);
+	assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /### Review/);
+});
+
+test("the review features filter is respected per ticket", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `a.txt`" }),
+		"g/01-b.md": ticket("01", "B", { extra: "**Type:** code\n**Verify:** `b.txt`" }),
+	});
+	const backend = fakeBackend([
+		{ files: { "a.txt": "" } },
+		{ files: { "b.txt": "" } },
+		{ text: reviewMarker("accept", "ok") },
+	]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig({ features: ["g"] }) });
+
+	assert.equal(backend.shifts.length, 3);
+	assert.match(backend.shifts[2].request.prompt, /Review the landed Shiftwork ticket g\/01/);
+	assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /### Review/);
+	assert.match(await ticketText(root, "g", "01-b.md"), /### Review/);
+});
+
+test("the review types filter matches the ticket's effective type", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig({ types: ["git"] }) });
+
+	assert.equal(backend.shifts.length, 1);
+	assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /### Review/);
+});
+
+test("with a workspace, the review runs in the main repo with the landed message in its prompt", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: reviewMarker("accept", "good") },
+	]);
+	const workspace = fakeWorkspace();
+	const verify = async (commands) => ({ ok: true, results: commands.map((cmd) => ({ cmd, code: 0, outputTail: "" })) });
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify, config: reviewConfig(), workspace });
+
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.cwd, workspace.cwd);
+	assert.equal(backend.shifts[1].request.cwd, root);
+	assert.match(backend.shifts[1].request.prompt, /- Landed: merged/);
+	assert.match(backend.shifts[1].request.prompt, /- Ticket: \.scratch\/f\/issues\/01-a\.md/);
+	assert.match(await ticketText(root, "f", "01-a.md"), /### Review[\s\S]*- Verdict: accept — good[\s\S]*- Verify: passed/);
+});
+
+test("a review whose tier is all cooling is recorded as not run", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	await openCooldowns(root).add("other", new Date(t0 + 3600_000), "rate");
+	const config = reviewConfig();
+	config.tiers = { ...config.tiers, premium: { chain: ["other/r1"], thinking: "high" } };
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config, clock });
+
+	assert.equal(backend.shifts.length, 1);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.match(await ticketText(root, "f", "01-a.md"), /### Review\n- Not run: every premium model is cooling until 2026-01-01T01:00:00\.000Z/);
 });

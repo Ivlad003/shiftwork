@@ -31,7 +31,7 @@ Run options:
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 
-Exit codes: 0 all resolved or nothing to do · 2 some tickets need info · 3 stopped · 1 error`;
+Exit codes: 0 all resolved or nothing to do · 2 some tickets need info or a review reopened one · 3 stopped · 1 error`;
 
 const [command = "help", ...rest] = process.argv.slice(2);
 
@@ -191,7 +191,11 @@ async function run(argv) {
 		options: { once: values.once, feature: values.feature },
 	});
 
-	for (const t of summary.resolved) console.log(`✔ ${t.feature}/${t.number} resolved: ${t.reason}`);
+	for (const t of summary.resolved) {
+		console.log(`✔ ${t.feature}/${t.number} resolved: ${t.reason}`);
+		if (t.review?.followUp?.created) console.log(`  ↳ follow-up ${t.review.followUp.feature}/${t.review.followUp.number}: ${t.review.followUp.title}`);
+	}
+	for (const t of summary.reopened ?? []) console.log(`✖ ${t.feature}/${t.number} reopened by review: ${t.reason}`);
 	for (const t of summary.needsInfo) console.log(`✖ ${t.feature}/${t.number} needs-info: ${t.reason}`);
 	if (summary.stoppedReason) console.log(`⚠ Stopped: ${summary.stoppedReason}`);
 	if (!summary.resolved.length && !summary.needsInfo.length && !summary.stoppedReason) console.log("Nothing to do: the frontier is empty.");

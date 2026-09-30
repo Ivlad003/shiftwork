@@ -108,3 +108,47 @@ test("formatDryRunLine shows the effective budget", () => {
 		"f/01  type=code  tier=standard  model=prov/m  thinking=medium  budget=$1 · 10 turns · 70% ctx  Build it",
 	);
 });
+
+test("run --dry-run shows whether a ticket would be reviewed and on which tier", async () => {
+	const root = await repo({
+		"f/01-git.md": t("01", "Commit it", "**Type:** git"),
+		"f/02-code.md": t("02", "Build it"),
+	});
+	await exec(["init", "--dir", root, "--model", "prov/model-a"]);
+	const path = join(root, ".pi", "shiftwork.json");
+	const config = JSON.parse(await readFile(path, "utf8"));
+	config.review = { enabled: true, tier: "premium", types: ["git"] };
+	await writeFile(path, JSON.stringify(config));
+
+	const { stdout } = await exec(["run", "--dry-run", "--dir", root]);
+
+	assert.match(stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}review=premium {2}Commit it/);
+	assert.match(stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=[^\n]* {2}review=no {2}Build it/);
+});
+
+test("run --dry-run shows no review column when reviews are off", async () => {
+	const root = await repo({ "f/01-git.md": t("01", "Commit it", "**Type:** git") });
+	await exec(["init", "--dir", root, "--model", "prov/model-a"]);
+
+	const { stdout } = await exec(["run", "--dry-run", "--dir", root]);
+
+	assert.match(stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}Commit it/);
+	assert.doesNotMatch(stdout, /review=/);
+});
+
+test("formatDryRunLine shows the review tier, no, or nothing when reviews are off", () => {
+	const route = { type: "code", tier: "standard", model: "prov/m", thinking: "low" };
+	const line = "type=code  tier=standard  model=prov/m  thinking=low  budget=-";
+	assert.equal(
+		formatDryRunLine({ feature: "f", number: "01", title: "Build it", type: "code" }, route, "premium"),
+		`f/01  ${line}  review=premium  Build it`,
+	);
+	assert.equal(
+		formatDryRunLine({ feature: "f", number: "02", title: "Build it", type: "code" }, route, "no"),
+		`f/02  ${line}  review=no  Build it`,
+	);
+	assert.equal(
+		formatDryRunLine({ feature: "f", number: "03", title: "Build it", type: "code" }, route),
+		`f/03  ${line}  Build it`,
+	);
+});

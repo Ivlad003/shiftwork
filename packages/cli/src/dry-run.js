@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, openCooldowns, openRepoTracker, planShift, validateConfig } from "shiftwork-core";
+import { loadConfig, openCooldowns, openRepoTracker, planShift, shouldReview, validateConfig } from "shiftwork-core";
 import { createJevClassifier } from "./jev.js";
 
 /** Plan each frontier ticket, classifying untyped ones, and print the route. Spends nothing besides classify. */
@@ -10,8 +10,15 @@ export async function dryRunFrontier({ tickets, config, cooldowns = [], classify
 	for (const ticket of tickets) {
 		const classification = await classifyUntyped(ticket, config, classifyTicket);
 		const route = planShift({ ticket, config, classification, cooldowns });
-		log(formatDryRunLine(ticket, route));
+		log(formatDryRunLine(ticket, route, reviewColumn(config, ticket, route)));
 	}
+}
+
+/** The review column of a dry-run line: the review tier, "no", or nothing when reviews are off. */
+export function reviewColumn(config, ticket, route) {
+	const review = config.review;
+	if (!review?.enabled) return undefined;
+	return shouldReview(config, { ...ticket, type: route.type }) ? (review.tier ?? "-") : "no";
 }
 
 export async function classifyUntyped(ticket, config, classifyTicket) {
@@ -23,12 +30,13 @@ export async function classifyUntyped(ticket, config, classifyTicket) {
 	}
 }
 
-export function formatDryRunLine(ticket, route) {
+export function formatDryRunLine(ticket, route, review) {
 	if (route.wait) {
 		return `${ticket.feature}/${ticket.number}  wait until ${new Date(route.wait).toISOString()}  ${ticket.title ?? ""}`;
 	}
 	const source = ticket.type ? "" : route.typeSource === "jev" ? " (jev)" : " (default)";
-	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}  ${ticket.title ?? ""}`;
+	const reviewPart = review === undefined ? "" : `  review=${review}`;
+	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}${reviewPart}  ${ticket.title ?? ""}`;
 }
 
 const BUDGET_PARTS = [

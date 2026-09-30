@@ -8,7 +8,7 @@ CLI for [Shiftwork](https://github.com/Ivlad003/shiftwork). Autonomous agents wo
 npx shiftwork init --model anthropic/<model-id>   # .pi/shiftwork.json, worker prompt, pi compaction settings
 npx shiftwork status                              # tickets and the ready frontier
 npx shiftwork tui                                 # live dashboard: runner, budgets, cooldowns, logs — r run · s stop · d dry-run · f filter · q quit
-npx shiftwork run --dry-run                       # which model/tier/thinking each ticket would get
+npx shiftwork run --dry-run                       # which model/tier/thinking each ticket would get, and whether it gets a review
 npx shiftwork run --once                          # work one ticket
 npx shiftwork run                                 # work the frontier until nothing is left
 ```
@@ -21,6 +21,8 @@ In a git repo, every ticket runs in its own worktree on branch `shiftwork/<featu
 
 Routing: the ticket's `**Model:**`, then `routing[Type]` → tier → first model of the tier's chain, then `defaultTier`. See `.pi/shiftwork.json` after `init`.
 
-Exit codes: `0` all resolved or nothing to do · `2` some tickets need info · `1` error.
+Optional review shifts, off by default: `review: { "enabled": true, "tier": "premium" }` in `.pi/shiftwork.json` runs one review shift on that tier in a fresh context after every ticket lands. The reviewer reads the ticket, the spec and the landed diff, runs the verify gate, and ends with `<shiftwork:review verdict="accept|reopen|follow-up" reason="…"/>`. The verdict is recorded as `### Review` in the ticket's Comments: `accept` ends it, `reopen` sends the ticket back to ready-for-agent with the reason (the landed commit stays), `follow-up` files a new ticket in the feature. Restrict reviews with `features` (feature names) and `types` (ticket types); `run --dry-run` prints `review=<tier>` for tickets that will be reviewed and `review=no` for the rest.
+
+Exit codes: `0` all resolved or nothing to do · `2` some tickets need info or a review reopened one · `1` error.
 
 Status: early development. Worktrees, budgets with handoff, provider fallback, skill tiers and Jev are on the way.

@@ -81,6 +81,20 @@ export declare function chooseHandoffMode(options: {
 	contextTokens?: number;
 	targetContextWindow?: number;
 }): { mode: "same-process" | "new-process"; compact: boolean };
+export interface Review {
+	enabled: boolean;
+	/** Tier the review shift runs on; required when enabled. */
+	tier?: string;
+	when?: "resolve";
+	/** Feature names that get reviews; every feature when omitted. */
+	features?: string[];
+	/** Ticket types (the effective type) that get reviews; every type when omitted. */
+	types?: string[];
+}
+
+/** Whether a resolved ticket gets one review shift on the review tier. */
+export declare function shouldReview(config: { review?: Review } & Record<string, unknown>, ticket: { feature?: string; type?: string }): boolean;
+
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
 export declare function loadConfig(root: string, userDir?: string): Promise<Record<string, unknown>>;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
@@ -151,6 +165,10 @@ export interface Tracker {
 	activeClaims(): Promise<Claim[]>;
 	setStatus(ticketOrClaim: Ticket | Claim, status: string): Promise<void>;
 	appendComment(ticketOrClaim: Ticket | Claim, markdown: string): Promise<void>;
+	/** Append a new ready ticket to a feature (follow-ups); optional for trackers that cannot. */
+	createTicket?(feature: string, ticket: { title?: string; what?: string; type?: string; verify?: string[]; status?: string }): Promise<
+		Ticket & { feature: string; created?: boolean }
+	>;
 }
 
 export declare function openTracker(root: string): Tracker;
@@ -191,7 +209,7 @@ export interface RunState {
 	tier?: string | null;
 	budget?: Budget | null;
 	usage?: { tokens: number; costUsd: number; turns: number; contextPct: number };
-	summary?: { resolved: number; needsInfo: number };
+	summary?: { resolved: number; needsInfo: number; reopened?: number };
 }
 
 export interface RunStateStore {

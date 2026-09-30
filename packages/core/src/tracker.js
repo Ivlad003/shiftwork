@@ -89,6 +89,34 @@ export function openTracker(root) {
 			const section = /^## Comments\s*$/m.test(base) ? "" : "\n## Comments\n";
 			await writeAtomic(path, `${base}${section}\n${markdown.trim()}\n`);
 		},
+
+		/** Append a new ticket to a feature: the next free number, ready and blocked by nothing. */
+		async createTicket(feature, { title, what, type, verify = [], status = READY } = {}) {
+			const tickets = (await loadTickets(root)).filter((t) => t.feature === feature);
+			const next = String(Math.max(0, ...tickets.map((t) => Number(t.number) || 0)) + 1).padStart(2, "0");
+			const slug =
+				String(title ?? "ticket")
+					.toLowerCase()
+					.replace(/[^a-z0-9]+/g, "-")
+					.replace(/^-+|-+$/g, "")
+					.slice(0, 48) || "ticket";
+			const path = join(root, ".scratch", feature, "issues", `${next}-${slug}.md`);
+			const lines = [
+				`# ${next}: ${title}`,
+				"",
+				`**What to build:** ${what}`,
+				"",
+				"**Blocked by:** None (can start immediately)",
+				"",
+				`**Status:** ${status}`,
+			];
+			if (type) lines.push(`**Type:** ${type}`);
+			if (verify.length) lines.push(`**Verify:** ${verify.map((c) => `\`${c}\``).join(" · ")}`);
+			lines.push("", "- [ ] It works", "");
+			await writeAtomic(path, lines.join("\n"));
+			await syncSpecTable(root, feature);
+			return { feature, number: next, title, path };
+		},
 	};
 }
 

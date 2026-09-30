@@ -19,6 +19,7 @@ const DEFAULTS = {
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
+	review: { enabled: false, when: "resolve" },
 };
 
 /**
@@ -101,6 +102,7 @@ export function validateConfig(input) {
 		if (!route.tier && !route.model) fail(`routing.${type}`, "needs a tier or a model");
 	}
 	if (config.defaultTier !== undefined && !tiers[config.defaultTier]) fail("defaultTier", `unknown tier "${config.defaultTier}"`);
+	config.review = checkReview(config.review, "review", tiers);
 
 	const worktree = config.worktree ?? {};
 	if (worktree.enabled !== undefined && typeof worktree.enabled !== "boolean") fail("worktree.enabled", "must be true or false");
@@ -219,6 +221,29 @@ function checkJev(value, path) {
 	const models = Array.isArray(out.model) ? out.model : out.model !== undefined ? [out.model] : [];
 	if (models.length === 0) fail(`${path}.model`, "must be a model or a non-empty list");
 	models.forEach((model, i) => checkModel(model, Array.isArray(out.model) ? `${path}.model[${i}]` : `${path}.model`));
+	return out;
+}
+
+const REVIEW_WHEN = ["resolve"];
+const REVIEW_FIELDS = ["enabled", "tier", "when", "features", "types"];
+
+function checkReview(value, path, tiers) {
+	if (value === undefined) return { ...DEFAULTS.review };
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const key of Object.keys(value)) {
+		if (!REVIEW_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown review field; expected one of ${REVIEW_FIELDS.join(", ")}`);
+	}
+	const out = { ...DEFAULTS.review, ...value };
+	if (typeof out.enabled !== "boolean") fail(`${path}.enabled`, "must be true or false");
+	if (!REVIEW_WHEN.includes(out.when)) fail(`${path}.when`, `must be one of ${REVIEW_WHEN.join(", ")}`);
+	if (out.tier !== undefined && !tiers[out.tier]) fail(`${path}.tier`, `unknown tier "${out.tier}"`);
+	if (out.enabled && out.tier === undefined) fail(`${path}.tier`, "required when review.enabled is true");
+	if (out.features !== undefined && !(Array.isArray(out.features) && out.features.every((f) => typeof f === "string" && f.length > 0))) {
+		fail(`${path}.features`, "must be an array of feature names");
+	}
+	if (out.types !== undefined && !(Array.isArray(out.types) && out.types.every((t) => typeof t === "string" && t.length > 0))) {
+		fail(`${path}.types`, "must be an array of ticket types");
+	}
 	return out;
 }
 

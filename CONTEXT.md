@@ -52,6 +52,10 @@ _Avoid_: iteration, run, session
 All the shifts on a ticket between two runs of its verify gate. An attempt fails when the gate fails.
 _Avoid_: try, retry
 
+**Review shift**:
+One shift in a fresh context after a ticket lands, on its own tier, judging the work and ending with a verdict: accept, reopen or follow-up.
+_Avoid_: code review, QA pass, checker
+
 **Handoff**:
 Passing a ticket from one shift to the next, together with a handoff note. An **in-place handoff** keeps the context and swaps the model. A **fresh handoff** starts a new context.
 _Avoid_: switch, transfer, failover

@@ -57,3 +57,35 @@ test("tracker and openspec.verify are validated", async () => {
 	const badField = await dirs({ model: "a/1", openspec: { strict: true } });
 	await assert.rejects(loadConfig(badField.root, badField.userDir), /openspec\.strict: unknown openspec field/);
 });
+
+test("review is validated: off by default, tier required when enabled, filters are arrays", async () => {
+	const off = await dirs({ model: "a/1" });
+	assert.deepEqual((await loadConfig(off.root, off.userDir)).review, { enabled: false, when: "resolve" });
+
+	const good = await dirs({
+		model: "a/1",
+		tiers: { premium: { chain: ["a/1"] } },
+		review: { enabled: true, tier: "premium", features: ["f"], types: ["code"] },
+	});
+	assert.deepEqual((await loadConfig(good.root, good.userDir)).review, {
+		enabled: true,
+		tier: "premium",
+		when: "resolve",
+		features: ["f"],
+		types: ["code"],
+	});
+
+	for (const [project, message] of [
+		[{ model: "a/1", review: { enabled: true } }, /review\.tier: required when review\.enabled is true/],
+		[{ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: { enabled: true, tier: "quick" } }, /review\.tier: unknown tier "quick"/],
+		[{ model: "a/1", review: { enabled: "yes" } }, /review\.enabled: must be true or false/],
+		[{ model: "a/1", review: { when: "land" } }, /review\.when: must be one of resolve/],
+		[{ model: "a/1", review: { strict: true } }, /review\.strict: unknown review field/],
+		[{ model: "a/1", review: { features: "f" } }, /review\.features: must be an array of feature names/],
+		[{ model: "a/1", review: { types: "code" } }, /review\.types: must be an array of ticket types/],
+		[{ model: "a/1", review: "always" }, /review: must be an object/],
+	]) {
+		const bad = await dirs(project);
+		await assert.rejects(loadConfig(bad.root, bad.userDir), message);
+	}
+});

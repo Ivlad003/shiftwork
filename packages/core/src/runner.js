@@ -5,7 +5,7 @@ import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
 import { chooseHandoffMode, cooldownKey, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
-import { buildShiftPrompt, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
+import { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
 
 const NEEDS_INFO = "needs-info";
@@ -16,6 +16,10 @@ const WAIT_STEP_MS = 60_000;
 /** Only the runner's own shift reports: "### Shift N — <backend> <model> (<thinking>)". */
 const SHIFT_REPORT = /^### Shift (\d+) — \S+ \S+ \([^)]*\)$/gm;
 const MARKER = /<shiftwork:needs-info\s+reason="([^"]*)"\s*\/>/;
+const REVIEW_MARKER = /<shiftwork:review\s+verdict="([^"]*)"\s+reason="([^"]*)"\s*\/>/g;
+const REVIEW_VERDICTS = new Set(["accept", "reopen", "follow-up"]);
+/** Review findings kept in the ticket; the full review text stays in the review log. */
+const REVIEW_FINDING_LINES = 40;
 
 /**
  * Decide what happens to a ticket after one attempt. Pure.
@@ -31,6 +35,16 @@ export function decideNext({ attempt, maxAttempts, needsInfo, hasVerify, verifyO
 
 function checkStop(root) {
 	return existsSync(join(root, STOP_FILE));
+}
+
+/** Whether a resolved ticket gets a review shift: `review: { enabled, tier, when, features?, types? }`. */
+export function shouldReview(config, ticket) {
+	const review = config.review;
+	if (!review?.enabled) return false;
+	if ((review.when ?? "resolve") !== "resolve") return false;
+	if (review.features?.length && !review.features.includes(ticket.feature)) return false;
+	if (review.types?.length && !review.types.includes(ticket.type)) return false;
+	return true;
 }
 
 /**
@@ -53,7 +67,7 @@ export async function runFrontier({
 	runState,
 }) {
 	const maxAttempts = config.maxAttempts ?? 3;
-	const summary = { resolved: [], needsInfo: [], stoppedReason: undefined };
+	const summary = { resolved: [], needsInfo: [], reopened: [], stoppedReason: undefined };
 	const seen = new Set();
 	// A tracker ticket is identified by feature + number: the OpenSpec tracker shares
 	// one .shiftwork.md path between all tasks of a change.
@@ -71,7 +85,7 @@ export async function runFrontier({
 		finishedAt: null,
 		feature: options.feature ?? null,
 		ticket: null,
-		summary: { resolved: 0, needsInfo: 0 },
+		summary: { resolved: 0, needsInfo: 0, reopened: 0 },
 	});
 
 	for (;;) {
@@ -109,9 +123,16 @@ export async function runFrontier({
 				summary.stoppedReason = outcome.reason;
 				break;
 			}
-			if (outcome.action === "resolve") summary.resolved.push({ ...ticket, reason: outcome.reason });
+			if (outcome.action === "resolve") summary.resolved.push({ ...ticket, reason: outcome.reason, review: outcome.review });
+			else if (outcome.action === "reopen") summary.reopened.push({ ...ticket, reason: outcome.reason, review: outcome.review });
 			else summary.needsInfo.push({ ...ticket, reason: outcome.reason });
-			await state.update({ summary: { resolved: summary.resolved.length, needsInfo: summary.needsInfo.length } });
+			await state.update({
+				summary: {
+					resolved: summary.resolved.length,
+					needsInfo: summary.needsInfo.length,
+					reopened: summary.reopened.length,
+				},
+			});
 		} finally {
 			await tracker.release(claim);
 		}
@@ -122,13 +143,17 @@ export async function runFrontier({
 		summary.stoppedReason = "STOP file";
 	}
 
-	summary.exitCode = summary.stoppedReason ? 3 : summary.needsInfo.length > 0 ? 2 : 0;
+	summary.exitCode = summary.stoppedReason ? 3 : summary.needsInfo.length > 0 || summary.reopened.length > 0 ? 2 : 0;
 	await state.update({
 		running: false,
 		finishedAt: new Date().toISOString(),
 		ticket: null,
 		stoppedReason: summary.stoppedReason ?? null,
-		summary: { resolved: summary.resolved.length, needsInfo: summary.needsInfo.length },
+		summary: {
+			resolved: summary.resolved.length,
+			needsInfo: summary.needsInfo.length,
+			reopened: summary.reopened.length,
+		},
 	});
 	return summary;
 }
@@ -141,6 +166,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	let firstPlan = true;
 	let handoffCount = 0;
 	let attempt = 1;
+	let landedMessage = undefined;
 	let previousRoute = undefined;
 	let exceededKind = undefined;
 	let lastVerifyFailure = undefined;
@@ -344,6 +370,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		if (workspace && decision.action === "resolve") {
 			const landed = await workspace.land(ticket);
 			notes.push(`- Landed: ${landed.message}`);
+			if (landed.ok) landedMessage = landed.message;
 			if (!landed.ok) decision = { action: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
 		}
 		if (workspace && decision.action === NEEDS_INFO && notes.length === 0) {
@@ -355,7 +382,26 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 		if (decision.action === "resolve") {
 			await tracker.setStatus(ticket, RESOLVED);
-			return { action: "resolve", reason: notes.length ? notes[notes.length - 1].replace(/^- Landed: /, "") : "verify passed" };
+			const reason = notes.length ? notes[notes.length - 1].replace(/^- Landed: /, "") : "verify passed";
+			// After a landing, one review shift in a fresh context judges the work (stories 4–6).
+			if (shouldReview(config, { ...ticket, type: route.type })) {
+				const review = await runReviewShift({
+					root,
+					ticket,
+					tracker,
+					backend,
+					verify,
+					config,
+					clock,
+					cooldowns,
+					log,
+					type: route.type,
+					landed: landedMessage,
+				});
+				if (review.verdict === "reopen") return { action: "reopen", reason: review.reason, review };
+				return { action: "resolve", reason, review };
+			}
+			return { action: "resolve", reason };
 		}
 		if (decision.action === NEEDS_INFO) {
 			await tracker.setStatus(ticket, NEEDS_INFO);
@@ -391,6 +437,118 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: "stop", reason: "STOP file" };
 		}
 	}
+}
+
+/**
+ * One review shift on the review tier, in a fresh context, after a ticket lands.
+ * The reviewer reads the ticket, the spec and the landed diff, runs the verify gate
+ * and ends with a verdict marker; the runner records it as `### Review` in Comments.
+ * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "skip", reason: string, warning?: string, followUp?: object }>}
+ */
+async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed }) {
+	const review = config.review;
+	const now = clock.now();
+	// Plan on the review tier as if the ticket were untyped and unrouted: the review is its own job.
+	const plan = planShift({
+		ticket: { ...ticket, type: undefined, model: undefined, skills: [], budget: undefined },
+		config: { ...config, routing: {}, defaultTier: review.tier },
+		cooldowns: await cooldowns.active(now),
+		now,
+	});
+	const why =
+		plan.wait
+			? `every ${review.tier} model is cooling until ${new Date(plan.wait).toISOString()}`
+			: (plan.stop ?? `no ${review.tier} model available`);
+	if (!plan.model) {
+		await tracker.appendComment(ticket, `### Review\n- Not run: ${why}`);
+		return { verdict: "skip", reason: why };
+	}
+
+	const shift = await runShift(
+		backend,
+		{
+			root,
+			cwd: root,
+			route: plan,
+			prompt: buildReviewPrompt(ticket, { root, landed }),
+			systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
+			softLimitPct: config.softLimitPct ?? 80,
+			ticketPath: ticket.path,
+			// A review is one shift: no handoffs, no in-place swaps.
+			maxHandoffs: 0,
+		},
+		(event) => log({ ticket, attempt: "review", event }),
+	);
+
+	const markers = [...shift.text.matchAll(REVIEW_MARKER)];
+	const marker = markers[markers.length - 1];
+	let verdict = marker?.[1];
+	let reason = marker?.[2];
+	let warning;
+	if (!marker) {
+		warning = shift.error ? `review shift failed: ${shift.error}; treated as accept` : "review ended without a verdict marker; treated as accept";
+	} else if (!REVIEW_VERDICTS.has(verdict)) {
+		warning = `unknown review verdict "${verdict}"; treated as accept`;
+	}
+	if (warning) {
+		verdict = "accept";
+		reason = reason?.trim() || "no verdict given";
+	}
+
+	// reopen puts the ticket back on the frontier: the landed commit stays, the next shift fixes forward.
+	if (verdict === "reopen") await tracker.setStatus(ticket, READY);
+
+	const verifyResult = ticket.verify.length ? await verify(ticket.verify, root) : null;
+	let followUp;
+	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { type, reason });
+	await tracker.appendComment(
+		ticket,
+		formatReviewComment({ route: plan, verdict, reason, warning, verifyResult, shift, followUp }),
+	);
+	return { verdict, reason, warning, followUp };
+}
+
+/** File the follow-up ticket: a new ticket in the feature, blocked by nothing. */
+async function createFollowUp(tracker, ticket, { type, reason }) {
+	const title = truncate(`Follow-up to ${ticket.feature}/${ticket.number}: ${reason}`, 80);
+	const what =
+		`${/[.!?…]$/.test(reason) ? reason : `${reason}.`} Filed by the review of ${ticket.feature}/${ticket.number} — see its "### Review" block in ${ticket.path}.`;
+	if (typeof tracker.createTicket !== "function") {
+		return { created: false, feature: ticket.feature, title, what };
+	}
+	return { ...(await tracker.createTicket(ticket.feature, { title, what, type })), created: true };
+}
+
+function formatReviewComment({ route, verdict, reason, warning, verifyResult, shift, followUp }) {
+	const lines = [`### Review — ${route.backend} ${route.model} (${route.thinking})`, `- Verdict: ${verdict} — ${reason}`];
+	if (verifyResult?.ok) lines.push("- Verify: passed");
+	else if (verifyResult) {
+		const failed = verifyResult.results.find((r) => r.code !== 0) ?? verifyResult;
+		lines.push(`- Verify: failed at \`${failed.cmd}\` (exit ${failed.code})`);
+	} else lines.push("- Verify: not run");
+	for (const w of shift.warnings ?? []) lines.push(`- Warning: ${w}`);
+	if (warning) lines.push(`- Warning: ${warning}`);
+	const findings = reviewFindings(shift.text);
+	if (findings.length) lines.push("- Findings:", "", ...findings);
+	if (followUp?.created) lines.push(`- Follow-up: ${followUp.feature}/${followUp.number} — ${followUp.title}`);
+	else if (followUp) lines.push(`- Follow-up: not filed — this tracker cannot create tickets; file it manually: ${followUp.title}`);
+	return lines.join("\n");
+}
+
+/** The reviewer's findings, as a blockquote capped at REVIEW_FINDING_LINES lines. */
+function reviewFindings(text) {
+	const clean = String(text ?? "")
+		.replace(REVIEW_MARKER, "")
+		.trim();
+	if (!clean) return [];
+	const all = clean.split("\n");
+	const shown = all.slice(0, REVIEW_FINDING_LINES).map((line) => `> ${line.trimEnd()}`);
+	return shown.length < all.length ? [...shown, `> … ${all.length - shown.length} more lines in the review log`] : shown;
+}
+
+function truncate(text, max) {
+	const t = String(text).trim();
+	return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
 /**

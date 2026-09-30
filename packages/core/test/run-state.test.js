@@ -42,7 +42,7 @@ test("a run publishes the current ticket, shift, model and budget use", async ()
 	const after = await state.read();
 	assert.equal(after.running, false);
 	assert.equal(after.live, false);
-	assert.deepEqual(after.summary, { resolved: 1, needsInfo: 0 });
+	assert.deepEqual(after.summary, { resolved: 1, needsInfo: 0, reopened: 0 });
 	assert.equal(after.ticket, null);
 	assert.equal(after.usage.turns, 1);
 	assert.equal(after.usage.tokens, 120);
