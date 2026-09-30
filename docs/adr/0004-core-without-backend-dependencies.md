@@ -1,0 +1,3 @@
+# One backend-free core with thin adapters, published under unscoped names
+
+All Shiftwork logic lives in `shiftwork-core`, which depends on neither pi nor OpenCode: ticket parsing, the frontier, claims, routing, skill groups, budgets, cooldowns and stop rules. The CLI runner (`shiftwork`), the pi package (`pi-shiftwork`) and the OpenCode plugin (`opencode-shiftwork`) are thin adapters, each knowing only how to start a shift and swap a model on its backend. pi is built first. The other backends and the OpenCode plugin are then built by running Shiftwork on its own tickets. Package names are unscoped because the `@kosmodev` npm org belongs to someone else, and because `pi-*` and `opencode-*` are the names people search for.
