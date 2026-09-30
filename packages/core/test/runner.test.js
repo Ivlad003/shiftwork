@@ -1084,6 +1084,44 @@ test("an ECONNREFUSED ollama shift marks the backend unavailable instead of cool
 	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: usage on ollama/);
 });
 
+// Recorded from pi 0.99.1 with an ollama provider whose server is stopped: the only error text is
+// `"stopReason":"error","errorMessage":"Connection error."` (no ECONNREFUSED).
+test("pi's real 'Connection error.' on an ollama model marks the backend unavailable", async () => {
+	const cfg = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 1,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["ollama/qwen2.5-coder:7b", "fake/m1"], thinking: "low" } },
+	});
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ error: "Connection error." }, { files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts[1].request.route.model, "fake/m1");
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.equal(state.cooldowns[0].provider, "ollama");
+});
+
+test("a 'Connection error.' on a cloud model is an ordinary failed attempt, not an unavailable backend", async () => {
+	const cfg = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "low" } },
+	});
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ error: "Connection error." }, { files: { "done.txt": "ok" } }]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8").catch(() => "{}"));
+	assert.deepEqual(state.cooldowns ?? [], []);
+});
+
 test("an unavailable cursor-agent (missing or not logged in) is skipped like a cooling provider", async () => {
 	for (const error of ["cursor-agent: command not found", "cursor-agent backend not available: not logged in (run `cursor-agent login`)"]) {
 		const cfg = validateConfig({

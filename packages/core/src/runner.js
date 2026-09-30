@@ -245,7 +245,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		}
 
 		let limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
-		if (!limit && shift.error && isBackendUnavailable(shift.error)) {
+		if (!limit && shift.error && isBackendUnavailable(shift.error, route)) {
 			limit = { kind: "usage" };
 		}
 		// Free models cool on their own; everything else cools its whole provider.
@@ -716,9 +716,14 @@ const BACKEND_UNAVAILABLE = /^(?:claude|codex|opencode|grok|cursor(?:-agent)?): 
 // A stopped server (Ollama, a proxy) refuses connections: the backend is unavailable,
 // like a missing CLI, instead of cooling as a provider limit.
 const CONNECTION_REFUSED = /connection (?:was )?refused|ECONNREFUSED/i;
+// pi reports a stopped local server only as "Connection error." (recorded, pi 0.99.1). On a cloud
+// provider that text is a network blip, so it means "unavailable" only for local providers.
+const CONNECTION_ERROR = /^connection error\.?$/i;
+const LOCAL_PROVIDERS = new Set(["ollama"]);
 
-function isBackendUnavailable(message) {
-	return BACKEND_UNAVAILABLE.test(message) || CONNECTION_REFUSED.test(message);
+function isBackendUnavailable(message, route) {
+	if (BACKEND_UNAVAILABLE.test(message) || CONNECTION_REFUSED.test(message)) return true;
+	return LOCAL_PROVIDERS.has(route?.provider) && CONNECTION_ERROR.test(message.trim());
 }
 
 function shiftReport({ number, route, shift, verifyResult, decision, classificationNote }) {
