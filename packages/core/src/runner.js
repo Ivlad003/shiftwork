@@ -6,6 +6,7 @@ import { openCooldowns } from "./cooldowns.js";
 import { createMeter } from "./meter.js";
 import { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, SOFT_LIMIT_STEER, WORKER_PROMPT } from "./prompt.js";
+import { noRunState, openRunState } from "./run-state.js";
 
 const NEEDS_INFO = "needs-info";
 const RESOLVED = "resolved";
@@ -49,6 +50,7 @@ export async function runFrontier({
 	classifyTicket,
 	clock,
 	cooldowns,
+	runState,
 }) {
 	const maxAttempts = config.maxAttempts ?? 3;
 	const summary = { resolved: [], needsInfo: [], stoppedReason: undefined };
@@ -58,6 +60,16 @@ export async function runFrontier({
 		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	};
 	const cooldownStore = cooldowns ?? openCooldowns(root);
+	const state = runState ?? (root ? openRunState(root) : noRunState());
+	await state.update({
+		pid: process.pid,
+		running: true,
+		startedAt: new Date().toISOString(),
+		finishedAt: null,
+		feature: options.feature ?? null,
+		ticket: null,
+		summary: { resolved: 0, needsInfo: 0 },
+	});
 
 	for (;;) {
 		if (checkStop(root)) {
@@ -88,6 +100,7 @@ export async function runFrontier({
 				classifyTicket,
 				clock: time,
 				cooldowns: cooldownStore,
+				runState: state,
 			});
 			if (outcome.action === "stop") {
 				summary.stoppedReason = outcome.reason;
@@ -95,6 +108,7 @@ export async function runFrontier({
 			}
 			if (outcome.action === "resolve") summary.resolved.push({ ...ticket, reason: outcome.reason });
 			else summary.needsInfo.push({ ...ticket, reason: outcome.reason });
+			await state.update({ summary: { resolved: summary.resolved.length, needsInfo: summary.needsInfo.length } });
 		} finally {
 			await tracker.release(claim);
 		}
@@ -106,10 +120,17 @@ export async function runFrontier({
 	}
 
 	summary.exitCode = summary.stoppedReason ? 3 : summary.needsInfo.length > 0 ? 2 : 0;
+	await state.update({
+		running: false,
+		finishedAt: new Date().toISOString(),
+		ticket: null,
+		stoppedReason: summary.stoppedReason ?? null,
+		summary: { resolved: summary.resolved.length, needsInfo: summary.needsInfo.length },
+	});
 	return summary;
 }
 
-async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns }) {
+async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState }) {
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
@@ -158,6 +179,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
 		const softLimitPct = config.softLimitPct ?? 80;
 		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
+		const publish = await publishShift(runState ?? noRunState(), { ticket, attempt, shift: shiftNumber, route });
 		const shift = await runShift(
 			backend,
 			{
@@ -172,7 +194,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				planHandoff: (kind, fromRoute) =>
 					planShift({ ticket, config, classification, history: historyOf({ previousRoute: fromRoute, exceededKind: kind }) }),
 			},
-			(event) => log({ ticket, attempt, event }),
+			(event) => {
+				log({ ticket, attempt, event });
+				publish(event);
+			},
 		);
 
 		accumulateUsage(ticketUsage, shift);
@@ -320,6 +345,39 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: "stop", reason: "STOP file" };
 		}
 	}
+}
+
+/**
+ * Publish what the runner is doing now, so a reader of the run state sees the
+ * current ticket, shift, model and budget use as they change.
+ * @returns {Promise<(event: object) => void>} a sink for the shift's events
+ */
+async function publishShift(runState, { ticket, attempt, shift, route }) {
+	const usage = { tokens: 0, costUsd: 0, turns: 0, contextPct: 0 };
+	const write = () =>
+		runState.update({
+			ticket: { feature: ticket.feature, number: ticket.number, title: ticket.title, path: ticket.path },
+			attempt,
+			shift,
+			model: route.model,
+			thinking: route.thinking ?? null,
+			tier: route.tier ?? null,
+			budget: route.budget ?? null,
+			usage: { ...usage },
+		});
+	await write();
+	return (event) => {
+		if (event.type === "turn") {
+			usage.turns++;
+			usage.tokens += event.usage?.totalTokens ?? 0;
+			usage.costUsd += event.costUsd ?? 0;
+		} else if (event.type === "context") {
+			usage.contextPct = event.percent ?? usage.contextPct;
+		} else {
+			return;
+		}
+		write();
+	};
 }
 
 function accumulateUsage(target, shift) {

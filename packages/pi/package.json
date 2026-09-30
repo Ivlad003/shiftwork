@@ -39,6 +39,7 @@
     ]
   },
   "dependencies": {
+    "shiftwork": "0.0.1",
     "shiftwork-core": "0.0.1"
   },
   "peerDependencies": {

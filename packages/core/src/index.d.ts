@@ -139,3 +139,36 @@ export declare function openCooldowns(root: string): {
 	active(now?: Date): Promise<Cooldown[]>;
 	add(provider: string, until: Date | string, kind?: string): Promise<void>;
 };
+
+export interface RunState {
+	pid?: number;
+	running?: boolean;
+	/** Whether the runner process that wrote this state is still alive. */
+	live?: boolean;
+	startedAt?: string;
+	updatedAt?: string;
+	finishedAt?: string | null;
+	feature?: string | null;
+	stoppedReason?: string | null;
+	/** Where a detached runner's output goes, when something started it that way. */
+	logFile?: string;
+	ticket?: { feature?: string; number?: string; title?: string; path?: string } | null;
+	attempt?: number;
+	shift?: number;
+	model?: string;
+	thinking?: string | null;
+	tier?: string | null;
+	budget?: Budget | null;
+	usage?: { tokens: number; costUsd: number; turns: number; contextPct: number };
+	summary?: { resolved: number; needsInfo: number };
+}
+
+export interface RunStateStore {
+	path: string | undefined;
+	read(): Promise<RunState | null>;
+	update(patch: Partial<RunState>): Promise<void>;
+	clear(): Promise<void>;
+}
+
+export declare function openRunState(root: string): RunStateStore;
+export declare function noRunState(): RunStateStore;

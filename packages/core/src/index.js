@@ -102,6 +102,7 @@ export async function loadTickets(root = process.cwd()) {
 }
 export { openTracker } from "./tracker.js";
 export { openCooldowns } from "./cooldowns.js";
+export { noRunState, openRunState } from "./run-state.js";
 export { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";
 export { decideNext, runFrontier } from "./runner.js";
 export { loadConfig, THINKING_LEVELS, validateConfig } from "./config.js";

@@ -2,5 +2,7 @@ node_modules/
 *.tgz
 .DS_Store
 .pi/shiftwork-state.json
+.pi/shiftwork-run.json
+STOP
 logs/
 .scratch/.claims/

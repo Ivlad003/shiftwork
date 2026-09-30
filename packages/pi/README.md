@@ -6,12 +6,20 @@
 pi install npm:pi-shiftwork
 ```
 
-Right now it adds one command, `/shift`, which shows tickets from `.scratch/<feature>/issues/*.md` and the frontier of ready ones.
+It adds one command, `/shift`:
+
+| Command | What it does |
+|---|---|
+| `/shift` | Tickets from `.scratch/<feature>/issues/*.md` and the frontier of ready ones |
+| `/shift run [--feature <slug>] [--once] […]` | Starts the `shiftwork` runner detached; its output goes to `logs/runner-<timestamp>.log`. Remaining arguments are passed to `shiftwork run` |
+| `/shift stop` | Writes the `STOP` file: the runner finishes the current shift, releases its claim and exits |
+
+While a runner works, a widget above the editor shows the current ticket, shift, attempt, model and budget use, read from the runner state in `.pi/shiftwork-run.json`. The widget follows a runner started elsewhere (another pi session, or a terminal) and reports the outcome when the run ends.
+
+The runner is the `shiftwork` CLI, resolved from the `shiftwork` package next to this one, from `./node_modules/shiftwork`, or from `SHIFTWORK_BIN` when set.
 
 In development:
-- a `/shift run` loop with a fresh session per ticket
 - skill tiers per model (`before_agent_start`)
 - a virtual model with provider fallback
-- model budgets with handoff
 
 Status: early development.
