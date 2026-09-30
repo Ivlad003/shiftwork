@@ -11,6 +11,8 @@ export function starterConfig(model) {
 		defaultType: "code",
 		thinking: "medium",
 		maxAttempts: 3,
+		maxHandoffs: 3,
+		softLimitPct: 80,
 		worktree: { enabled: true, setup: [] },
 		routing: {
 			git: { tier: "quick", thinking: "low" },
@@ -20,9 +22,22 @@ export function starterConfig(model) {
 			refactor: { tier: "premium" },
 		},
 		tiers: {
-			quick: { chain: chain("quick"), thinking: "low" },
-			standard: { chain: chain("standard") },
-			premium: { chain: chain("premium"), thinking: "high" },
+			quick: { chain: chain("quick"), thinking: "low", budget: { maxTurns: 40, maxContextPct: 60 } },
+			standard: { chain: chain("standard"), budget: { maxCostUsd: 1.5, maxTokens: 3_000_000 } },
+			premium: { chain: chain("premium"), thinking: "high", budget: { maxCostUsd: 3, maxContextPct: 70 } },
+		},
+		budgets: {
+			default: { maxTurns: 60, maxWallMin: 45 },
+			tiers: {},
+			models: {},
+			ticket: { maxCostUsd: 8, maxWallMin: 120 },
+		},
+		onExceed: {
+			maxCostUsd: { to: "downgrade", mode: "same-process" },
+			maxTokens: { to: "downgrade", mode: "same-process" },
+			maxTurns: { to: "next", mode: "auto" },
+			maxContextPct: { to: "same-tier", mode: "new-process" },
+			maxWallMin: { to: "next", mode: "new-process" },
 		},
 	};
 }

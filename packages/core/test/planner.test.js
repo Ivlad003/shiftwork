@@ -108,3 +108,41 @@ test("planShift: without skill config the shift isn't restricted, so backend dis
 	assert.equal(route.skills.restricted, false);
 	assert.deepEqual(route.skills.paths, []);
 });
+
+const budgetConfig = validateConfig({
+	model: "fake/m1",
+	thinking: "low",
+	routing: { code: { tier: "standard" } },
+	tiers: {
+		standard: { chain: ["fake/m1", "fake/m2"], budget: { maxTurns: 10, maxCostUsd: 2 } },
+	},
+	budgets: {
+		default: { maxTurns: 20 },
+		models: { "fake/m1": { maxCostUsd: 1 } },
+		ticket: { maxCostUsd: 5 },
+	},
+	onExceed: { maxTurns: { to: "next", mode: "new-process" } },
+});
+
+test("planShift: budgets merge model over tier over default", () => {
+	const route = planShift({ ticket: t({ type: "code" }), config: budgetConfig });
+	assert.equal(route.budget.maxTurns, 10); // tier wins over default
+	assert.equal(route.budget.maxCostUsd, 1); // model wins over tier
+});
+
+test("planShift: ticket Budget line caps the shift budget", () => {
+	const route = planShift({ ticket: t({ type: "code", budget: "$0.5 · 5 turns" }), config: budgetConfig });
+	assert.equal(route.budget.maxCostUsd, 0.5);
+	assert.equal(route.budget.maxTurns, 5);
+});
+
+test("planShift: a handoff picks the next model in the chain", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: budgetConfig });
+	const second = planShift({
+		ticket: t({ type: "code" }),
+		config: budgetConfig,
+		history: { previousRoute: first, exceededKind: "maxTurns", ticketUsage: { maxTurns: 10 } },
+	});
+	assert.equal(second.model, "fake/m2");
+	assert.equal(second.budget.maxTurns, 10); // new model has no override, tier budget applies
+});

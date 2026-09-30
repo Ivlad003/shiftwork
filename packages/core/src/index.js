@@ -105,4 +105,5 @@ export { openCooldowns } from "./cooldowns.js";
 export { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";
 export { decideNext, runFrontier } from "./runner.js";
 export { loadConfig, THINKING_LEVELS, validateConfig } from "./config.js";
-export { planShift } from "./planner.js";
+export { planShift, resolveTicketBudget } from "./planner.js";
+export { createMeter } from "./meter.js";

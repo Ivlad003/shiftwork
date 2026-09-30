@@ -3,7 +3,17 @@ import { join } from "node:path";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-const DEFAULTS = { defaultType: "code", thinking: "medium", maxAttempts: 3, skillGroups: {}, skillSources: {} };
+const DEFAULTS = {
+	defaultType: "code",
+	thinking: "medium",
+	maxAttempts: 3,
+	maxHandoffs: 3,
+	softLimitPct: 80,
+	skillGroups: {},
+	skillSources: {},
+	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+	onExceed: {},
+};
 
 /**
  * Load `.pi/shiftwork.json` merged over `<userDir>/shiftwork.json` (the pi agent dir),
@@ -31,6 +41,13 @@ export function validateConfig(input) {
 	checkModel(config.model, "model", { optional: true });
 	checkThinking(config.thinking, "thinking");
 	if (!Number.isInteger(config.maxAttempts) || config.maxAttempts < 1) fail("maxAttempts", "must be a positive integer");
+	if (!Number.isInteger(config.maxHandoffs) || config.maxHandoffs < 0) fail("maxHandoffs", "must be a non-negative integer");
+	if (typeof config.softLimitPct !== "number" || config.softLimitPct < 0 || config.softLimitPct > 100) {
+		fail("softLimitPct", "must be a number between 0 and 100");
+	}
+
+	checkBudgets(config.budgets, "budgets");
+	checkOnExceed(config.onExceed, "onExceed");
 
 	for (const [name, sources] of Object.entries(skillGroups)) {
 		if (!Array.isArray(sources) || !sources.every((s) => typeof s === "string")) {
@@ -47,6 +64,7 @@ export function validateConfig(input) {
 		checkThinking(tier.thinking, `tiers.${name}.thinking`, { optional: true });
 		checkSkillGroups(tier.skills, `tiers.${name}.skills`, skillGroups);
 		checkSkillGroups(tier.preload, `tiers.${name}.preload`, skillGroups);
+		checkBudget(tier.budget, `tiers.${name}.budget`);
 		for (const group of tier.preload ?? []) {
 			if (!(tier.skills ?? []).includes(group)) fail(`tiers.${name}.preload`, `preload group "${group}" is not in tier skills`);
 		}
@@ -69,7 +87,62 @@ export function validateConfig(input) {
 	if (!fallback && !config.defaultTier && !config.model) {
 		fail("routing", `no route for type "${config.defaultType}": add routing.${config.defaultType}, defaultTier or model`);
 	}
+
+	// Propagate tier budgets into tier objects so planners can read them in one place.
+	for (const [name, tier] of Object.entries(tiers)) {
+		const tierBudget = config.budgets?.tiers?.[name];
+		if (tierBudget && tier.budget === undefined) tier.budget = tierBudget;
+	}
+
 	return config;
+}
+
+function checkBudgets(value, path) {
+	if (value === undefined) return;
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	checkBudget(value.default, `${path}.default`);
+	checkBudget(value.ticket, `${path}.ticket`);
+	if (value.tiers !== undefined) {
+		if (!isPlainObject(value.tiers)) fail(`${path}.tiers`, "must be an object");
+		for (const [name, budget] of Object.entries(value.tiers)) checkBudget(budget, `${path}.tiers.${name}`);
+	}
+	if (value.models !== undefined) {
+		if (!isPlainObject(value.models)) fail(`${path}.models`, "must be an object");
+		for (const [name, budget] of Object.entries(value.models)) checkBudget(budget, `${path}.models.${name}`);
+	}
+}
+
+const BUDGET_FIELDS = ["maxTokens", "maxCostUsd", "maxTurns", "maxWallMin", "maxContextPct", "stallTurns"];
+
+function checkBudget(value, path) {
+	if (value === undefined) return;
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const key of Object.keys(value)) {
+		if (!BUDGET_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown budget field; expected one of ${BUDGET_FIELDS.join(", ")}`);
+	}
+	for (const key of BUDGET_FIELDS) {
+		const v = value[key];
+		if (v === undefined || v === null) continue;
+		if (typeof v !== "number" || !Number.isFinite(v) || v < 0) fail(`${path}.${key}`, "must be a non-negative finite number");
+	}
+}
+
+const ON_EXCEED_TARGETS = ["next", "downgrade", "escalate", "same-tier"];
+const ON_EXCEED_MODES = ["same-process", "new-process", "auto"];
+
+function checkOnExceed(value, path) {
+	if (value === undefined) return;
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const [kind, rule] of Object.entries(value)) {
+		if (!BUDGET_FIELDS.includes(kind)) fail(`${path}.${kind}`, `unknown budget kind; expected one of ${BUDGET_FIELDS.join(", ")}`);
+		if (!isPlainObject(rule)) fail(`${path}.${kind}`, "must be an object");
+		if (rule.to !== undefined && !ON_EXCEED_TARGETS.includes(rule.to)) {
+			fail(`${path}.${kind}.to`, `must be one of ${ON_EXCEED_TARGETS.join(", ")}`);
+		}
+		if (rule.mode !== undefined && !ON_EXCEED_MODES.includes(rule.mode)) {
+			fail(`${path}.${kind}.mode`, `must be one of ${ON_EXCEED_MODES.join(", ")}`);
+		}
+	}
 }
 
 function checkModel(value, path, { optional = false } = {}) {

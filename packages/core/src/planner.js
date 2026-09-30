@@ -4,9 +4,10 @@
  * Unknown or missing Types use `defaultType`.
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
- * @returns {{ backend: "pi", type, tier?, model, thinking, skills: { paths: string[], preload: string[], warnings: string[], restricted: boolean } }}
+ * Budgets merge model → tier → default, then are capped by the ticket budget.
+ * @returns {{ backend: "pi", type, tier?, model, thinking, skills: { paths: string[], preload: string[], warnings: string[], restricted: boolean }, budget: object, onExceed: object }}
  */
-export function planShift({ ticket, config }) {
+export function planShift({ ticket, config, history = {} }) {
 	const type = ticket.type && config.routing?.[ticket.type] ? ticket.type : config.defaultType;
 	const routing = config.routing?.[type];
 	const tierName = routing?.model ? undefined : (routing?.tier ?? config.defaultTier);
@@ -17,7 +18,131 @@ export function planShift({ ticket, config }) {
 	const thinking = routing?.thinking ?? tier?.thinking ?? config.thinking;
 	const skills = resolveSkills({ ticket, tier, skillGroups: config.skillGroups ?? {}, skillSources: config.skillSources ?? {} });
 
-	return { backend: "pi", type, tier: tierName, model, thinking, skills };
+	const baseBudget = mergeBudgets(
+		config.budgets?.default,
+		tier?.budget,
+		config.budgets?.models?.[model],
+	);
+	const ticketBudget = resolveTicketBudget(ticket, config);
+	const budget = capBudget(baseBudget, ticketBudget);
+
+	const onExceed = config.onExceed ?? {};
+	if (history.exceededKind && history.previousRoute) {
+		const nextModel = chooseHandoffTarget({ previousRoute: history.previousRoute, kind: history.exceededKind, config });
+		if (nextModel) {
+			const nextTier = tierForModel(nextModel, config);
+			return {
+				backend: "pi",
+				type,
+				tier: nextTier,
+				model: nextModel,
+				thinking: config.tiers?.[nextTier]?.thinking ?? thinking,
+				skills: resolveSkills({ ticket, tier: config.tiers?.[nextTier], skillGroups: config.skillGroups ?? {}, skillSources: config.skillSources ?? {} }),
+				budget: mergeBudgets(
+					config.budgets?.default,
+					config.tiers?.[nextTier]?.budget,
+					config.budgets?.models?.[nextModel],
+					capBudgetRemaining(ticketBudget, history.ticketUsage),
+				),
+				onExceed,
+			};
+		}
+	}
+
+	return { backend: "pi", type, tier: tierName, model, thinking, skills, budget, onExceed };
+}
+
+function mergeBudgets(...budgets) {
+	const merged = {};
+	for (const budget of budgets) {
+		if (!budget) continue;
+		for (const key of Object.keys(budget)) {
+			if (budget[key] !== undefined && budget[key] !== null) merged[key] = budget[key];
+		}
+	}
+	return merged;
+}
+
+function capBudget(base, ticketBudget) {
+	if (!ticketBudget) return base;
+	const out = { ...base };
+	for (const key of Object.keys(ticketBudget)) {
+		if (ticketBudget[key] !== undefined && ticketBudget[key] !== null) {
+			out[key] = Math.min(out[key] ?? Infinity, ticketBudget[key]);
+		}
+	}
+	return out;
+}
+
+function capBudgetRemaining(ticketBudget, usage) {
+	if (!ticketBudget || !usage) return ticketBudget;
+	const out = {};
+	for (const key of Object.keys(ticketBudget)) {
+		const limit = ticketBudget[key];
+		if (limit === undefined || limit === null) continue;
+		const used = usage[key] ?? 0;
+		out[key] = Math.max(0, limit - used);
+	}
+	return out;
+}
+
+export function resolveTicketBudget(ticket, config) {
+	const fromTicket = parseTicketBudget(ticket.budget);
+	const fromConfig = config.budgets?.ticket;
+	return mergeBudgets(fromConfig, fromTicket);
+}
+
+function parseTicketBudget(value) {
+	if (!value) return undefined;
+	const out = {};
+	const cost = value.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
+	if (cost) out.maxCostUsd = Number(cost[1]);
+	const tokens = value.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:tokens?|tok)\b/i);
+	if (tokens) out.maxTokens = Number(tokens[1]);
+	const turns = value.match(/([0-9]+)\s*(?:turns?|hod|ход(?:ів|а|и)?)\b/i);
+	if (turns) out.maxTurns = Number(turns[1]);
+	const minutes = value.match(/([0-9]+)\s*(?:min|minutes?|хв)\b/i);
+	if (minutes) out.maxWallMin = Number(minutes[1]);
+	const context = value.match(/([0-9]+)\s*%\s*(?:context|ctx)\b/i);
+	if (context) out.maxContextPct = Number(context[1]);
+	const stall = value.match(/(?:stall\s*)?([0-9]+)\s*(?:stall|застій)/i);
+	if (stall) out.stallTurns = Number(stall[1]);
+	return Object.keys(out).length ? out : undefined;
+}
+
+function chooseHandoffTarget({ previousRoute, kind, config }) {
+	const rule = config.onExceed?.[kind];
+	if (!rule?.to) return undefined;
+	const tier = config.tiers?.[previousRoute.tier];
+	const chain = tier?.chain ?? [];
+	const idx = chain.indexOf(previousRoute.model);
+	if (rule.to === "next") {
+		if (idx >= 0 && idx + 1 < chain.length) return chain[idx + 1];
+		return undefined;
+	}
+	if (rule.to === "same-tier") {
+		if (idx >= 0 && chain.length > 1) {
+			return chain[(idx + 1) % chain.length];
+		}
+		return undefined;
+	}
+	if (rule.to === "downgrade" || rule.to === "escalate") {
+		// Tier order is quick < standard < premium by convention.
+		const order = ["quick", "standard", "premium"];
+		const currentIdx = order.indexOf(previousRoute.tier);
+		const delta = rule.to === "escalate" ? 1 : -1;
+		const nextTier = order[currentIdx + delta];
+		if (!nextTier) return undefined;
+		return config.tiers?.[nextTier]?.chain?.[0];
+	}
+	return undefined;
+}
+
+function tierForModel(model, config) {
+	for (const [name, tier] of Object.entries(config.tiers ?? {})) {
+		if (tier.chain?.includes(model)) return name;
+	}
+	return undefined;
 }
 
 function resolveSkills({ ticket, tier, skillGroups, skillSources }) {

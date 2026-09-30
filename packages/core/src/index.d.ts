@@ -25,14 +25,53 @@ export interface Route {
 	model: string;
 	thinking: string;
 	skills: { paths: string[]; preload: string[]; warnings: string[]; restricted: boolean };
+	budget: Budget;
+	onExceed: Record<string, { to?: string; mode?: string }>;
 }
 
 export declare function parseTicket(markdown: string, path?: string): Ticket;
 export declare function frontier<T extends Ticket>(tickets: T[]): T[];
 export declare function loadTickets(root?: string): Promise<(Ticket & { feature: string })[]>;
-export declare function planShift(options: { ticket: Ticket; config: Record<string, unknown> }): Route;
+export declare function planShift(options: { ticket: Ticket; config: Record<string, unknown>; history?: Record<string, unknown> }): Route;
+export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
 export declare const THINKING_LEVELS: readonly string[];
+
+export interface Budget {
+  maxTokens?: number;
+  maxCostUsd?: number;
+  maxTurns?: number;
+  maxWallMin?: number;
+  maxContextPct?: number;
+  stallTurns?: number;
+}
+
+export interface Limit {
+  level: "soft" | "hard";
+  kind: keyof Budget;
+  reason: string;
+  current: number;
+  limit: number;
+}
+
+export declare function createMeter(
+  budget: Budget,
+  softLimitPct?: number,
+  options?: { now?: () => number }
+): {
+  observe(event: { type: string } & Record<string, unknown>): Limit | null;
+  snapshot(): {
+    tokens: number;
+    costUsd: number;
+    turns: number;
+    wallMin: number;
+    contextPct: number;
+    stallTurns: number;
+    lastDiffStat: string | null;
+    softFired: Set<string>;
+    hardFired: Set<string>;
+  };
+};
 
 export interface Claim {
 	ticket: Ticket;

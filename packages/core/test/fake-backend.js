@@ -3,7 +3,15 @@ import { join } from "node:path";
 
 /**
  * A scripted backend. Each call to startShift consumes the next script entry:
- * { files?: {relPath: content}, text?: string, error?: string, usage?: {input, output}, costUsd?: number }
+ * {
+ *   files?: {relPath: content},
+ *   text?: string,
+ *   error?: string,
+ *   usage?: {input, output},
+ *   costUsd?: number,
+ *   events?: event[],     // full event sequence; if omitted, a single turn + optional text/error + end is emitted
+ *   steer?: (text) => string | undefined, // text to append when the runner steers
+ * }
  */
 export function fakeBackend(script) {
 	const shifts = [];
@@ -16,20 +24,35 @@ export function fakeBackend(script) {
 			for (const [rel, content] of Object.entries(step.files ?? {})) {
 				await writeFile(join(request.cwd, rel), content);
 			}
-			const events = [];
-			const usage = step.usage ?? { input: 100, output: 20 };
-			events.push({ type: "turn", usage: { ...usage, totalTokens: usage.input + usage.output }, costUsd: step.costUsd ?? 0.01 });
-			if (step.text) events.push({ type: "text", text: step.text });
-			if (step.error) events.push({ type: "error", message: step.error });
-			events.push({ type: "end", stopReason: step.error ? "error" : "stop" });
+			let events = [];
+			if (step.events) {
+				events = step.events.map((e) => ({ ...e }));
+			} else {
+				const usage = step.usage ?? { input: 100, output: 20 };
+				events.push({ type: "turn", usage: { ...usage, totalTokens: usage.input + usage.output }, costUsd: step.costUsd ?? 0.01 });
+				if (step.text) events.push({ type: "text", text: step.text });
+				if (step.error) events.push({ type: "error", message: step.error });
+				events.push({ type: "end", stopReason: step.error ? "error" : "stop" });
+			}
+			let aborted = false;
 			return {
 				capabilities: { inPlaceHandoff: false },
 				events: (async function* () {
-					yield* events;
+					for (const event of events) {
+						if (aborted) break;
+						yield event;
+					}
 				})(),
 				warnings: step.warnings ?? [],
-				async steer() {},
-				async abort() {},
+				async steer(text) {
+					if (step.steer) {
+						const reply = step.steer(text);
+						if (reply) events.push({ type: "text", text: reply });
+					}
+				},
+				async abort() {
+					aborted = true;
+				},
 			};
 		},
 	};

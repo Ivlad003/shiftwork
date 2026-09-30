@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { planShift } from "./planner.js";
+import { createMeter } from "./meter.js";
+import { planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";
 
 const NEEDS_INFO = "needs-info";
@@ -75,15 +76,35 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	const cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
 	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(/^### Shift (\d+) — /gm)].map((m) => Number(m[1]));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
-	for (let attempt = 1; ; attempt++) {
-		const route = { ...planShift({ ticket, config }), backend: backend.name };
+	let shiftNumber = firstShift;
+	let handoffCount = 0;
+	let attempt = 1;
+	let previousRoute = undefined;
+	let exceededKind = undefined;
+	let lastVerifyFailure = undefined;
+	const ticketUsage = { maxTokens: 0, maxCostUsd: 0, maxTurns: 0, maxWallMin: 0 };
+	const maxHandoffs = config.maxHandoffs ?? 3;
+
+	for (;;) {
+		const plan = planShift({
+			ticket,
+			config,
+			history: { previousRoute, exceededKind, ticketUsage },
+		});
+		const route = { ...plan, backend: backend.name };
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
-		const shift = await runShift(backend, { cwd, route, prompt, systemPrompt: config.workerPrompt ?? WORKER_PROMPT }, (event) =>
-			log({ ticket, attempt, event }),
+		const softLimitPct = config.softLimitPct ?? 80;
+		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
+		const shift = await runShift(
+			backend,
+			{ cwd, route, prompt, systemPrompt: config.workerPrompt ?? WORKER_PROMPT, softLimitPct, getDiffStat },
+			(event) => log({ ticket, attempt, event }),
 		);
 
+		accumulateUsage(ticketUsage, shift);
+
 		const hasVerify = ticket.verify.length > 0;
-		const verifyResult = shift.needsInfo === null && hasVerify ? await verify(ticket.verify, cwd) : null;
+		const verifyResult = shift.needsInfo === null && !shift.handoff && hasVerify ? await verify(ticket.verify, cwd) : null;
 		let decision = decideNext({
 			attempt,
 			maxAttempts,
@@ -93,6 +114,27 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		});
 
 		const notes = [];
+		let nextRoute = undefined;
+		if (shift.handoff) {
+			handoffCount++;
+			const handoffHistory = { previousRoute: route, exceededKind: shift.handoff.kind, ticketUsage };
+			nextRoute = { ...planShift({ ticket, config, history: handoffHistory }), backend: backend.name };
+			const handoffNote = await buildHandoffNote({
+				shiftNumber,
+				from: route,
+				to: nextRoute,
+				reason: shift.handoff.reason,
+				shift,
+				verifyResult: verifyResult ?? lastVerifyFailure,
+				getDiffStat,
+			});
+			notes.push(handoffNote);
+			if (handoffCount > maxHandoffs) {
+				notes.push(`- Handoff limit: ${maxHandoffs} handoffs already used`);
+				decision = { action: NEEDS_INFO, reason: `maxHandoffs (${maxHandoffs}) exceeded` };
+			}
+		}
+
 		if (workspace && decision.action === "resolve") {
 			const landed = await workspace.land(ticket);
 			notes.push(`- Landed: ${landed.message}`);
@@ -102,14 +144,34 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
 		}
 
-		await tracker.appendComment(ticket, [shiftReport({ number: firstShift + attempt - 1, route, shift, verifyResult, decision }), ...notes].join("\n"));
+		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision }), ...notes].join("\n"));
+		shiftNumber++;
+
 		if (decision.action === "resolve") {
 			await tracker.setStatus(ticket, RESOLVED);
-			return { action: "resolve", reason: notes.length ? notes[0].replace(/^- Landed: /, "") : "verify passed" };
+			return { action: "resolve", reason: notes.length ? notes[notes.length - 1].replace(/^- Landed: /, "") : "verify passed" };
 		}
 		if (decision.action === NEEDS_INFO) {
 			await tracker.setStatus(ticket, NEEDS_INFO);
 			return { action: NEEDS_INFO, reason: decision.reason };
+		}
+
+		if (shift.handoff && handoffCount <= maxHandoffs) {
+			previousRoute = route;
+			exceededKind = shift.handoff.kind;
+			// Before starting the next shift, make sure the ticket budget isn't exhausted.
+			const remainingTicket = remainingTicketBudget(ticket, config, ticketUsage);
+			if (remainingTicket.exhausted) {
+				await tracker.appendComment(ticket, `### Handoff blocked\n- Reason: ticket budget exhausted (${remainingTicket.reason})`);
+				await tracker.setStatus(ticket, NEEDS_INFO);
+				return { action: NEEDS_INFO, reason: `ticket budget exhausted: ${remainingTicket.reason}` };
+			}
+			continue;
+		}
+
+		if (verifyResult && !verifyResult.ok) {
+			lastVerifyFailure = verifyResult.results.find((r) => r.code !== 0) ?? null;
+			attempt++;
 		}
 
 		if (checkStop(root)) {
@@ -119,9 +181,38 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	}
 }
 
+function accumulateUsage(target, shift) {
+	target.maxTokens += shift.usage.totalTokens ?? 0;
+	target.maxCostUsd += shift.costUsd ?? 0;
+	target.maxTurns += shift.turns ?? 0;
+}
+
+function remainingTicketBudget(ticket, config, usage) {
+	const ticketBudget = resolveTicketBudget(ticket, config);
+	if (!ticketBudget) return { exhausted: false };
+	for (const [key, limit] of Object.entries(ticketBudget)) {
+		if (limit === undefined || limit === null) continue;
+		const used = usage[key] ?? 0;
+		if (used >= limit) return { exhausted: true, reason: `${key} (${used} / ${limit})` };
+	}
+	return { exhausted: false };
+}
+
+const SOFT_LIMIT_PROMPT = `You are near a Shiftwork budget limit. Finish your current step, then append a \`### Handoff\` note to the ticket describing what was done, what remains, hypotheses, and files touched, then stop.`;
+
 /** Consume one shift's events into a result. */
 async function runShift(backend, request, log) {
-	const result = { usage: { input: 0, output: 0, totalTokens: 0 }, costUsd: 0, turns: 0, text: "", error: null, stopReason: null, needsInfo: null, warnings: [] };
+	const result = {
+		usage: { input: 0, output: 0, totalTokens: 0 },
+		costUsd: 0,
+		turns: 0,
+		text: "",
+		error: null,
+		stopReason: null,
+		needsInfo: null,
+		warnings: [],
+		handoff: null,
+	};
 	let shift;
 	try {
 		shift = await backend.startShift(request);
@@ -131,15 +222,40 @@ async function runShift(backend, request, log) {
 		return result;
 	}
 	result.warnings = shift.warnings ?? [];
+	const meter = createMeter(request.route.budget, request.softLimitPct ?? 80, { now: Date.now });
+	async function checkLimit(limit) {
+		if (!limit) return false;
+		if (limit.level === "soft" && shift.steer) {
+			await shift.steer(SOFT_LIMIT_PROMPT).catch(() => {});
+		} else if (limit.level === "hard") {
+			await shift.abort().catch(() => {});
+			result.stopReason = "budget";
+			result.handoff = { reason: limit.reason, kind: limit.kind };
+		}
+		return limit.level === "hard";
+	}
 	for await (const event of shift.events) {
 		log(event);
+		let limit = null;
 		if (event.type === "turn") {
 			result.turns++;
 			result.usage.input += event.usage?.input ?? 0;
 			result.usage.output += event.usage?.output ?? 0;
 			result.usage.totalTokens += event.usage?.totalTokens ?? 0;
 			result.costUsd += event.costUsd ?? 0;
-		} else if (event.type === "text") {
+			// Feed a diff-stat snapshot after each turn so stall detection can work.
+			if (request.getDiffStat) {
+				try {
+					const stat = await request.getDiffStat();
+					limit = meter.observe({ type: "diffStat", stat });
+				} catch {}
+			}
+		}
+
+		limit = meter.observe(event) ?? limit;
+		if (await checkLimit(limit)) break;
+
+		if (event.type === "text") {
 			result.text += `${event.text}\n`;
 		} else if (event.type === "error") {
 			result.error = event.message;
@@ -151,6 +267,25 @@ async function runShift(backend, request, log) {
 	const marker = result.text.match(MARKER);
 	if (marker) result.needsInfo = marker[1];
 	return result;
+}
+
+async function buildHandoffNote({ shiftNumber, from, to, reason, shift, verifyResult, getDiffStat }) {
+	const lines = [`### Handoff — shift ${shiftNumber}, ${from.model} → ${to?.model ?? "(no target)"}, reason: ${reason}`];
+	if (shift.text?.trim()) {
+		const tail = shift.text.trim().split("\n").slice(-3).join("\n");
+		lines.push("- Last output:", "", "```", tail, "```");
+	}
+	if (getDiffStat) {
+		try {
+			const stat = await getDiffStat();
+			if (stat) lines.push("", "- Diff stat:", "", "```", stat, "```");
+		} catch {}
+	}
+	if (verifyResult && !verifyResult.ok) {
+		const failed = verifyResult.results?.find((r) => r.code !== 0) ?? verifyResult;
+		if (failed?.cmd) lines.push("", `- Verify failure: \`${failed.cmd}\` (exit ${failed.code})`);
+	}
+	return lines.join("\n");
 }
 
 function shiftReport({ number, route, shift, verifyResult, decision }) {
