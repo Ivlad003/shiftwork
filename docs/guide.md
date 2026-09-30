@@ -163,13 +163,13 @@ Yes, all of these exist. There are two levels:
 | Field | Limits | In a `Budget:` line |
 |---|---|---|
 | `maxTurns` | agent turns | `50 turns` |
-| `maxTokens` | tokens | `200000 tokens` |
+| `maxTokens` | tokens | `200k tokens` |
 | `maxCostUsd` | dollars | `$2` |
-| `maxWallMin` | wall-clock minutes | `30 min` |
+| `maxWallMin` | wall-clock minutes | `30 min`, `1h 30min` |
 | `maxContextPct` | how full the context window may get | `60% context` |
 | `stallTurns` | turns in a row where neither the diff nor the failing test output changed | `5 stall` |
 
-**Write whole numbers in `Budget:` lines.** `200k tokens` and `1h` are not understood yet and are silently ignored: write `200000 tokens` and `60 min`.
+Shorthands work: `200k tokens`, `1.5M tokens`, `1h`, `1h 30min`, `1h30m`, `1.5h`, and Ukrainian units (`30 хв`, `1 год`, `10 ходів`). A part Shiftwork doesn't understand is ignored, so check with `shiftwork run --dry-run`, which prints each ticket's budget.
 
 Where to set them in `.pi/shiftwork.json`:
 
@@ -246,5 +246,4 @@ Turn on a **review shift**: after a ticket lands, a fresh agent on the tier you 
 
 - Several tickets at once: planned in [`.scratch/parallel/`](../.scratch/parallel/spec.md).
 - `llms.txt` and an installable skill: in progress in [`.scratch/local-and-skills/`](../.scratch/local-and-skills/spec.md).
-- `k`/`h` shorthands in `Budget:` lines.
 - Editing config from the TUI.

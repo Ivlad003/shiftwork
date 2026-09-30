@@ -309,20 +309,32 @@ export function resolveTicketBudget(ticket, config) {
 	return mergeBudgets(fromConfig, fromTicket);
 }
 
+/** A unit must not run on into another letter (Unicode-aware, so Ukrainian units work too). */
+const END = String.raw`(?![\p{L}\p{N}])`;
+const NUM = String.raw`([0-9]+(?:\.[0-9]+)?)`;
+const TOKEN_SCALE = { k: 1e3, m: 1e6 };
+
+/**
+ * Parse a ticket's `Budget:` line, e.g. `$2 · 200k tokens · 1h 30min · 50 turns · 60% context · 5 stall`.
+ * Tokens take k/M suffixes; time adds up hours and minutes (`1h30m`, `1.5h`, `1 год 15 хв`).
+ */
 function parseTicketBudget(value) {
 	if (!value) return undefined;
 	const out = {};
 	const cost = value.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
 	if (cost) out.maxCostUsd = Number(cost[1]);
-	const tokens = value.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:tokens?|tok)\b/i);
-	if (tokens) out.maxTokens = Number(tokens[1]);
-	const turns = value.match(/([0-9]+)\s*(?:turns?|hod|ход(?:ів|а|и)?)\b/i);
+	const tokens = value.match(new RegExp(`${NUM}\\s*([kKmM])?\\s*(?:tokens?|tok)${END}`, "u"));
+	if (tokens) out.maxTokens = Math.round(Number(tokens[1]) * (TOKEN_SCALE[tokens[2]?.toLowerCase()] ?? 1));
+	const turns = value.match(new RegExp(`([0-9]+)\\s*(?:turns?|hod|ход(?:ів|и|а)?)${END}`, "iu"));
 	if (turns) out.maxTurns = Number(turns[1]);
-	const minutes = value.match(/([0-9]+)\s*(?:min|minutes?|хв)\b/i);
-	if (minutes) out.maxWallMin = Number(minutes[1]);
-	const context = value.match(/([0-9]+)\s*%\s*(?:context|ctx)\b/i);
+	// Hours may run straight into minutes ("1h30m"), so only a letter ends them wrongly.
+	const hours = value.match(new RegExp(`${NUM}\\s*(?:h|hr|hours?|год(?:ин[аи]?)?)(?!\\p{L})`, "iu"));
+	// A bare "m" is minutes only when it isn't a token count ("1.5M tokens").
+	const minutes = value.match(new RegExp(`${NUM}\\s*(?:min(?:utes?)?|хв(?:илин[аи]?)?|m(?!\\s*tok))${END}`, "iu"));
+	if (hours || minutes) out.maxWallMin = Number(hours?.[1] ?? 0) * 60 + Number(minutes?.[1] ?? 0);
+	const context = value.match(new RegExp(`([0-9]+)\\s*%\\s*(?:context|ctx)${END}`, "iu"));
 	if (context) out.maxContextPct = Number(context[1]);
-	const stall = value.match(/(?:stall\s*)?([0-9]+)\s*(?:stall|застій)/i);
+	const stall = value.match(new RegExp(`(?:stall\\s*)?([0-9]+)\\s*(?:stall|застій)`, "iu"));
 	if (stall) out.stallTurns = Number(stall[1]);
 	return Object.keys(out).length ? out : undefined;
 }

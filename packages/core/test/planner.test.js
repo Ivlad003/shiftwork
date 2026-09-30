@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chooseHandoffMode, parseModelRef, planShift, skillsForModel, validateConfig } from "../src/index.js";
+import { chooseHandoffMode, parseModelRef, planShift, resolveTicketBudget, skillsForModel, validateConfig } from "../src/index.js";
 
 const config = validateConfig({
 	defaultType: "code",
@@ -575,4 +575,24 @@ test("planShift: a free model's cooldown skips only that model; a provider-wide 
 
 	assert.equal(planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: oneModel, now }).model, "or/b:free");
 	assert.ok(planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: wholeProvider, now }).wait);
+});
+
+test("Budget lines understand k/M token and h time shorthands, and Ukrainian units", () => {
+	const cases = {
+		"$2 · 200k tokens · 1h": { maxCostUsd: 2, maxTokens: 200_000, maxWallMin: 60 },
+		"1.5M tokens": { maxTokens: 1_500_000 },
+		"200000 tokens": { maxTokens: 200_000 },
+		"1h 30min": { maxWallMin: 90 },
+		"1h30m": { maxWallMin: 90 },
+		"1.5h": { maxWallMin: 90 },
+		"2 hours": { maxWallMin: 120 },
+		"45m · 50 turns": { maxWallMin: 45, maxTurns: 50 },
+		"30 хв": { maxWallMin: 30 },
+		"1 год 15 хв": { maxWallMin: 75 },
+		"10 ходів": { maxTurns: 10 },
+		"$1.5 · 40 turns · 60% context · 5 stall": { maxCostUsd: 1.5, maxTurns: 40, maxContextPct: 60, stallTurns: 5 },
+	};
+	for (const [line, expected] of Object.entries(cases)) {
+		assert.deepEqual(resolveTicketBudget({ budget: line }, {}), expected, line);
+	}
 });
