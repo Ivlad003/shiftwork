@@ -162,10 +162,23 @@ function providerOf(model) {
 	return parseModelRef(model).provider;
 }
 
+/**
+ * The key a provider limit cools. Free models (`…:free`, e.g. on OpenRouter) have their own
+ * per-model limits, so a 429 on one of them cools only that model; everything else cools its provider.
+ */
+export function cooldownKey(ref) {
+	return String(ref).endsWith(":free") ? String(ref) : providerOf(ref);
+}
+
+/** Cooldowns that apply to a model: its own key, and its provider as a whole. */
+function cooldownsFor(model, cooldowns) {
+	const keys = new Set([providerOf(model), cooldownKey(model)]);
+	return (cooldowns ?? []).filter((c) => keys.has(c.provider));
+}
+
 function isCooling(model, cooldowns, now) {
-	const provider = providerOf(model);
 	const t = now instanceof Date ? now.getTime() : new Date(now).getTime();
-	return (cooldowns ?? []).some((c) => c.provider === provider && new Date(c.until).getTime() > t);
+	return cooldownsFor(model, cooldowns).some((c) => new Date(c.until).getTime() > t);
 }
 
 function firstFree(chain, cooldowns, now, blocked = []) {
@@ -173,9 +186,8 @@ function firstFree(chain, cooldowns, now, blocked = []) {
 }
 
 function cooldownUntil(model, cooldowns) {
-	const provider = providerOf(model);
-	const hit = (cooldowns ?? []).find((c) => c.provider === provider);
-	return hit ? new Date(hit.until) : undefined;
+	const ends = cooldownsFor(model, cooldowns).map((c) => new Date(c.until).getTime());
+	return ends.length ? new Date(Math.max(...ends)) : undefined;
 }
 
 function earliestCooldown(models, cooldowns, now) {

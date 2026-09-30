@@ -549,3 +549,16 @@ test("planShift: a ':free' model of a paid provider is used without waiting", ()
 	const soon = [{ provider: "sub", until: "2026-01-01T00:05:00Z", kind: "server" }];
 	assert.equal(planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: soon, now }).model, "paid/model:free");
 });
+
+test("planShift: a free model's cooldown skips only that model; a provider-wide cooldown still covers free models", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "quick" } },
+		tiers: { quick: { chain: ["or/a:free", "or/b:free", "or/paid"] } },
+	});
+	const now = new Date("2026-01-01T00:00:00Z");
+	const oneModel = [{ provider: "or/a:free", until: "2026-01-01T01:00:00Z", kind: "rate" }];
+	const wholeProvider = [{ provider: "or", until: "2026-01-01T01:00:00Z", kind: "usage" }];
+
+	assert.equal(planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: oneModel, now }).model, "or/b:free");
+	assert.ok(planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: wholeProvider, now }).wait);
+});

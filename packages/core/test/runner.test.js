@@ -1081,3 +1081,20 @@ test("an unavailable cursor-agent (missing or not logged in) is skipped like a c
 		assert.equal(state.cooldowns[0].kind, "usage");
 	}
 });
+
+test("a 429 on a free model cools that model only, and the next free model of the same provider runs", async () => {
+	const cfg = {
+		defaultType: "code",
+		maxAttempts: 2,
+		routing: { code: { tier: "quick" } },
+		tiers: { quick: { chain: ["or/a:free", "or/b:free"] } },
+	};
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ error: "429 Too Many Requests: rate limit exceeded" }, { files: { "done.txt": "" } }]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.deepEqual(backend.shifts.map((s) => s.request.route.model), ["or/a:free", "or/b:free"]);
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.deepEqual(state.cooldowns.map((c) => c.provider), ["or/a:free"]);
+});

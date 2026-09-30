@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
-import { chooseHandoffMode, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
+import { chooseHandoffMode, cooldownKey, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
 
@@ -248,7 +248,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		if (!limit && shift.error && isBackendUnavailable(shift.error)) {
 			limit = { kind: "usage" };
 		}
-		const provider = route.provider;
+		// Free models cool on their own; everything else cools its whole provider.
+		const provider = route.model && String(route.model).endsWith(":free") ? cooldownKey(route.model) : route.provider;
 		const until = limit ? (limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
 		if (limit) await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(limit.resetAt) });
 		// The limit may have hit after the work was done: if the gate passes, the ticket is resolved.
@@ -439,7 +440,7 @@ async function probeCooldowns({ backend, cooldowns, config, now, force = false, 
 		if (cooldown.exact) continue;
 		const last = new Date(cooldown.probedAt ?? cooldown.at ?? 0).getTime();
 		if (!force && now.getTime() - last < everyMs) continue;
-		const model = models.find((m) => parseModelRef(m).provider === cooldown.provider);
+		const model = models.find((m) => cooldownKey(m) === cooldown.provider || parseModelRef(m).provider === cooldown.provider);
 		if (!model) continue;
 		const ok = await backend.probe(model).catch(() => false);
 		log({ type: "probe", provider: cooldown.provider, model, ok });
