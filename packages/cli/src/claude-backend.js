@@ -81,9 +81,8 @@ export function createClaudeBackend(options = {}) {
 			const queue = eventQueue();
 			let stderr = "";
 			let buffer = "";
-			let turnEmitted = false;
-			let pendingUsage = null;
-			let pendingText = "";
+			const map = createClaudeMapper();
+			let ended = false;
 
 			const cleanup = async () => {
 				await rm(dir, { recursive: true, force: true });
@@ -91,19 +90,8 @@ export function createClaudeBackend(options = {}) {
 
 			const finish = async (stopReason, errorMessage) => {
 				if (queue.closed) return;
-				if (pendingUsage) {
-					queue.push({ ...pendingUsage, text: pendingText });
-					pendingUsage = null;
-				} else if ((pendingText || !turnEmitted) && !errorMessage) {
-					queue.push({
-						type: "turn",
-						usage: { input: 0, output: 0, totalTokens: 0 },
-						costUsd: 0,
-						text: pendingText,
-					});
-				}
-				if (errorMessage && !queue.closed) queue.push({ type: "error", message: errorMessage });
-				queue.push({ type: "end", stopReason });
+				if (errorMessage) queue.push({ type: "error", message: errorMessage });
+				if (!ended) queue.push({ type: "end", stopReason });
 				queue.close();
 				await cleanup();
 			};
@@ -127,20 +115,9 @@ export function createClaudeBackend(options = {}) {
 					if (!line.trim()) continue;
 					const event = parseStreamJsonLine(line);
 					if (!event) continue;
-					for (const mapped of mapClaudeEvent(event)) {
-						if (mapped.type === "turn") {
-							if (pendingUsage) {
-								queue.push({ ...pendingUsage, text: pendingText });
-								pendingText = "";
-							}
-							pendingUsage = mapped;
-							turnEmitted = true;
-						} else if (mapped.type === "text") {
-							pendingText += mapped.text;
-							queue.push(mapped);
-						} else if (mapped.type === "error" || mapped.type === "context") {
-							queue.push(mapped);
-						}
+					for (const mapped of map(event)) {
+						if (mapped.type === "end") ended = true;
+						queue.push(mapped);
 					}
 				}
 			});
@@ -176,37 +153,50 @@ function parseStreamJsonLine(line) {
 	}
 }
 
-/** Map one Claude Code stream-json event to Shiftwork ShiftEvents. Exported for tests. */
+/**
+ * Map Claude Code `--output-format stream-json --verbose` events to ShiftEvents. Stateful: one
+ * assistant message arrives as several lines (thinking, tool_use, text) sharing `message.id`,
+ * and counts as one turn. The formats come from a recorded transcript (test/fixtures/claude-stream.jsonl):
+ * - `assistant`: message.usage { input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens }
+ * - `rate_limit_event`: rate_limit_info { status: "allowed" | …, rateLimitType, resetsAt (epoch s) }
+ * - `result`: { subtype, is_error, result, num_turns, total_cost_usd }
+ */
+export function createClaudeMapper() {
+	const seen = new Set();
+	return function map(event) {
+		if (!event || typeof event !== "object") return [];
+		const out = [];
+		if (event.type === "assistant" && event.message) {
+			const message = event.message;
+			if (message.id && !seen.has(message.id)) {
+				seen.add(message.id);
+				const u = message.usage ?? {};
+				const context = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+				const output = u.output_tokens ?? 0;
+				out.push({ type: "turn", model: message.model, usage: { input: context, output, totalTokens: context + output }, costUsd: 0 });
+				out.push({ type: "context", tokens: context });
+			}
+			for (const block of message.content ?? []) {
+				if (block.type === "text" && block.text) out.push({ type: "text", text: block.text });
+			}
+		} else if (event.type === "rate_limit_event") {
+			const info = event.rate_limit_info ?? {};
+			if (info.status && info.status !== "allowed") {
+				const resets = info.resetsAt ? ` It resets at ${new Date(info.resetsAt * 1000).toISOString()}` : "";
+				out.push({ type: "error", message: `Claude ${info.rateLimitType ?? "plan"} usage limit reached (${info.status}).${resets}` });
+			}
+		} else if (event.type === "result") {
+			if (typeof event.total_cost_usd === "number") out.push({ type: "cost", costUsd: event.total_cost_usd });
+			if (event.is_error) out.push({ type: "error", message: String(event.result ?? event.subtype ?? "claude error") });
+			out.push({ type: "end", stopReason: event.is_error ? "error" : "stop" });
+		}
+		return out;
+	};
+}
+
+/** Stateless convenience for single events (tests); prefer createClaudeMapper for a stream. */
 export function mapClaudeEvent(event) {
-	if (!event || typeof event !== "object") return [];
-	const out = [];
-	if (event.type === "text" && typeof event.text === "string") {
-		out.push({ type: "text", text: event.text });
-	}
-	if (event.type === "usage") {
-		const input = event.input_tokens ?? 0;
-		const output = event.output_tokens ?? 0;
-		out.push({
-			type: "turn",
-			usage: { input, output, totalTokens: input + output },
-			costUsd: event.cost_usd ?? 0,
-		});
-	}
-	if (event.type === "context") {
-		out.push({
-			type: "context",
-			tokens: event.tokens,
-			percent: event.percent,
-			contextWindow: event.context_window,
-		});
-	}
-	if (event.type === "error" && event.message) {
-		out.push({ type: "error", message: event.message });
-	}
-	if (event.type === "done") {
-		out.push({ type: "end", stopReason: event.stop_reason ?? "stop" });
-	}
-	return out;
+	return createClaudeMapper()(event);
 }
 
 async function isOnPath(command, env) {

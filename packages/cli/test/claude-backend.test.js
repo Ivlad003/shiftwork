@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createClaudeBackend, mapClaudeEvent } from "../src/claude-backend.js";
+import { readFileSync } from "node:fs";
+import { createClaudeBackend, createClaudeMapper } from "../src/claude-backend.js";
 
 async function withFakeClaude(script) {
 	const binDir = await mkdtemp(join(tmpdir(), "sw-claude-bin-"));
@@ -40,34 +41,35 @@ async function shiftWith({ script, env = {}, route = { model: "sonnet", thinking
 	return { cwd, events, shift };
 }
 
-test("a fake claude binary drives a success run to text, turn, usage and end", { timeout: 30_000 }, async () => {
-	const { events } = await shiftWith({
-		script: [
-			{ type: "text", text: "Implemented." },
-			{ type: "usage", input_tokens: 10, output_tokens: 5, cost_usd: 0.0123 },
-			{ type: "done" },
-		],
-	});
+const recorded = readFileSync(new URL("./fixtures/claude-stream.jsonl", import.meta.url), "utf8")
+	.split("\n")
+	.filter(Boolean)
+	.map((line) => JSON.parse(line));
 
-	assert.ok(events.some((e) => e.type === "text" && e.text === "Implemented."));
-	const turn = events.find((e) => e.type === "turn");
-	assert.ok(turn);
-	assert.deepEqual(turn.usage, { input: 10, output: 5, totalTokens: 15 });
-	assert.equal(turn.costUsd, 0.0123);
-	assert.equal(events.at(-1).type, "end");
+test("a recorded real Claude Code transcript maps to two turns, the reply text, the cost and a clean end", { timeout: 30_000 }, async () => {
+	const { events } = await shiftWith({ script: recorded });
+
+	const turns = events.filter((e) => e.type === "turn");
+	assert.equal(turns.length, 2, "two assistant messages; their repeated lines count once");
+	assert.ok(turns[0].usage.input > 10_000, "context includes cache creation and cache reads");
+	assert.ok(events.some((e) => e.type === "text" && /done/i.test(e.text)));
+	assert.deepEqual(events.find((e) => e.type === "cost"), { type: "cost", costUsd: 0.0257268 });
+	assert.ok(events.some((e) => e.type === "context" && e.tokens > 10_000));
+	assert.deepEqual(events.at(-1), { type: "end", stopReason: "stop" });
+	assert.equal(events.filter((e) => e.type === "end").length, 1);
 });
 
 test("a usage-limit error cools claude and is reported as an error event", { timeout: 30_000 }, async () => {
 	const { events } = await shiftWith({
 		script: [
-			{ type: "error", message: "Usage limit reached. Resets at 2026-10-01T00:00:00Z." },
-			{ type: "done" },
+			{ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1790812800 } },
+			{ type: "result", subtype: "error_during_execution", is_error: true, result: "Claude AI usage limit reached", num_turns: 0 },
 		],
 	});
 
 	const error = events.find((e) => e.type === "error");
 	assert.ok(error);
-	assert.match(error.message, /Usage limit reached/);
+	assert.match(error.message, /usage limit reached/i);
 	const { classifyError } = await import("shiftwork-core");
 	const classified = classifyError(error.message);
 	assert.equal(classified?.kind, "usage");
@@ -113,7 +115,7 @@ const idx = args.indexOf("--append-system-prompt");
 const workerFile = args[idx + 1];
 const worker = fs.readFileSync(workerFile, "utf8");
 fs.writeFileSync(process.env.SHIFTWORK_RECORD_SYSTEM ?? "missing", worker);
-console.log(JSON.stringify({ type: "done" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok", num_turns: 1, total_cost_usd: 0 }));
 `,
 	);
 	await chmod(claudePath, 0o755);
@@ -151,8 +153,9 @@ const fs = require("fs");
 const args = process.argv.slice(2);
 const idx = args.indexOf("--plugin-dir");
 const pluginDir = args[idx + 1];
-fs.writeFileSync(process.env.SHIFTWORK_RECORD_PLUGIN ?? "missing", pluginDir);
-console.log(JSON.stringify({ type: "done" }));
+const skillDir = fs.readdirSync(pluginDir + "/skills")[0];
+fs.writeFileSync(process.env.SHIFTWORK_RECORD_PLUGIN ?? "missing", JSON.stringify({ skillDir, body: fs.readFileSync(pluginDir + "/skills/" + skillDir + "/SKILL.md", "utf8") }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok", num_turns: 1, total_cost_usd: 0 }));
 `,
 	);
 	await chmod(claudePath, 0o755);
@@ -170,47 +173,21 @@ console.log(JSON.stringify({ type: "done" }));
 	}
 	await shift.close?.();
 
-	const pluginDir = await readFile(record, "utf8");
-	const link = join(pluginDir, "skills", basename(skill));
-	const target = await readFile(join(link, "SKILL.md"), "utf8");
-	assert.equal(target, "Skill body.");
+	// The plugin dir is temporary: the fake claude read the skill through it while the shift ran.
+	const seen = JSON.parse(await readFile(record, "utf8"));
+	assert.deepEqual(seen, { skillDir: basename(skill), body: "Skill body." });
 });
 
-test("mapClaudeEvent ignores unknown events and maps usage to a turn", () => {
-	assert.deepEqual(mapClaudeEvent({ type: "ping" }), []);
-	const [turn] = mapClaudeEvent({ type: "usage", input_tokens: 3, output_tokens: 2, cost_usd: 0.5 });
-	assert.deepEqual(turn, { type: "turn", usage: { input: 3, output: 2, totalTokens: 5 }, costUsd: 0.5 });
-	const [text] = mapClaudeEvent({ type: "text", text: "hi" });
-	assert.deepEqual(text, { type: "text", text: "hi" });
-	const [context] = mapClaudeEvent({ type: "context", tokens: 800, context_window: 8000 });
-	assert.equal(context.type, "context");
-	assert.equal(context.tokens, 800);
-	assert.equal(context.contextWindow, 8000);
-	const [end] = mapClaudeEvent({ type: "done", stop_reason: "end_turn" });
-	assert.deepEqual(end, { type: "end", stopReason: "end_turn" });
-});
-
-const live = process.env.SHIFTWORK_LIVE_CLAUDE === "1";
-(live ? test : test.skip)("live claude answers a tiny prompt", { timeout: 120_000 }, async () => {
-	const backend = createClaudeBackend();
-	const ok = await backend.probe("sonnet");
-	if (!ok) {
-		console.log("Claude Code not installed or rate-limited; skipping live check");
-		return;
-	}
-	const cwd = await mkdtemp(join(tmpdir(), "sw-claude-live-"));
-	const shift = await backend.startShift({
-		cwd,
-		route: { model: "sonnet", thinking: "low", skills: { paths: [], preload: [], restricted: false } },
-		prompt: "Reply with exactly: OK",
-		systemPrompt: "You are a helpful assistant.",
-	});
-	const events = [];
-	for await (const event of shift.events) {
-		events.push(event);
-		if (event.type === "end") break;
-	}
-	await shift.close?.();
-	assert.ok(events.some((e) => e.type === "text" && /OK/.test(e.text)));
-	assert.equal(events.at(-1)?.type, "end");
+test("the Claude mapper counts an assistant message once across its lines and ignores unknown events", () => {
+	const map = createClaudeMapper();
+	const line = (content) => ({ type: "assistant", message: { id: "m1", model: "claude-haiku", content, usage: { input_tokens: 2, cache_read_input_tokens: 8, output_tokens: 3 } } });
+	assert.deepEqual(map({ type: "system", subtype: "thinking_tokens" }), []);
+	const first = map(line([{ type: "thinking", thinking: "…" }]));
+	const second = map(line([{ type: "text", text: "hi" }]));
+	assert.deepEqual(first, [
+		{ type: "turn", model: "claude-haiku", usage: { input: 10, output: 3, totalTokens: 13 }, costUsd: 0 },
+		{ type: "context", tokens: 10 },
+	]);
+	assert.deepEqual(second, [{ type: "text", text: "hi" }]);
+	assert.deepEqual(map({ type: "rate_limit_event", rate_limit_info: { status: "allowed" } }), []);
 });

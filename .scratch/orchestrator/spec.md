@@ -121,7 +121,7 @@ Phase 1 made Shiftwork work tickets on pi. Using it on its own repo showed what'
 | 02 | STOP asks the agent for a handoff note | resolved | xai/grok-4.6 |
 | 03 | Per-model profiles: context window, budget, thinking | resolved | xai/grok-4.6 |
 | 04 | Ticket status table in the feature spec | resolved | xai/grok-4.6 |
-| 05 | Backend registry and the Claude Code backend | ready-for-agent |  |
+| 05 | Backend registry and the Claude Code backend | resolved | opencode-go/kimi-k2.7-code |
 | 06 | Codex backend | ready-for-agent |  |
 | 07 | OpenCode backend | ready-for-agent |  |
 | 08 | Grok Build (`grok`) backend | ready-for-agent |  |

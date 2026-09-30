@@ -42,6 +42,9 @@ export function createMeter(budget, softLimitPct = 80, { now = () => Date.now() 
 			state.turns++;
 			state.tokens += event.usage?.totalTokens ?? 0;
 			state.costUsd += event.costUsd ?? 0;
+		} else if (event.type === "cost") {
+			// Some backends (Claude Code) report cost once, at the end of the shift.
+			state.costUsd += event.costUsd ?? 0;
 		} else if (event.type === "context") {
 			state.contextPct = event.percent ?? 0;
 		} else if (event.type === "diffStat" || event.type === "failingOutput") {

@@ -413,6 +413,8 @@ async function publishShift(runState, { ticket, attempt, shift, route }) {
 			usage.turns++;
 			usage.tokens += event.usage?.totalTokens ?? 0;
 			usage.costUsd += event.costUsd ?? 0;
+		} else if (event.type === "cost") {
+			usage.costUsd += event.costUsd ?? 0;
 		} else if (event.type === "context") {
 			usage.contextPct = event.percent ?? usage.contextPct;
 		} else {
@@ -611,6 +613,9 @@ async function runShift(backend, request, log) {
 						limit = meter.observe({ type: "diffStat", stat });
 					} catch {}
 				}
+			} else if (observed.type === "cost") {
+				// Some backends (Claude Code) report the shift's cost once, at the end.
+				result.costUsd += observed.costUsd ?? 0;
 			} else if (observed.type === "context") {
 				contextTokens = observed.tokens ?? contextTokens;
 			}
