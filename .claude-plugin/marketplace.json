@@ -1,0 +1,17 @@
+{
+	"name": "shiftwork",
+	"owner": { "name": "ivlad003" },
+	"plugins": [
+		{
+			"name": "shiftwork",
+			"source": "./plugins/shiftwork",
+			"description": "Drive Shiftwork: write and triage .scratch/ tickets, run and steer the runner, review landed work.",
+			"version": "0.0.1",
+			"author": { "name": "ivlad003" },
+			"homepage": "https://github.com/Ivlad003/shiftwork#readme",
+			"repository": "https://github.com/Ivlad003/shiftwork",
+			"license": "MIT",
+			"keywords": ["shiftwork", "agents", "autonomous", "tickets"]
+		}
+	]
+}
