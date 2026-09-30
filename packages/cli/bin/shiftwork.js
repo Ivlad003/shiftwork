@@ -65,15 +65,17 @@ async function status(argv) {
 	const tracker = await openRepoTracker(dir);
 	const tickets = await tracker.list();
 	const frontier = await tracker.frontier();
-	const ready = new Set(frontier.map((t) => t.path));
+	// Key tickets by feature/number: OpenSpec tasks of one change share a tasks.md path.
+	const keyOf = (t) => `${t.feature}/${t.number}`;
+	const ready = new Set(frontier.map(keyOf));
 	const claims = await tracker.activeClaims();
 
 	if (tickets.length === 0) {
 		console.log("No tickets found in .scratch/<feature>/issues/*.md");
 	} else {
 		for (const t of tickets) {
-			const mark = ready.has(t.path) ? "→" : " ";
-			const claim = claims.find((c) => c.ticket.path === t.path);
+			const mark = ready.has(keyOf(t)) ? "→" : " ";
+			const claim = claims.find((c) => keyOf(c.ticket) === keyOf(t));
 			const claimInfo = claim ? `  pid ${claim.pid}  age ${formatAge(Date.now() - new Date(claim.at).getTime())}` : "";
 			const blocked = t.blockedBy.length ? `  blocked by ${t.blockedBy.join(", ")}` : "";
 			console.log(`${mark} ${t.feature}/${t.number}  [${t.status ?? "?"}]  ${t.title ?? ""}${claimInfo}${blocked}`);
