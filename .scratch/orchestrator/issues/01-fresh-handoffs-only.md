@@ -4,10 +4,22 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** code
 **Verify:** `npm test`
 
-- [ ] Planner table tests: every kind and mode resolves to fresh without `allowInPlace`, and to the old decision with it
-- [ ] Runner test with a backend that supports in-place: a cost/turns limit still starts a new shift and writes a handoff note
-- [ ] `allowInPlace` is validated and documented in `shiftwork init` output
+- [x] Planner table tests: every kind and mode resolves to fresh without `allowInPlace`, and to the old decision with it
+- [x] Runner test with a backend that supports in-place: a cost/turns limit still starts a new shift and writes a handoff note
+- [x] `allowInPlace` is validated and documented in `shiftwork init` output
+
+## Comments
+
+### Shift 1 — pi xai/grok-4.6 (medium)
+- Ended: stop
+- Usage: 85399 in / 11494 out tokens, $0.5299, 17 turns
+- Verify: passed
+- Outcome: resolved
+- Landed: merged shiftwork/orchestrator-01 into main
+
+### Review — Claude Code (claude-opus-5-5)
+- Accepted as is: `chooseHandoffMode` returns fresh unless `allowInPlace: true` (and the backend supports it); the runner passes the flag from config; planner and runner tests cover both sides. 17 turns on xai/grok-4.6
