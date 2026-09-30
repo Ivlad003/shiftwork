@@ -112,3 +112,10 @@ test("the README documents one install command per harness", () => {
 	assert.match(readme, /\/plugin install shiftwork@shiftwork/, "Claude Code: plugin install");
 	assert.match(readme, /\.agents\/skills\/shiftwork/, "OpenCode/Codex/Cursor: .agents/skills");
 });
+
+test("the pi-shiftwork prepack syncs into the repo root, not relative to packages/pi", () => {
+	// npm runs prepack with cwd = packages/pi; a cwd-relative sync would nest copies there.
+	execFileSync("node", ["../../scripts/sync-skills.mjs"], { cwd: path.join(repoRoot, "packages/pi"), encoding: "utf8" });
+	assert.equal(existsSync(path.join(repoRoot, "packages/pi/packages")), false);
+	assert.equal(existsSync(path.join(repoRoot, "packages/pi/plugins")), false);
+});

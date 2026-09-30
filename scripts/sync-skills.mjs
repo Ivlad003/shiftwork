@@ -49,6 +49,7 @@ const invokedDirectly =
 	process.argv[1] && path.resolve(process.argv[1]) === import.meta.filename;
 
 if (invokedDirectly) {
-	const { targets, files } = syncSkills(process.cwd());
+	// The repo root from this file, not the cwd: npm runs pi-shiftwork's prepack from packages/pi.
+	const { targets, files } = syncSkills(path.resolve(import.meta.dirname, ".."));
 	console.log(`skills/shiftwork -> ${targets.join(", ")} (${files.length} files)`);
 }

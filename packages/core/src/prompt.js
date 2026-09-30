@@ -37,7 +37,7 @@ Rules:
 - Change no files: a review reports, it never edits code or tickets.
 - Put your findings in your final message, and end it with exactly one marker:
   <shiftwork:review verdict="accept|reopen|follow-up" reason="one sentence saying why"/>
-- accept: the work is good, nothing more to do. reopen: the ticket is not done — it goes back to ready-for-agent, the landed commit stays, and the next shift fixes forward. follow-up: the work is fine but something worth doing remains — the runner files a new ticket from your reason.
+- accept: the work is good, nothing more to do. reopen: the ticket is not done — it goes back to ready-for-agent, the landed commit stays, and the next shift fixes forward. follow-up: the work is fine but something worth doing remains — the runner files a new ticket from your reason, so for follow-up write the reason as that task in one imperative sentence ("Resolve the repo root in sync-skills.mjs from the script's location and delete the stray copies"), not as praise of the landed work.
 - End with a short summary of what you found.
 `;
 

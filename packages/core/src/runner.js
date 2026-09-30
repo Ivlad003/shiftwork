@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
@@ -502,7 +502,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 
 	const verifyResult = ticket.verify.length ? await verify(ticket.verify, root) : null;
 	let followUp;
-	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { type, reason, verify: ticket.verify });
+	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { root, type, reason, verify: ticket.verify });
 	await tracker.appendComment(
 		ticket,
 		formatReviewComment({ route: plan, verdict, reason, warning, verifyResult, shift, followUp }),
@@ -511,10 +511,10 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 }
 
 /** File the follow-up ticket: a new ticket in the feature, blocked by nothing, with the reviewed ticket's verify gate. */
-async function createFollowUp(tracker, ticket, { type, reason, verify }) {
+async function createFollowUp(tracker, ticket, { root, type, reason, verify }) {
 	const title = truncate(`Follow-up to ${ticket.feature}/${ticket.number}: ${reason}`, 80);
 	const what =
-		`${/[.!?…]$/.test(reason) ? reason : `${reason}.`} Filed by the review of ${ticket.feature}/${ticket.number} — see its "### Review" block in ${ticket.path}.`;
+		`${/[.!?…]$/.test(reason) ? reason : `${reason}.`} Filed by the review of ${ticket.feature}/${ticket.number} — see its "### Review" block in ${root ? relative(root, ticket.path) : ticket.path}.`;
 	if (typeof tracker.createTicket !== "function") {
 		return { created: false, feature: ticket.feature, title, what };
 	}

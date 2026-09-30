@@ -1274,6 +1274,8 @@ test("a follow-up verdict files a new ready ticket in the feature", async () => 
 	assert.match(created, /add integration tests\. Filed by the review of f\/01/);
 	// Without a gate nothing could resolve the follow-up: it inherits the reviewed ticket's.
 	assert.match(created, /\*\*Verify:\*\* `done\.txt`/);
+	// Repo-relative, so the ticket reads the same in every checkout.
+	assert.match(created, /"### Review" block in \.scratch\/f\/issues\/01-a\.md\./);
 });
 
 test("a review without the marker is treated as accept with a warning", async () => {
