@@ -4,25 +4,50 @@
   "maxAttempts": 3,
   "worktree": {
     "enabled": true,
-    "setup": ["npm install --prefer-offline --no-audit --no-fund --ignore-scripts"]
+    "setup": [
+      "npm install --prefer-offline --no-audit --no-fund --ignore-scripts"
+    ]
   },
   "routing": {
-    "git": { "tier": "quick", "thinking": "low" },
-    "docs": { "tier": "quick", "thinking": "low" },
-    "test": { "tier": "standard" },
-    "code": { "tier": "standard" },
-    "refactor": { "tier": "premium" }
+    "git": {
+      "tier": "quick",
+      "thinking": "low"
+    },
+    "docs": {
+      "tier": "quick",
+      "thinking": "low"
+    },
+    "test": {
+      "tier": "standard"
+    },
+    "code": {
+      "tier": "standard"
+    },
+    "refactor": {
+      "tier": "premium"
+    }
   },
   "tiers": {
     "quick": {
-      "chain": ["opencode-go/deepseek-v4-flash", "xai/grok-4.3", "openrouter/~deepseek/deepseek-flash-latest"],
+      "chain": [
+        "opencode-go/space-bunny-free",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "openrouter/thinkingmachines/inkling:free",
+        "opencode-go/longcat-2.5-preview-free"
+      ],
       "thinking": "low"
     },
     "standard": {
-      "chain": ["opencode-go/kimi-k2.7-code", "xai/grok-4.6", "openrouter/anthropic/claude-sonnet-5.5"]
+      "chain": [
+        "opencode-go/kimi-k2.7-code",
+        "opencode-go/deepseek-v4-pro"
+      ]
     },
     "premium": {
-      "chain": ["xai/grok-4.7", "opencode-go/deepseek-v4-pro", "openrouter/anthropic/claude-opus-5.5"],
+      "chain": [
+        "xai/grok-4.7",
+        "openrouter/anthropic/claude-opus-5"
+      ],
       "thinking": "high"
     }
   }

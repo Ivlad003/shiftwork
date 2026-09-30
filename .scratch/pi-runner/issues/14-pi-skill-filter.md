@@ -10,3 +10,8 @@
 
 - [ ] A real pi RPC test: switching the model changes the advertised skills
 - [ ] A model without a tier leaves skills untouched
+
+## Comments
+
+### Note from the review of ticket 04
+- A first attempt at this filter slipped into ticket 04 and was removed. Two bugs to avoid: it compared tier chains (`provider/model`) with `ctx.model.id` (no provider), and skill directories with `skill.filePath` (the SKILL.md file). Use `${ctx.model.provider}/${ctx.model.id}` and compare `dirname(skill.filePath)`; reuse `planShift`'s skill resolution from shiftwork-core instead of re-implementing it.

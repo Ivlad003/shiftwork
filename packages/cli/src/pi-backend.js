@@ -63,8 +63,10 @@ export function createPiBackend(options = {}) {
 
 			const args = ["--no-session", "--approve", "--append-system-prompt", promptFile];
 			if (route.thinking) args.push("--thinking", route.thinking);
-			args.push("-ns");
-			for (const skillPath of route.skills?.paths ?? []) args.push("--skill", skillPath);
+			if (route.skills?.restricted) {
+				args.push("-ns");
+				for (const skillPath of route.skills.paths) args.push("--skill", skillPath);
+			}
 			args.push(...(options.args ?? []));
 			const client = new RpcClient({ cliPath: pi.cli, cwd, env: options.env, model: route.model, args });
 

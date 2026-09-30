@@ -24,7 +24,7 @@ export interface Route {
 	tier?: string;
 	model: string;
 	thinking: string;
-	skills: { paths: string[]; preload: string[]; warnings: string[] };
+	skills: { paths: string[]; preload: string[]; warnings: string[]; restricted: boolean };
 }
 
 export declare function parseTicket(markdown: string, path?: string): Ticket;

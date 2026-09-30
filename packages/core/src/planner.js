@@ -4,7 +4,7 @@
  * Unknown or missing Types use `defaultType`.
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
- * @returns {{ backend: "pi", type, tier?, model, thinking, skills: { paths: string[], preload: string[], warnings: string[] } }}
+ * @returns {{ backend: "pi", type, tier?, model, thinking, skills: { paths: string[], preload: string[], warnings: string[], restricted: boolean } }}
  */
 export function planShift({ ticket, config }) {
 	const type = ticket.type && config.routing?.[ticket.type] ? ticket.type : config.defaultType;
@@ -47,7 +47,10 @@ function resolveSkills({ ticket, tier, skillGroups, skillSources }) {
 		warnings,
 	);
 
-	return { paths, preload, warnings };
+	// Restrict the shift to this set only when skills are configured for the tier or the ticket;
+	// otherwise the backend keeps its own skill discovery.
+	const restricted = tier?.skills !== undefined || (ticket.skills?.length ?? 0) > 0;
+	return { paths, preload, warnings, restricted };
 }
 
 function ensureGroup(group, skillGroups, ticket) {

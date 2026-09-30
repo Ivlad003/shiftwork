@@ -102,3 +102,9 @@ const invalid = [
 for (const [input, message] of invalid) {
 	test(`validateConfig rejects ${message.source}`, () => assert.throws(() => validateConfig(input), message));
 }
+
+test("planShift: without skill config the shift isn't restricted, so backend discovery stays", () => {
+	const route = planShift({ ticket: t(), config: validateConfig({ model: "a/b" }) });
+	assert.equal(route.skills.restricted, false);
+	assert.deepEqual(route.skills.paths, []);
+});

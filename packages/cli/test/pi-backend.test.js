@@ -63,7 +63,7 @@ test("a skill outside the set is not advertised", { timeout: 90_000 }, async () 
 	});
 	const shift = await backend.startShift({
 		cwd,
-		route: { model: "scripted/s1", thinking: "off", skills: { paths: [alpha], preload: [] } },
+		route: { model: "scripted/s1", thinking: "off", skills: { paths: [alpha], preload: [], restricted: true } },
 		prompt: "hi",
 		systemPrompt: "sys",
 	});
@@ -89,7 +89,7 @@ test("preloaded skill bodies appear in the system prompt passed to the backend",
 	});
 	const shift = await backend.startShift({
 		cwd,
-		route: { model: "scripted/s1", thinking: "off", skills: { paths: [skill], preload: [skill] } },
+		route: { model: "scripted/s1", thinking: "off", skills: { paths: [skill], preload: [skill], restricted: true } },
 		prompt: "hi",
 		systemPrompt: "Worker prompt.",
 	});
