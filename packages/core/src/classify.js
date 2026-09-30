@@ -4,6 +4,7 @@ const USAGE = pattern([
 	"Monthly usage limit reached",
 	"available balance",
 	"subscription_sharing_usage_limit_exceeded",
+	"usage_limit_reached",
 	"usage.?limit",
 	"usage.?limit.?reached",
 	"usage.?limit.?resets",
@@ -21,7 +22,7 @@ const QUOTA = pattern([
 	"billing",
 ]);
 
-const RATE = pattern(["rate.?limit", "too many requests", "429", "ResourceExhausted"]);
+const RATE = pattern(["rate_limit", "rate.?limit", "too many requests", "429", "ResourceExhausted"]);
 
 const SERVER = pattern([
 	"overloaded",

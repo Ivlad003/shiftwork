@@ -1,5 +1,6 @@
 import { parseModelRef } from "shiftwork-core";
 import { createClaudeBackend } from "./claude-backend.js";
+import { createCodexBackend } from "./codex-backend.js";
 import { createPiBackend } from "./pi-backend.js";
 
 /**
@@ -10,6 +11,7 @@ export function createBackend(options = {}) {
 	const adapters = {
 		pi: createPiBackend(options.pi ?? {}),
 		claude: createClaudeBackend(options.claude ?? {}),
+		codex: createCodexBackend(options.codex ?? {}),
 	};
 
 	return {
