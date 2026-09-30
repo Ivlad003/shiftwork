@@ -1,0 +1,32 @@
+# Shiftwork
+
+> Autonomous coding agents that work in shifts: a fresh context per ticket, and a handoff to the next model when a budget or a provider limit runs out. Tickets are plain Markdown in `.scratch/<feature>/issues/`, a verify gate (not the agent) decides resolution, and reviews run as fresh shifts too. Backends: pi, Claude Code, Codex, OpenCode, Grok, Cursor.
+
+## Docs
+
+- [README](README.md): What Shiftwork is and how the packages fit together.
+- [Guide](docs/guide.md): Plain-language walkthrough: install, init, models, tiers, routing, budgets, running and steering tickets.
+- [CONTEXT](CONTEXT.md): The domain vocabulary: feature, spec, ticket, shift, budget, handoff, verify gate.
+- [RESEARCH](RESEARCH.md): The design notes (Ukrainian).
+
+## Decisions
+
+- [Tickets are Markdown files in the mattpocock-skills local tracker format](docs/adr/0001-tickets-as-mattpocock-markdown.md)
+- [Every pi shift is a separate pi process driven over RPC](docs/adr/0002-pi-shift-is-a-separate-rpc-process.md)
+- [The verify gate, not the agent, decides that a ticket is resolved](docs/adr/0003-verify-gate-decides-resolution.md)
+- [One backend-free core with thin adapters, published under unscoped names](docs/adr/0004-core-without-backend-dependencies.md)
+- [Every model change is a fresh handoff by default](docs/adr/0005-fresh-handoffs-only-by-default.md)
+
+## Specs
+
+- [Local models, fresh-context reviews, llms.txt and installable skills (phase 3)](.scratch/local-and-skills/spec.md)
+- [Shiftwork as an orchestrator (phase 2)](.scratch/orchestrator/spec.md)
+- [Parallel shifts (phase 4)](.scratch/parallel/spec.md)
+- [Shiftwork runner for pi (phase 1)](.scratch/pi-runner/spec.md)
+
+## Packages
+
+- [shiftwork (CLI)](packages/cli/README.md): The `shiftwork` command: init, run, status, verify gates, review shifts.
+- [shiftwork-core](packages/core/README.md): Ticket parsing and the frontier, with no pi/OpenCode dependencies.
+- [pi-shiftwork](packages/pi/README.md): The pi package (`pi install npm:pi-shiftwork`).
+- [opencode-shiftwork](packages/opencode/README.md): The OpenCode V2 plugin (in development).

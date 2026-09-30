@@ -6,3 +6,4 @@ node_modules/
 STOP
 logs/
 .scratch/.claims/
+llms-full.txt
