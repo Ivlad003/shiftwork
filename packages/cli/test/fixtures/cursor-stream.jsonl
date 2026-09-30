@@ -1,0 +1,20 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/worktree","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Create a file named hello.txt containing exactly 'hello from cursor' using your file editing tool, then reply with the single word DONE."}]}}
+{"type":"connection","subtype":"reconnecting","attempt":1,"endpoint_url":"https://api2.cursor.sh"}
+{"type":"retry","subtype":"starting","attempt":1,"is_resume":false}
+{"type":"connection","subtype":"reconnected"}
+{"type":"thinking","subtype":"delta","text":"I will create hello.txt"}
+{"type":"thinking","subtype":"delta","text":" with the exact text"}
+{"type":"thinking","subtype":"delta","text":" 'hello from cursor'."}
+{"type":"thinking","subtype":"delta","text":" Then I will reply with"}
+{"type":"thinking","subtype":"delta","text":" DONE."}
+{"type":"thinking","subtype":"completed"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Creating `hello.txt` with the exact contents you specified."}]}}
+{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/worktree/hello.txt","streamContent":"hello from cursor"}}}}
+{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/worktree/hello.txt","streamContent":"hello from cursor"},"result":{"success":{"path":"/worktree/hello.txt","linesAdded":1,"linesRemoved":0,"diffString":"--- /dev/null\n+++ b//worktree/hello.txt\n@@ -1,0 +1 @@\n+hello from cursor"}}}}}
+{"type":"thinking","subtype":"delta","text":"Created hello.txt with"}
+{"type":"thinking","subtype":"delta","text":" the requested content."}
+{"type":"thinking","subtype":"delta","text":" Now replying with DONE."}
+{"type":"thinking","subtype":"completed"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"DONE"}]}}
+{"type":"result","subtype":"success","duration_ms":9670,"duration_api_ms":9670,"is_error":false,"result":"Creating `hello.txt` with the exact contents you specified.DONE","usage":{"inputTokens":10051,"outputTokens":135,"cacheReadTokens":17408,"cacheWriteTokens":0}}

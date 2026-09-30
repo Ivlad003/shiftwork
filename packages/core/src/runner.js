@@ -708,7 +708,7 @@ async function classifyUntyped(ticket, config, classifyTicket) {
 	}
 }
 
-const BACKEND_UNAVAILABLE = /^(claude|codex|opencode|grok|cursor): command not found|backend not (available|installed)/i;
+const BACKEND_UNAVAILABLE = /^(claude|codex|opencode|grok|cursor(?:-agent)?): command not found|backend not (available|installed)/i;
 
 function isBackendUnavailable(message) {
 	return BACKEND_UNAVAILABLE.test(message);
