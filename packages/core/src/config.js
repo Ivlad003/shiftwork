@@ -230,8 +230,11 @@ function checkCooldown(value, path) {
 
 function checkModel(value, path, { optional = false } = {}) {
 	if (value === undefined && optional) return;
-	if (typeof value !== "string" || !/^[^/\s]+\/\S+$/.test(value)) fail(path, `expected "provider/model", got ${JSON.stringify(value)}`);
-	if (value.startsWith("CHANGE-ME")) fail(path, "replace the CHANGE-ME placeholder with a real provider/model (see pi --list-models)");
+	const cliPrefix = /^(claude|codex|opencode|grok|cursor):/;
+	const isCli = cliPrefix.test(value);
+	const validPi = /^[^/\s]+\/\S+$/.test(value);
+	if (typeof value !== "string" || (!isCli && !validPi)) fail(path, `expected "provider/model" or "backend:model", got ${JSON.stringify(value)}`);
+	if (!isCli && value.startsWith("CHANGE-ME")) fail(path, "replace the CHANGE-ME placeholder with a real provider/model (see pi --list-models)");
 }
 
 function checkSkillGroups(value, path, groups, { optional = true } = {}) {

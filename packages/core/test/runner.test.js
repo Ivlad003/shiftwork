@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { openCooldowns, openTracker, runFrontier } from "../src/index.js";
+import { openCooldowns, openTracker, runFrontier, validateConfig } from "../src/index.js";
 import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
@@ -27,7 +27,7 @@ test("a shift that makes the verify gate pass resolves the ticket with a report"
 	assert.equal(summary.resolved[0].reason, "verify passed");
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /\*\*Status:\*\* resolved/);
-	assert.match(text, /## Comments[\s\S]*### Shift 1 — fake fake\/m1[\s\S]*Verify: passed/);
+	assert.match(text, /## Comments[\s\S]*### Shift 1 — pi fake\/m1[\s\S]*Verify: passed/);
 });
 
 test("a failing verify gate starts a new attempt, then needs-info after maxAttempts", async () => {
@@ -303,7 +303,7 @@ test("a turns budget of 2 causes a fresh handoff, a Handoff note and a new shift
 	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /### Handoff — shift 1, fake\/m1 → fake\/m2, reason: budget\.maxTurns/);
-	assert.match(text, /### Shift 2 — fake fake\/m2/);
+	assert.match(text, /### Shift 2 — pi fake\/m2/);
 });
 
 test("the ticket budget ceiling ends in needs-info with the reason", async () => {
@@ -440,7 +440,7 @@ test("headings an agent writes itself never shift the runner's shift numbers", a
 
 	await run(root, fakeBackend([{ files: { "done.txt": "" } }]));
 
-	assert.match(await ticketText(root, "f", "01-a.md"), /^### Shift 1 — fake fake\/m1 \(low\)$/m);
+	assert.match(await ticketText(root, "f", "01-a.md"), /^### Shift 1 — pi fake\/m1 \(low\)$/m);
 });
 
 test("a non-compliant soft limit gets a runner handoff note at the hard limit", async () => {
@@ -1031,4 +1031,28 @@ test("before every ticket all guessed cooldowns are probed, even a fresh one", a
 
 	assert.deepEqual(probed, ["fake/m1"], "a cooldown only a minute old is still checked at ticket start");
 	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+});
+
+test("a missing cli backend is skipped like a cooling provider and does not count as an attempt", async () => {
+	const cfg = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 1,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["claude:sonnet", "fake/m1"], thinking: "low" } },
+	});
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ error: "claude: command not found" }, { files: { "done.txt": "ok" } }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "sonnet");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m1");
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.equal(state.cooldowns[0].provider, "claude");
+	assert.equal(state.cooldowns[0].kind, "usage");
+	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: usage on claude/);
 });

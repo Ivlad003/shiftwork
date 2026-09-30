@@ -55,6 +55,7 @@ export declare function planShift(options: {
 	classification?: TicketClassification | null;
 }): Plan;
 export declare const TIER_ORDER: readonly string[];
+export declare function parseModelRef(ref: string): { backend: "pi" | "claude" | "codex" | "opencode" | "grok" | "cursor"; model: string; provider: string };
 export declare function skillsForModel(
 	model: string,
 	config: Record<string, unknown>,

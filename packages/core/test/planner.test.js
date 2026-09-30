@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chooseHandoffMode, planShift, skillsForModel, validateConfig } from "../src/index.js";
+import { chooseHandoffMode, parseModelRef, planShift, skillsForModel, validateConfig } from "../src/index.js";
 
 const config = validateConfig({
 	defaultType: "code",
@@ -494,4 +494,46 @@ test("planShift: thinking order is ticket type routing → model profile → tie
 	});
 	assert.equal(planShift({ ticket: t({ type: "git" }), config: cfg }).thinking, "low", "the git type asks for low");
 	assert.equal(planShift({ ticket: t({ type: "code" }), config: cfg }).thinking, "high", "the model profile beats the tier");
+});
+
+const refCases = [
+	["pi provider/model", "anthropic/sonnet", { backend: "pi", model: "anthropic/sonnet", provider: "anthropic" }],
+	["claude prefix", "claude:sonnet", { backend: "claude", model: "sonnet", provider: "claude" }],
+	["codex prefix", "codex:gpt-5.6-terra", { backend: "codex", model: "gpt-5.6-terra", provider: "codex" }],
+	["opencode prefix with slash", "opencode:opencode-go/kimi-k3", { backend: "opencode", model: "opencode-go/kimi-k3", provider: "opencode" }],
+	["grok prefix", "grok:grok-4.7", { backend: "grok", model: "grok-4.7", provider: "grok" }],
+	["cursor prefix", "cursor:claude-sonnet-4", { backend: "cursor", model: "claude-sonnet-4", provider: "cursor" }],
+	["empty ref", "", { backend: "pi", model: "", provider: "" }],
+];
+
+for (const [name, ref, expected] of refCases) {
+	test(`parseModelRef: ${name}`, () => {
+		assert.deepEqual(parseModelRef(ref), expected);
+	});
+}
+
+test("planShift: a claude model ref sets backend and provider", () => {
+	const cfg = validateConfig({
+		thinking: "low",
+		routing: { code: { model: "claude:sonnet" } },
+	});
+	const route = planShift({ ticket: t({ type: "code" }), config: cfg });
+	assert.equal(route.backend, "claude");
+	assert.equal(route.model, "sonnet");
+	assert.equal(route.provider, "claude");
+});
+
+test("planShift: a cooled cli backend is skipped", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["claude:sonnet", "anthropic/sonnet"] } },
+	});
+	const route = planShift({
+		ticket: t({ type: "code" }),
+		config: cfg,
+		cooldowns: [{ provider: "claude", until: "2099-01-01T00:00:00Z", kind: "usage" }],
+	});
+	assert.equal(route.backend, "pi");
+	assert.equal(route.model, "anthropic/sonnet");
+	assert.equal(route.provider, "anthropic");
 });

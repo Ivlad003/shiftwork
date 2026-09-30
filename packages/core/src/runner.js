@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
-import { chooseHandoffMode, planShift, resolveTicketBudget } from "./planner.js";
+import { chooseHandoffMode, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
 import { buildShiftPrompt, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
 
@@ -179,7 +179,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			await tracker.setStatus(ticket, NEEDS_INFO);
 			return { action: NEEDS_INFO, reason: plan.stop };
 		}
-		const route = { ...plan, backend: backend.name };
+		const route = plan;
 		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
 		const softLimitPct = config.softLimitPct ?? 80;
 		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
@@ -241,8 +241,11 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: "stop", reason: "STOP file" };
 		}
 
-		const limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
-		const provider = route.model.split("/")[0];
+		let limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
+		if (!limit && shift.error && isBackendUnavailable(shift.error)) {
+			limit = { kind: "usage" };
+		}
+		const provider = route.provider;
 		const until = limit ? (limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
 		if (limit) await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(limit.resetAt) });
 		// The limit may have hit after the work was done: if the gate passes, the ticket is resolved.
@@ -431,7 +434,7 @@ async function probeCooldowns({ backend, cooldowns, config, now, force = false, 
 		if (cooldown.exact) continue;
 		const last = new Date(cooldown.probedAt ?? cooldown.at ?? 0).getTime();
 		if (!force && now.getTime() - last < everyMs) continue;
-		const model = models.find((m) => m.split("/")[0] === cooldown.provider);
+		const model = models.find((m) => parseModelRef(m).provider === cooldown.provider);
 		if (!model) continue;
 		const ok = await backend.probe(model).catch(() => false);
 		log({ type: "probe", provider: cooldown.provider, model, ok });
@@ -698,6 +701,12 @@ async function classifyUntyped(ticket, config, classifyTicket) {
 	} catch {
 		return { classification: null, classificationNote: "Jev unavailable, used default type" };
 	}
+}
+
+const BACKEND_UNAVAILABLE = /^(claude|codex|opencode|grok|cursor): command not found|backend not (available|installed)/i;
+
+function isBackendUnavailable(message) {
+	return BACKEND_UNAVAILABLE.test(message);
 }
 
 function shiftReport({ number, route, shift, verifyResult, decision, classificationNote }) {

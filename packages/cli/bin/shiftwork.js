@@ -167,14 +167,14 @@ async function run(argv) {
 		return 0;
 	}
 
-	const { createPiBackend } = await import("../src/pi-backend.js");
+	const { createBackend } = await import("../src/backend-registry.js");
 	const { createJevClassifier } = await import("../src/jev.js");
 	const { runVerify } = await import("../src/verify.js");
-	const backend = createPiBackend(config.pi ?? {});
+	const backend = createBackend({ pi: config.pi, claude: config.claude });
 	const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 	const classifyTicket = createJevClassifier({ config, agentDir });
 	const workspace = await createWorkspace(root, config, values["no-worktree"]);
-	console.log(`shiftwork: pi ${backend.pi.version} · max ${config.maxAttempts} attempts per ticket`);
+	console.log(`shiftwork: registry · max ${config.maxAttempts} attempts per ticket`);
 
 	const summary = await runFrontier({
 		root,

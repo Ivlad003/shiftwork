@@ -118,6 +118,6 @@ export { noRunState, openRunState } from "./run-state.js";
 export { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";
 export { decideNext, runFrontier } from "./runner.js";
 export { loadConfig, THINKING_LEVELS, validateConfig } from "./config.js";
-export { chooseHandoffMode, planShift, resolveTicketBudget, skillsForModel, TIER_ORDER } from "./planner.js";
+export { chooseHandoffMode, parseModelRef, planShift, resolveTicketBudget, skillsForModel, TIER_ORDER } from "./planner.js";
 export { applyProfileContext, createMeter } from "./meter.js";
 export { classifyError, cooldownMs, DEFAULT_COOLDOWN_MS } from "./classify.js";

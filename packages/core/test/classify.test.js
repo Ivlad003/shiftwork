@@ -22,6 +22,8 @@ const cases = [
 	["subscription_sharing_usage_limit_exceeded", , "usage"],
 	["You've hit your Claude usage limit", , "usage"],
 	["usage limit reached", , "usage"],
+	["Claude Code usage limit reached", , "usage"],
+	["Claude Code limit resets at 2026-10-01T00:00:00Z", , "usage"],
 	["available balance required to continue", , "usage"],
 
 	// Quota / billing

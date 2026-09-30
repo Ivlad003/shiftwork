@@ -54,7 +54,8 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 	});
 }
 
-function buildRoute({ ticket, config, type, typeSource, model, tierName, thinking, history, onExceed, capRemaining = false }) {
+function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierName, thinking, history, onExceed, capRemaining = false }) {
+	const ref = modelRef ?? parseModelRef(model);
 	const tier = tierName ?? tierForModel(model, config);
 	const profile = config.models?.[model];
 	const think = thinking ?? profile?.thinking ?? config.tiers?.[tier]?.thinking ?? config.thinking;
@@ -70,11 +71,12 @@ function buildRoute({ ticket, config, type, typeSource, model, tierName, thinkin
 		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
 	);
 	return {
-		backend: "pi",
+		backend: ref.backend,
+		model: ref.model,
+		provider: ref.provider,
 		type,
 		typeSource,
 		tier,
-		model,
 		thinking: think,
 		skills,
 		budget,
@@ -155,7 +157,7 @@ function isBlocked(model, blocked) {
 }
 
 function providerOf(model) {
-	return String(model).split("/")[0];
+	return parseModelRef(model).provider;
 }
 
 function isCooling(model, cooldowns, now) {
@@ -206,6 +208,25 @@ const AUTO_IN_PLACE_KINDS = new Set(["maxCostUsd", "maxTokens", "maxTurns"]);
  * the backend supports `inPlaceHandoff`, and `auto`/`same-process` would have kept the session.
  * `auto` keeps the session for cost/token/turn limits when the target window can hold current usage.
  */
+const CLI_BACKENDS = ["claude", "codex", "opencode", "grok", "cursor"];
+
+/**
+ * Split a model reference into its backend and model id.
+ * Prefixes `claude:`, `codex:`, `opencode:`, `grok:` and `cursor:` select a CLI backend.
+ * A reference without a prefix goes to the pi backend and its provider is the first segment.
+ * @returns {{ backend: "pi" | "claude" | "codex" | "opencode" | "grok" | "cursor", model: string, provider: string }}
+ */
+export function parseModelRef(ref) {
+	if (!ref || typeof ref !== "string") return { backend: "pi", model: ref ?? "", provider: "" };
+	for (const backend of CLI_BACKENDS) {
+		const prefix = `${backend}:`;
+		if (ref.startsWith(prefix)) {
+			return { backend, model: ref.slice(prefix.length), provider: backend };
+		}
+	}
+	return { backend: "pi", model: ref, provider: ref.split("/")[0] };
+}
+
 export function chooseHandoffMode({
 	mode,
 	kind,

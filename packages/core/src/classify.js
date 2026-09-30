@@ -5,8 +5,12 @@ const USAGE = pattern([
 	"available balance",
 	"subscription_sharing_usage_limit_exceeded",
 	"usage.?limit",
+	"usage.?limit.?reached",
+	"usage.?limit.?resets",
 	"hit your (?:claude |openai |chatgpt )?(?:usage |token )?limit",
 	"reached your (?:claude |openai |chatgpt )?(?:usage |token )?limit",
+	"claude code usage limit",
+	"claude code limit",
 ]);
 
 const QUOTA = pattern([
