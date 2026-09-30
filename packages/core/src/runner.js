@@ -11,6 +11,7 @@ const NEEDS_INFO = "needs-info";
 const RESOLVED = "resolved";
 const READY = "ready-for-agent";
 const STOP_FILE = "STOP";
+const WAIT_STEP_MS = 60_000;
 /** Only the runner's own shift reports: "### Shift N — <backend> <model> (<thinking>)". */
 const SHIFT_REPORT = /^### Shift (\d+) — \S+ \S+ \([^)]*\)$/gm;
 const MARKER = /<shiftwork:needs-info\s+reason="([^"]*)"\s*\/>/;
@@ -135,7 +136,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		if (plan.wait) {
 			const ms = Math.max(0, new Date(plan.wait).getTime() - now.getTime());
 			log({ ticket, event: { type: "wait", until: plan.wait, ms } });
-			await clock.sleep(ms);
+			// Wake at least once a minute so a STOP file is noticed during long cooldowns.
+			await clock.sleep(Math.min(ms, WAIT_STEP_MS));
 			continue;
 		}
 		const route = { ...plan, backend: backend.name };
@@ -162,10 +164,12 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		accumulateUsage(ticketUsage, shift);
 
 		const limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
-		if (limit) {
-			const provider = route.model.split("/")[0];
-			const until = limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind));
-			await cooldowns.add(provider, until, limit.kind);
+		const provider = route.model.split("/")[0];
+		const until = limit ? (limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
+		if (limit) await cooldowns.add(provider, until, limit.kind);
+		// The limit may have hit after the work was done: if the gate passes, the ticket is resolved.
+		const limitGate = limit && ticket.verify.length > 0 && shift.needsInfo === null ? await verify(ticket.verify, cwd) : null;
+		if (limit && !limitGate?.ok) {
 			await tracker.appendComment(
 				ticket,
 				[
@@ -185,7 +189,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 		const hasVerify = ticket.verify.length > 0;
 		// A handed-off shift may already have finished the work: the gate decides either way.
-		const verifyResult = shift.needsInfo === null && hasVerify ? await verify(ticket.verify, cwd) : null;
+		const verifyResult = limitGate ?? (shift.needsInfo === null && hasVerify ? await verify(ticket.verify, cwd) : null);
 		let decision = decideNext({
 			attempt,
 			maxAttempts,

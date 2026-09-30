@@ -639,3 +639,37 @@ test("auto mode with a smaller target window does a fresh handoff instead of com
 	assert.equal(backend.shifts[0].swaps.length, 0);
 	assert.equal(backend.shifts[0].compactions.length, 0);
 });
+
+test("a provider limit after the work is done still lets the verify gate resolve the ticket", async () => {
+	const cfg = chainTwoProviders();
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" }, error: '429: {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}' }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.equal(backend.shifts.length, 1, "no relaunch when the gate already passes");
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.equal(state.cooldowns[0].kind, "usage", "the provider still cools down for later tickets");
+});
+
+test("a long cooldown is waited out in steps of at most a minute, so a STOP file is noticed", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const cfg = chainTwoProviders();
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	await openCooldowns(root).add("fake", new Date(t0 + 5 * 3600_000), "usage");
+	await openCooldowns(root).add("other", new Date(t0 + 5 * 3600_000), "usage");
+	const { writeFile } = await import("node:fs/promises");
+	const stopAfter = clock.sleep.bind(clock);
+	clock.sleep = async (ms) => {
+		await stopAfter(ms);
+		if (clock.sleeps.length === 3) await writeFile(`${root}/STOP`, "");
+	};
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend: fakeBackend([]), verify: fileVerify(), config: cfg, clock });
+
+	assert.equal(summary.exitCode, 3);
+	assert.ok(clock.sleeps.every((ms) => ms <= 60_000));
+	assert.equal(clock.sleeps.length, 3);
+});
