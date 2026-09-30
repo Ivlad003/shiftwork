@@ -53,7 +53,17 @@ export function parseTicket(markdown, path = "") {
 		budget: field(markdown, "Budget"),
 		verify: commands(field(markdown, "Verify")),
 		checkboxes,
+		lastRoute: lastRoute(markdown),
 	};
+}
+
+/** Model of the latest runner shift report: `### Shift N — <backend> <model> (<thinking>)`. */
+function lastRoute(markdown) {
+	let model;
+	for (const match of markdown.matchAll(/^### Shift \d+ — \S+ (\S+) \([^)]*\)$/gm)) {
+		model = match[1];
+	}
+	return model;
 }
 
 /** Verify commands: the backtick-quoted spans; without backticks, split on "·". */
@@ -102,7 +112,7 @@ export async function loadTickets(root = process.cwd()) {
 	}
 	return tickets;
 }
-export { openTracker } from "./tracker.js";
+export { formatTicketsTable, openTracker } from "./tracker.js";
 export { openCooldowns } from "./cooldowns.js";
 export { noRunState, openRunState } from "./run-state.js";
 export { buildShiftPrompt, WORKER_PROMPT } from "./prompt.js";

@@ -16,6 +16,8 @@ export interface Ticket {
 	budget?: string;
 	verify: string[];
 	checkboxes: { done: boolean; text: string }[];
+	/** Model of the latest shift report, when one exists. */
+	lastRoute?: string;
 }
 
 export interface TicketClassification {
@@ -136,6 +138,7 @@ export interface Cooldown {
 	kind?: string;
 }
 
+export declare function formatTicketsTable(tickets: Ticket[]): string;
 export declare function openTracker(root: string): {
 	list(): Promise<(Ticket & { feature: string })[]>;
 	frontier(): Promise<(Ticket & { feature: string })[]>;

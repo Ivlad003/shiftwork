@@ -1,7 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { CLAIMED, frontier, loadTickets, READY } from "./index.js";
+
+const TABLE_START = "<!-- shiftwork:tickets:start -->";
+const TABLE_END = "<!-- shiftwork:tickets:end -->";
+
+/** Markdown table of tickets: NN · title · status · last route. */
+export function formatTicketsTable(tickets) {
+	const header = "| NN | title | status | last route |";
+	const sep = "| -- | ----- | ------ | ---------- |";
+	const rows = [...tickets]
+		.sort((a, b) => Number(a.number) - Number(b.number) || String(a.title ?? "").localeCompare(String(b.title ?? "")))
+		.map((t) => `| ${t.number ?? ""} | ${cell(t.title)} | ${cell(t.status)} | ${cell(t.lastRoute)} |`);
+	return [header, sep, ...rows].join("\n");
+}
+
+function cell(value) {
+	return String(value ?? "").replaceAll("|", "\\|");
+}
 
 /** Open the tracker of the repo at `root` (tickets under `.scratch/<feature>/issues/`). */
 export function openTracker(root) {
@@ -39,6 +56,7 @@ export function openTracker(root) {
 				if (!(await createExclusive(path, owner))) return null;
 			}
 			await setStatusLine(t.path, CLAIMED);
+			await syncSpecTable(root, t.feature);
 			return { ticket: t, path, ...owner };
 		},
 
@@ -58,7 +76,11 @@ export function openTracker(root) {
 			return live;
 		},
 
-		setStatus: (ticketOrClaim, status) => setStatusLine(pathOf(ticketOrClaim), status),
+		async setStatus(ticketOrClaim, status) {
+			const path = pathOf(ticketOrClaim);
+			await setStatusLine(path, status);
+			await syncSpecTable(root, featureOf(ticketOrClaim, path));
+		},
 
 		async appendComment(ticketOrClaim, markdown) {
 			const path = pathOf(ticketOrClaim);
@@ -72,6 +94,35 @@ export function openTracker(root) {
 
 function pathOf(ticketOrClaim) {
 	return ticketOrClaim.ticket?.path ?? ticketOrClaim.path;
+}
+
+function featureOf(ticketOrClaim, path) {
+	return ticketOrClaim.ticket?.feature ?? ticketOrClaim.feature ?? basename(dirname(dirname(path)));
+}
+
+async function syncSpecTable(root, feature) {
+	if (!feature) return;
+	const specPath = join(root, ".scratch", feature, "spec.md");
+	let spec;
+	try {
+		spec = await readFile(specPath, "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return;
+		throw error;
+	}
+	const tickets = (await loadTickets(root)).filter((t) => t.feature === feature);
+	const next = applyTicketsTable(spec, formatTicketsTable(tickets));
+	if (next !== spec) await writeAtomic(specPath, next);
+}
+
+function applyTicketsTable(spec, table) {
+	const startIdx = spec.indexOf(TABLE_START);
+	const endIdx = spec.indexOf(TABLE_END);
+	if (startIdx !== -1 && endIdx >= startIdx + TABLE_START.length) {
+		return `${spec.slice(0, startIdx)}${TABLE_START}\n${table}\n${TABLE_END}${spec.slice(endIdx + TABLE_END.length)}`;
+	}
+	const prefix = spec.endsWith("\n") ? spec : `${spec}\n`;
+	return `${prefix}\n${TABLE_START}\n${table}\n${TABLE_END}\n`;
 }
 
 async function setStatusLine(path, status) {

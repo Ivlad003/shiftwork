@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { loadConfig, openCooldowns, openTracker, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { formatTicketsTable, loadConfig, openCooldowns, openTracker, runFrontier, validateConfig, VERSION } from "shiftwork-core";
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
@@ -79,6 +79,11 @@ async function status(argv) {
 			console.log(`${mark} ${t.feature}/${t.number}  [${t.status ?? "?"}]  ${t.title ?? ""}${claimInfo}${blocked}`);
 		}
 		console.log(`\n${ready.size} ready of ${tickets.length} tickets (→ = frontier)`);
+		const features = [...new Set(tickets.map((t) => t.feature))].sort();
+		for (const feature of features) {
+			console.log(`\n${feature}`);
+			console.log(formatTicketsTable(tickets.filter((t) => t.feature === feature)));
+		}
 	}
 
 	if (claims.length === 0) {

@@ -60,3 +60,19 @@ test("status shows the frontier, active claims and cooldowns", async () => {
 	assert.match(stdout, /Cooldowns:\s*\n  fake\/provider \(rate\)/);
 	assert.match(stdout, /remaining/);
 });
+
+test("status prints a per-feature table with last route", async () => {
+	const root = await repo({
+		"orch/01-a.md": `${t("01", "First")}\n## Comments\n\n### Shift 1 — fake fake/m1 (low)\n- Ended: ok\n`,
+		"orch/02-b.md": t("02", "Second"),
+		"other/01-c.md": t("01", "Other"),
+	});
+
+	const { stdout, stderr } = await exec(["status", "--dir", root]);
+
+	assert.equal(stderr, "");
+	assert.match(stdout, /orch[\s\S]*\|\s*NN\s*\|\s*title\s*\|\s*status\s*\|\s*last route\s*\|/);
+	assert.match(stdout, /\|\s*01\s*\|\s*First\s*\|\s*ready-for-agent\s*\|\s*fake\/m1\s*\|/);
+	assert.match(stdout, /\|\s*02\s*\|\s*Second\s*\|\s*ready-for-agent\s*\|\s*\|/);
+	assert.match(stdout, /other[\s\S]*\|\s*01\s*\|\s*Other\s*\|\s*ready-for-agent\s*\|/);
+});

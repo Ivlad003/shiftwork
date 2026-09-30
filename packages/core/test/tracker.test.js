@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, readdir, readFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { openTracker } from "../src/index.js";
 import { makeRepo, ticket } from "./helpers.js";
@@ -124,6 +124,78 @@ test("a failed write leaves the ticket intact and no temp files behind", { skip:
 
 	assert.equal(await readFile(t.path, "utf8"), body);
 	assert.deepEqual(await readdir(dir), ["01-a.md"]);
+});
+
+const START = "<!-- shiftwork:tickets:start -->";
+const END = "<!-- shiftwork:tickets:end -->";
+
+test("setStatus updates the spec table and leaves bytes outside the markers unchanged", async () => {
+	const prefix = "# Spec\n\nKeep this `code` and <!-- comment -->.\n\n";
+	const suffix = "\n\nFooter must stay.\n";
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A") });
+	await writeFile(join(root, ".scratch", "f", "spec.md"), `${prefix}${START}\nOLD TABLE\n${END}${suffix}`);
+	const tracker = openTracker(root);
+	const [t] = await tracker.list();
+
+	await tracker.setStatus(t, "resolved");
+
+	const spec = await readFile(join(root, ".scratch", "f", "spec.md"), "utf8");
+	assert.equal(spec.slice(0, prefix.length), prefix);
+	assert.equal(spec.slice(spec.indexOf(END) + END.length), suffix);
+	assert.equal(spec.includes("OLD TABLE"), false);
+	const table = spec.slice(spec.indexOf(START) + START.length, spec.indexOf(END));
+	assert.match(table, /\|\s*NN\s*\|\s*title\s*\|\s*status\s*\|\s*last route\s*\|/);
+	assert.match(table, /\|\s*01\s*\|\s*A\s*\|\s*resolved\s*\|\s*\|/);
+});
+
+test("missing spec markers are appended once, and a missing spec.md is left alone", async () => {
+	const body = "# Spec\n\nStories.\n";
+	const withSpec = await makeRepo({ "f/01-a.md": ticket("01", "A") });
+	await writeFile(join(withSpec, ".scratch", "f", "spec.md"), body);
+	const tracker = openTracker(withSpec);
+	const [t] = await tracker.list();
+
+	await tracker.setStatus(t, "claimed");
+	await tracker.setStatus(t, "resolved");
+
+	const spec = await readFile(join(withSpec, ".scratch", "f", "spec.md"), "utf8");
+	assert.equal(spec.startsWith(body), true);
+	assert.equal(spec.split(START).length - 1, 1);
+	assert.equal(spec.split(END).length - 1, 1);
+	assert.match(spec, /\|\s*01\s*\|\s*A\s*\|\s*resolved\s*\|/);
+
+	const noSpec = await makeRepo({ "g/01-b.md": ticket("01", "B") });
+	const other = openTracker(noSpec);
+	const [u] = await other.list();
+	await other.setStatus(u, "resolved");
+	await assert.rejects(readFile(join(noSpec, ".scratch", "g", "spec.md")), { code: "ENOENT" });
+});
+
+test("the last route column shows the model of the latest shift report", async () => {
+	const extra = [
+		"",
+		"## Comments",
+		"",
+		"### Shift 1 — fake fake/m1 (low)",
+		"- Ended: ok",
+		"",
+		"### Shift 2 — fake anthropic/sonnet (medium)",
+		"- Ended: ok",
+		"",
+	].join("\n");
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra }) });
+	await writeFile(
+		join(root, ".scratch", "f", "spec.md"),
+		`# Spec\n\n${START}\n${END}\n`,
+	);
+	const tracker = openTracker(root);
+	const [t] = await tracker.list();
+
+	await tracker.setStatus(t, "claimed");
+
+	const spec = await readFile(join(root, ".scratch", "f", "spec.md"), "utf8");
+	assert.match(spec, /\|\s*01\s*\|\s*A\s*\|\s*claimed\s*\|\s*anthropic\/sonnet\s*\|/);
+	assert.equal(spec.includes("fake/m1"), false);
 });
 
 function deadPid() {
