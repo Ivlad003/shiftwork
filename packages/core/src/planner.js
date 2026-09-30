@@ -305,6 +305,23 @@ function tierForModel(model, config) {
 	return undefined;
 }
 
+/**
+ * Skill set for an interactive session on this model: the model's tier, no ticket adjustments.
+ * A model that is not in any chain is unrestricted (the caller keeps every advertised skill).
+ */
+export function skillsForModel(model, config) {
+	const tier = tierForModel(model, config);
+	return {
+		tier,
+		skills: resolveSkills({
+			ticket: { skills: [] },
+			tier: config.tiers?.[tier],
+			skillGroups: config.skillGroups ?? {},
+			skillSources: config.skillSources ?? {},
+		}),
+	};
+}
+
 function resolveSkills({ ticket, tier, skillGroups, skillSources }) {
 	const warnings = [];
 	const granted = new Set(tier?.skills ?? []);

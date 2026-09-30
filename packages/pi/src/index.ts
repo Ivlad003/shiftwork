@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { frontier, loadTickets, openRunState, type RunState } from "shiftwork-core";
+import { frontier, loadConfig, loadTickets, openRunState, skillsForModel, type RunState } from "shiftwork-core";
 
 const WIDGET = "shiftwork";
 const POLL_MS = 1000;
@@ -16,6 +17,8 @@ const SUBCOMMANDS = [
 export default function (pi: ExtensionAPI) {
 	/** One poller per session: it reads the runner state and keeps the widget in sync. */
 	let poller: NodeJS.Timeout | undefined;
+	/** Models already told they have no tier, so the notice is once per session. */
+	const noticed = new Set<string>();
 
 	function stopWatching(ctx: ExtensionContext, clearWidget = false) {
 		if (poller) clearInterval(poller);
@@ -57,6 +60,8 @@ export default function (pi: ExtensionAPI) {
 		stopWatching(ctx, true);
 	});
 
+	pi.on("before_agent_start", (event, ctx) => applyTierSkills(event, ctx, noticed).catch(() => {}));
+
 	pi.registerCommand("shift", {
 		description: "Shiftwork: /shift shows the frontier · /shift run [--feature <slug>] · /shift stop",
 		getArgumentCompletions: (prefix) => SUBCOMMANDS.filter((s) => s.value.startsWith(prefix.trim())),
@@ -68,6 +73,38 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Shiftwork: unknown subcommand "${subcommand}". Use /shift, /shift run or /shift stop.`, "warning");
 		},
 	});
+}
+
+/**
+ * Narrow advertised skills to the current model's tier, using the same config as the runner.
+ * Follows `/model` because `ctx.model` is the live model. No tier → leave skills as they are.
+ */
+async function applyTierSkills(
+	event: { systemPromptOptions: { skills?: { filePath: string }[] } },
+	ctx: ExtensionContext,
+	noticed: Set<string>,
+) {
+	if (!ctx.model) return;
+	const model = `${ctx.model.provider}/${ctx.model.id}`;
+	let config;
+	try {
+		config = await loadConfig(ctx.cwd, process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
+	} catch {
+		return;
+	}
+	const { tier, skills } = skillsForModel(model, config);
+	if (!tier) {
+		if (ctx.hasUI && !noticed.has(model)) {
+			noticed.add(model);
+			ctx.ui.notify(`Shiftwork: ${model} is not in any tier; keeping all skills`, "info");
+		}
+		return;
+	}
+	if (!skills.restricted) return;
+	const allowed = new Set(skills.paths.map((path) => resolve(ctx.cwd, path)));
+	event.systemPromptOptions.skills = event.systemPromptOptions.skills?.filter((skill) =>
+		allowed.has(resolve(dirname(skill.filePath))),
+	);
 }
 
 /** `/shift` and `/shift status`: the frontier, plus what the runner is doing now. */

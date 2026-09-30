@@ -52,6 +52,10 @@ export declare function planShift(options: {
 	classification?: TicketClassification | null;
 }): Plan;
 export declare const TIER_ORDER: readonly string[];
+export declare function skillsForModel(
+	model: string,
+	config: Record<string, unknown>,
+): { tier: string | undefined; skills: Route["skills"] };
 
 export type LimitKind = "rate" | "usage" | "quota" | "server";
 
@@ -71,6 +75,7 @@ export declare function chooseHandoffMode(options: {
 	targetContextWindow?: number;
 }): { mode: "same-process" | "new-process"; compact: boolean };
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
+export declare function loadConfig(root: string, userDir?: string): Promise<Record<string, unknown>>;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
 export declare const THINKING_LEVELS: readonly string[];
 

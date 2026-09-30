@@ -18,8 +18,9 @@ While a runner works, a widget above the editor shows the current ticket, shift,
 
 The runner is the `shiftwork` CLI, resolved from the `shiftwork` package next to this one, from `./node_modules/shiftwork`, or from `SHIFTWORK_BIN` when set.
 
+Interactive sessions use the same skill tiers as the runner: `before_agent_start` keeps only the current model's tier skill set, and follows `/model`. A model that is not in any tier keeps every skill and is told so once.
+
 In development:
-- skill tiers per model (`before_agent_start`)
 - a virtual model with provider fallback
 
 Status: early development.
