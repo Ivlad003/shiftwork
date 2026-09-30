@@ -213,6 +213,27 @@ Each CLI backend has an optional block with `command`, `args`, `env` and `timeou
 
 `codex.sandbox`: `"approve-for-me"` (default), `"workspace-write"`, or `"bypass"` when the environment is already isolated, or when bwrap can't create a sandbox.
 
+### Project instructions: AGENTS.md and CLAUDE.md
+
+Agents read your repo's instruction files themselves. Checked live on 2026-09-30:
+
+| Backend | Reads `AGENTS.md` | Reads `CLAUDE.md` |
+|---|---|---|
+| pi (`provider/model`) | yes | only when there's no `AGENTS.md` in the same folder |
+| Claude Code (`claude:`) | no | yes |
+| Codex (`codex:`) | yes | no |
+| OpenCode (`opencode:`) | yes | only when there's no `AGENTS.md` |
+| Cursor (`cursor:`) | yes | yes |
+| Grok CLI (`grok:`) | no | no (fix planned: ticket `local-and-skills/05`) |
+
+So keep the rules in `AGENTS.md` and make `CLAUDE.md` a single line, `@AGENTS.md`: every agent then sees the same rules. `xai/…` models run through pi and do get them.
+
+Two things to keep in mind:
+- Agents work in a git worktree, which only has **committed** files. An uncommitted or gitignored `AGENTS.md` (or `CLAUDE.local.md`) isn't there.
+- The worktree is under `~/.cache/shiftwork/worktrees/`, so instruction files in the **parent folders** of your repo aren't picked up. Global ones (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`) work as usual.
+
+On top of these, every agent gets Shiftwork's own `.pi/shiftwork-worker.md`.
+
 ## 7. Running and watching
 
 ```bash
