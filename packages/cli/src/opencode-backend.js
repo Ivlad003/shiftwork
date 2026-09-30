@@ -98,6 +98,8 @@ export function createOpencodeBackend(options = {}) {
 				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
 				maxBuffer: 256 * 1024 * 1024,
 			});
+			// CLIs such as `opencode run` read piped stdin as extra prompt and wait for EOF: close it.
+			child.stdin?.end();
 
 			child.stderr?.on("data", (chunk) => {
 				stderr += chunk;

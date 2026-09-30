@@ -228,3 +228,31 @@ live(
 		assert.deepEqual(events.at(-1), { type: "end", stopReason: "stop" });
 	},
 );
+
+test("a shift closes stdin, so a CLI that reads stdin until EOF (like opencode run) doesn't hang", { timeout: 20_000 }, async () => {
+	const { mkdtemp: mk, writeFile: wf, chmod: ch } = await import("node:fs/promises");
+	const { tmpdir: td } = await import("node:os");
+	const { join: j } = await import("node:path");
+	const { createOpencodeBackend } = await import("../src/opencode-backend.js");
+	const binDir = await mk(j(td(), "sw-oc-stdin-"));
+	await wf(
+		j(binDir, "opencode"),
+		`#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on("end", () => {
+	console.log(JSON.stringify({ type: "text", part: { type: "text", text: "OK" } }));
+	process.exit(0);
+});
+`,
+	);
+	await ch(j(binDir, "opencode"), 0o755);
+	const backend = createOpencodeBackend({ env: { PATH: `${binDir}:${process.env.PATH}` } });
+	const shift = await backend.startShift({ cwd: await mk(j(td(), "sw-oc-cwd-")), route: { model: "p/m", skills: { paths: [], preload: [] } }, prompt: "p", systemPrompt: "s" });
+	const events = [];
+	for await (const event of shift.events) {
+		events.push(event);
+		if (event.type === "end") break;
+	}
+	await shift.close?.();
+	assert.equal(events.at(-1).type, "end");
+});
