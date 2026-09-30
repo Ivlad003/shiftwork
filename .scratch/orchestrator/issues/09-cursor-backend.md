@@ -1,6 +1,6 @@
 # 09: Cursor CLI (`cursor-agent`) backend
 
-**What to build:** Add the `cursor:` backend for Cursor's CLI: `cursor-agent -p --output-format stream-json --model <m> <prompt>`. `cursor-agent` is **not installed on this machine**: implement it from Cursor's CLI docs, test it with a fake binary, and record in Comments which flags still need live confirmation (spec story 16).
+**What to build:** Add the `cursor:` backend for Cursor's CLI. `cursor-agent` 2026.09.28 is installed here, and its flags were checked with `--help`: `cursor-agent -p --output-format stream-json --model <m> --force --trust --workspace <worktree> [--plugin-dir <generated skills plugin>] <prompt>`. Use `--list-models` for the available models. Don't use its own `--worktree`: Shiftwork already gives the shift a worktree. It isn't logged in yet (`cursor-agent status` → "Not logged in"): an auth error must be classified so the backend is skipped with a clear warning, not retried (spec story 16). This command instaled curl https://cursor.com/install -fsS | bash. But whan i run agent in terminal grok opened it's wrong behavior.
 
 **Blocked by:** 05
 
@@ -10,4 +10,5 @@
 
 - [ ] A fake `cursor-agent` binary drives success, a limit error and a missing binary
 - [ ] A missing `cursor-agent` is skipped with a warning, not an error
-- [ ] The flags still to confirm live are listed in the ticket
+- [ ] "Authentication required" / "Not logged in" makes the backend unavailable with a warning (like a missing binary), not a cooldown
+- [ ] An optional live check runs behind `SHIFTWORK_LIVE_CURSOR=1`
