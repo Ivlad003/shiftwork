@@ -712,10 +712,13 @@ async function classifyUntyped(ticket, config, classifyTicket) {
 	}
 }
 
-const BACKEND_UNAVAILABLE = /^(claude|codex|opencode|grok|cursor(?:-agent)?): command not found|backend not (available|installed)/i;
+const BACKEND_UNAVAILABLE = /^(?:claude|codex|opencode|grok|cursor(?:-agent)?): command not found|backend not (?:available|installed)/i;
+// A stopped server (Ollama, a proxy) refuses connections: the backend is unavailable,
+// like a missing CLI, instead of cooling as a provider limit.
+const CONNECTION_REFUSED = /connection (?:was )?refused|ECONNREFUSED/i;
 
 function isBackendUnavailable(message) {
-	return BACKEND_UNAVAILABLE.test(message);
+	return BACKEND_UNAVAILABLE.test(message) || CONNECTION_REFUSED.test(message);
 }
 
 function shiftReport({ number, route, shift, verifyResult, decision, classificationNote }) {

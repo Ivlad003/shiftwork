@@ -115,8 +115,9 @@ function pickModel(args) {
  */
 function preferWaitOverPaid(picked, { config, tierName, cooldowns, now, blockedModels = [] }) {
 	const paid = new Set(config.paidProviders ?? []);
-	// OpenRouter-style `:free` models cost nothing even when their provider is listed as paid.
-	const isPaid = (model) => paid.has(providerOf(model)) && !String(model).endsWith(":free");
+	// OpenRouter-style `:free` models and local `ollama/…` models cost nothing even when
+	// their provider is listed as paid.
+	const isPaid = (model) => paid.has(providerOf(model)) && !isFreeModel(model);
 	if (!picked.model || !isPaid(picked.model)) return picked;
 	const t = now instanceof Date ? now.getTime() : new Date(now).getTime();
 	const limit = t + (config.preferWaitMin ?? 30) * 60_000;
@@ -160,6 +161,12 @@ function isBlocked(model, blocked) {
 
 function providerOf(model) {
 	return parseModelRef(model).provider;
+}
+
+/** Models that never cost anything: OpenRouter `…:free` ids and local `ollama/…` models. */
+function isFreeModel(model) {
+	const ref = String(model);
+	return ref.endsWith(":free") || providerOf(ref) === "ollama";
 }
 
 /**

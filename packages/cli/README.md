@@ -13,6 +13,8 @@ npx shiftwork run --once                          # work one ticket
 npx shiftwork run                                 # work the frontier until nothing is left
 ```
 
+Local models through [Ollama](https://ollama.com): `npx shiftwork init --ollama` discovers them (`OLLAMA_HOST`, default `http://localhost:11434`), adds an `ollama` provider to `~/.pi/agent/models.json` and a `local` tier to `.pi/shiftwork.json`. Route ticket types to it with `routing.<type>.tier: "local"`. Local models are never paid, and a stopped Ollama server makes the backend unavailable instead of cooling.
+
 Tickets live in `.scratch/<feature>/issues/NN-slug.md`, in the [mattpocock-skills](https://github.com/mattpocock/skills) format, and are resolved only by their `**Verify:**` commands. Every shift is a fresh `pi --mode rpc --no-session` process. Its report goes to the ticket's `## Comments`, and its events go to `logs/<feature>/<NN>/`.
 
 In a git repo, every ticket runs in its own worktree on branch `shiftwork/<feature>-<NN>`, outside the repo under `~/.cache/shiftwork/worktrees/`. A resolved ticket is committed and merged into the branch you started from; a ticket that needs info keeps its branch. Dependencies aren't copied into worktrees: set `worktree.setup`, for example `["npm ci --ignore-scripts"]`. Files the setup creates are never committed. Use `--no-worktree` to work in the main checkout.

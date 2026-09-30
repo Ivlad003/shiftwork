@@ -538,6 +538,20 @@ test("planShift: a cooled cli backend is skipped", () => {
 	assert.equal(route.provider, "anthropic");
 });
 
+test("planShift: an ollama model is never paid, even when its provider is listed as paid", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "quick" } },
+		tiers: { quick: { chain: ["sub/a", "ollama/llama3.2:latest"] } },
+		paidProviders: ["ollama"],
+		preferWaitMin: 30,
+	});
+	const now = new Date("2026-01-01T00:00:00Z");
+	const soon = [{ provider: "sub", until: "2026-01-01T00:05:00Z", kind: "server" }];
+	const plan = planShift({ ticket: t({ type: "code" }), config: cfg, cooldowns: soon, now });
+	assert.equal(plan.model, "ollama/llama3.2:latest", "local models are used instead of waiting for a subscription model");
+	assert.ok(!plan.wait);
+});
+
 test("planShift: a ':free' model of a paid provider is used without waiting", () => {
 	const cfg = validateConfig({
 		routing: { code: { tier: "quick" } },

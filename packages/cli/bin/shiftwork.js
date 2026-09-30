@@ -8,8 +8,11 @@ import { formatTicketsTable, loadConfig, openCooldowns, openRepoTracker, runFron
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
 Usage:
-  shiftwork init [--model <provider/id>] [--force]
+  shiftwork init [--model <provider/id>] [--ollama] [--force]
                                 Create .pi/shiftwork.json, the worker prompt and pi settings
+                                --ollama: also discover local Ollama models (OLLAMA_HOST),
+                                add an ollama provider to ~/.pi/agent/models.json and a
+                                local tier to .pi/shiftwork.json
   shiftwork status [dir] [--dir <path>]
                                 List tickets and the frontier of ready ones
   shiftwork run [options]       Work the frontier until nothing is left

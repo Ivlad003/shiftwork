@@ -1057,6 +1057,33 @@ test("a missing cli backend is skipped like a cooling provider and does not coun
 	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: usage on claude/);
 });
 
+test("an ECONNREFUSED ollama shift marks the backend unavailable instead of cooling a server error", async () => {
+	const cfg = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 1,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["ollama/llama3.2:latest", "fake/m1"], thinking: "low" } },
+	});
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ error: "fetch failed: connect ECONNREFUSED 127.0.0.1:11434" },
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: cfg });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "ollama/llama3.2:latest");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m1");
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.equal(state.cooldowns[0].provider, "ollama");
+	assert.equal(state.cooldowns[0].kind, "usage");
+	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: usage on ollama/);
+});
+
 test("an unavailable cursor-agent (missing or not logged in) is skipped like a cooling provider", async () => {
 	for (const error of ["cursor-agent: command not found", "cursor-agent backend not available: not logged in (run `cursor-agent login`)"]) {
 		const cfg = validateConfig({
