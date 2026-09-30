@@ -1,0 +1,29 @@
+{
+  "defaultType": "code",
+  "thinking": "medium",
+  "maxAttempts": 3,
+  "worktree": {
+    "enabled": true,
+    "setup": ["npm install --prefer-offline --no-audit --no-fund --ignore-scripts"]
+  },
+  "routing": {
+    "git": { "tier": "quick", "thinking": "low" },
+    "docs": { "tier": "quick", "thinking": "low" },
+    "test": { "tier": "standard" },
+    "code": { "tier": "standard" },
+    "refactor": { "tier": "premium" }
+  },
+  "tiers": {
+    "quick": {
+      "chain": ["opencode-go/deepseek-v4-flash", "xai/grok-4.3", "openrouter/~deepseek/deepseek-flash-latest"],
+      "thinking": "low"
+    },
+    "standard": {
+      "chain": ["opencode-go/kimi-k2.7-code", "xai/grok-4.6", "openrouter/anthropic/claude-sonnet-5.5"]
+    },
+    "premium": {
+      "chain": ["xai/grok-4.7", "opencode-go/deepseek-v4-pro", "openrouter/anthropic/claude-opus-5.5"],
+      "thinking": "high"
+    }
+  }
+}

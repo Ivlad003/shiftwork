@@ -11,3 +11,8 @@
 - [ ] `status` works with no tickets, no config and no state file
 - [ ] A STOP file created mid-run stops after the current shift with exit code 3 and no leftover claim
 - [ ] The summary lists resolved and needs-info tickets with a reason each
+
+## Comments
+
+### Note from the real-model smoke test (2026-09-30)
+- After a re-run of a needs-info ticket, shift numbering restarts at "Shift 1" next to the earlier Shift 1–3. Continue numbering from the reports already in the ticket (count existing `### Shift N — ` headings), so the Comments read as one history.

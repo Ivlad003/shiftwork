@@ -51,9 +51,16 @@ export function parseTicket(markdown, path = "") {
 		model: field(markdown, "Model"),
 		skills: list(field(markdown, "Skills"), /\s+/),
 		budget: field(markdown, "Budget"),
-		verify: list(field(markdown, "Verify")),
+		verify: commands(field(markdown, "Verify")),
 		checkboxes,
 	};
+}
+
+/** Verify commands: the backtick-quoted spans; without backticks, split on "·". */
+function commands(value) {
+	if (!value) return [];
+	const quoted = [...value.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter(Boolean);
+	return quoted.length ? quoted : list(value, /·/);
 }
 
 function pad(number) {
