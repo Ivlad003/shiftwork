@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { frontier, loadConfig, openCooldowns, openRepoTracker, planShift, shouldReview, validateConfig } from "shiftwork-core";
+import { frontier, loadConfig, openCooldowns, openRepoTracker, planShift, reviewWhen, shouldReview, validateConfig } from "shiftwork-core";
 import { createJevClassifier } from "./jev.js";
 
 /** Plan each frontier ticket, classifying untyped ones, and print the route. Spends nothing besides classify. */
@@ -14,11 +14,13 @@ export async function dryRunFrontier({ tickets, config, cooldowns = [], classify
 	}
 }
 
-/** The review column of a dry-run line: the review tier, "no", or nothing when reviews are off. */
+/** The review column of a dry-run line: the review tier and where it runs, "no",
+ * or nothing when reviews are off. */
 export function reviewColumn(config, ticket, route) {
 	const review = config.review;
 	if (!review?.enabled) return undefined;
-	return shouldReview(config, { ...ticket, type: route.type }) ? (review.tier ?? "-") : "no";
+	if (!shouldReview(config, { ...ticket, type: route.type })) return "no";
+	return `${review.tier ?? "-"} (${reviewWhen(config) === "after-land" ? "after land" : "before land"})`;
 }
 
 export async function classifyUntyped(ticket, config, classifyTicket) {

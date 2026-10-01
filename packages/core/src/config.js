@@ -24,7 +24,7 @@ const DEFAULTS = {
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
-	review: { enabled: true, when: "resolve" },
+	review: { enabled: true, when: "before-land", maxRounds: 2 },
 };
 
 /** The review shift's whole budget, when reviews run: only `review.budget` itself lifts a field of it. */
@@ -301,9 +301,10 @@ function checkJev(value, path) {
 	return out;
 }
 
-const REVIEW_WHEN = ["resolve"];
+// `resolve` is `after-land`'s old name, still accepted as an alias.
+const REVIEW_WHEN = ["before-land", "after-land", "resolve"];
 // `reason` is an output of checkReview only (why reviews are off with no tier), never an operator field.
-const REVIEW_FIELDS = ["enabled", "tier", "when", "features", "types", "budget"];
+const REVIEW_FIELDS = ["enabled", "tier", "when", "maxRounds", "features", "types", "budget"];
 // The conventional tier ladder strongest first: the default review tier picks the strongest configured one.
 const STRONGEST_TIER_ORDER = [...TIER_ORDER].reverse();
 
@@ -312,7 +313,7 @@ export const REVIEW_NO_TIER_REASON = "no tier to review on; set review.tier";
 
 function checkReview(value, path, tiers) {
 	// `review: false` opts out entirely; `true` is every default. Anything else must be the object form.
-	if (value === false) return { enabled: false, when: "resolve" };
+	if (value === false) value = { enabled: false };
 	if (value === true || value === undefined) value = {};
 	if (!isPlainObject(value)) fail(path, "must be an object, true or false");
 	// `reason` is this function's own output (why reviews are off with no tier), never an operator
@@ -327,7 +328,10 @@ function checkReview(value, path, tiers) {
 	}
 	const out = { ...DEFAULTS.review, ...value };
 	if (typeof out.enabled !== "boolean") fail(`${path}.enabled`, "must be true or false");
+	// `resolve` is `after-land`'s old name: normalized here so a validated config always carries the new one.
+	if (out.when === "resolve") out.when = "after-land";
 	if (!REVIEW_WHEN.includes(out.when)) fail(`${path}.when`, `must be one of ${REVIEW_WHEN.join(", ")}`);
+	if (!Number.isInteger(out.maxRounds) || out.maxRounds < 1) fail(`${path}.maxRounds`, "must be a positive integer");
 	if (out.tier !== undefined && !tiers[out.tier]) fail(`${path}.tier`, `unknown tier "${out.tier}"`);
 	// No explicit tier: review on the strongest configured tier, else the first declared one.
 	if (out.enabled && out.tier === undefined) {

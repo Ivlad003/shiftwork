@@ -15,7 +15,7 @@
 
 ## The `shiftwork` skill
 
-One install command per harness (the same skill: writing tickets, running the runner, reviewing landed work):
+One install command per harness (the same skill: writing tickets, running the runner, reviewing a ticket's work):
 
 | Harness | Command |
 | --- | --- |

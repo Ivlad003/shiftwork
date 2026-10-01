@@ -62,8 +62,9 @@ Run options:
   --no-limit <limits>    Lift only these limits: tokens, cost, turns, time, context, stall
                         (comma-separated or repeated; adds to "unlimited" in the config)
   --no-review            Turn review shifts off for this run (they are on by default:
-                        every resolved ticket is reviewed once, on the strongest
-                        configured tier — see "review" in .pi/shiftwork.json)
+                        every ticket is reviewed once on the strongest configured
+                        tier, on its branch before it lands — see "review" in
+                        .pi/shiftwork.json)
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 

@@ -79,7 +79,7 @@ A branch that no longer lands because a parallel ticket landed first: it is reba
 _Avoid_: merge clash, collision
 
 **Review shift**:
-One shift in a fresh context after a ticket lands, on its own tier, judging the work and ending with a verdict: accept, reopen or follow-up.
+One shift in a fresh context on its own tier, judging a ticket's change and ending with a verdict: accept, reopen or follow-up. By default it runs on the unlanded branch, in the ticket's worktree, before anything lands; `review.when: "after-land"` moves it after the landing.
 _Avoid_: code review, QA pass, checker
 
 **Handoff**:

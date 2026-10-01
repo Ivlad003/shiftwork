@@ -134,11 +134,11 @@ test("run --dry-run shows whether a ticket would be reviewed and on which tier",
 	});
 	await exec(["init", "--dir", root, "--model", "prov/model-a"]);
 
-	// No review block: reviews are on by default, on the strongest configured tier.
+	// No review block: reviews are on by default, on the strongest configured tier, before each ticket lands.
 	const on = await exec(["run", "--dry-run", "--dir", root]);
 	assert.match(on.stdout, /shiftwork: review · premium for every ticket/);
-	assert.match(on.stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}review=premium {2}Commit it/);
-	assert.match(on.stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=[^\n]* {2}review=premium {2}Build it/);
+	assert.match(on.stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}review=premium \(before land\) {2}Commit it/);
+	assert.match(on.stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=[^\n]* {2}review=premium \(before land\) {2}Build it/);
 
 	// Filters narrow the reviews to some tickets only.
 	const path = join(root, ".pi", "shiftwork.json");
@@ -149,8 +149,17 @@ test("run --dry-run shows whether a ticket would be reviewed and on which tier",
 	const { stdout } = await exec(["run", "--dry-run", "--dir", root]);
 
 	assert.match(stdout, /shiftwork: review · premium for types git/);
-	assert.match(stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}review=premium {2}Commit it/);
+	assert.match(stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}review=premium \(before land\) {2}Commit it/);
 	assert.match(stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=[^\n]* {2}review=no {2}Build it/);
+
+	// `when: "after-land"` (or its old name "resolve") reviews after the landing instead.
+	config.review = { enabled: true, tier: "premium", when: "after-land" };
+	await writeFile(path, JSON.stringify(config));
+
+	const after = await exec(["run", "--dry-run", "--dir", root]);
+
+	assert.match(after.stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=[^\n]* {2}review=premium \(after land\) {2}Commit it/);
+	assert.match(after.stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=[^\n]* {2}review=premium \(after land\) {2}Build it/);
 });
 
 test("run --no-review turns the review column off for that run", async () => {

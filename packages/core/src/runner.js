@@ -41,14 +41,21 @@ function checkStop(root) {
 	return existsSync(join(root, STOP_FILE));
 }
 
-/** Whether a resolved ticket gets a review shift: `review: { enabled, tier, when, features?, types? }`. */
+/** Whether a resolved ticket gets a review shift: `review: { enabled, tier, features?, types? }`.
+ * Both orders review — `review.when` decides only where the review runs (`reviewWhen`). */
 export function shouldReview(config, ticket) {
 	const review = config.review;
 	if (!review?.enabled) return false;
-	if ((review.when ?? "resolve") !== "resolve") return false;
 	if (review.features?.length && !review.features.includes(ticket.feature)) return false;
 	if (review.types?.length && !review.types.includes(ticket.type)) return false;
 	return true;
+}
+
+/** Where the review shift runs: on the ticket's unlanded branch, before anything lands (the
+ * default), or after the ticket has landed. `"resolve"` is `"after-land"`'s old name and
+ * reads as it. Works with raw, unvalidated configs (a missing `when` is the default). */
+export function reviewWhen(config) {
+	return config.review?.when === "after-land" || config.review?.when === "resolve" ? "after-land" : "before-land";
 }
 
 /**
@@ -333,9 +340,63 @@ function withLandingQueue(workspace) {
 	};
 }
 
+/**
+ * Land the ticket's resolved branch, re-running its gate on every rebased state while a
+ * parallel landing keeps moving the target (up to `landRetries` rounds, default 5). Pushes the
+ * landing notes into `notes`; the outcome tells the caller what happened: "landed" (message),
+ * "redo" (a landing conflict: one fix-forward from the new target), or NEEDS_INFO (reason: the
+ * target would not stand still, or the landing failed outright). In a parallel run every
+ * `land` here goes through the queue in withLandingQueue, so the rounds stay
+ * one-landing-at-a-time like any other landing.
+ */
+async function landResolvedBranch({ ticket, workspace, verify, config, cwd, notes, conflictRedone }) {
+	let landed = await workspace.land(ticket);
+	let rebases = 0;
+	while (!landed.ok && landed.rebase) {
+		if (rebases >= (config.landRetries ?? 5)) {
+			// The target moved once per round of the whole budget: the branch is kept, a human lands it.
+			const branch = (await workspace.keep(ticket)).branch;
+			return {
+				outcome: NEEDS_INFO,
+				reason: `the target kept moving (${rebases} rebases); branch ${branch} kept — land it with shiftwork run --ticket ${ticket.feature}/${ticket.number} or merge it by hand`,
+			};
+		}
+		// A parallel landing moved the target: the branch is rebased onto it in its worktree,
+		// and the gate must pass on that integrated state before the branch lands (story 4).
+		rebases++;
+		const integrated = await verify(ticket.verify, cwd);
+		const failed = integrated.ok ? null : integrated.results.find((r) => r.code !== 0);
+		notes.push(
+			`- Target moved to ${landed.rebase}: branch rebased onto it, verify gate re-run: ${
+				integrated.ok ? "passed" : `failed at \`${failed?.cmd}\` (${failed?.code})`
+			}`,
+		);
+		if (!integrated.ok) {
+			return { outcome: NEEDS_INFO, reason: `verify gate failed on the branch rebased onto ${landed.rebase} (\`${failed?.cmd}\`)` };
+		}
+		landed = await workspace.land(ticket);
+	}
+	notes.push(`- Landed: ${landed.message}`);
+	if (landed.ok) return { outcome: "landed", message: landed.message };
+	if (landed.conflict && !conflictRedone) {
+		// One fix-forward per ticket: the note below tells the next shift what landed first.
+		notes.push(`- Landing conflict with ${landed.conflict.files.join(", ") || "the target"}; redone on top of ${landed.conflict.commit}`);
+		return { outcome: "redo" };
+	}
+	return { outcome: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
+}
+
+/** How many reopen verdicts the ticket already carries (the current review's own comment included). */
+function countReopenVerdicts(text) {
+	return (text.match(/^- Verdict: reopen\b/gm) ?? []).length;
+}
+
 async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState, slots }) {
 	let cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
-	const earlier = [...(await readFile(ticket.path, "utf8")).matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
+	const initialText = await readFile(ticket.path, "utf8");
+	const earlier = [...initialText.matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
+	// The last review of the ticket ended in reopen: the next shift's prompt points at its findings.
+	const reopenedByReview = /^- Verdict: reopen/m.test(initialText.slice(Math.max(0, initialText.lastIndexOf("### Review"))));
 	const firstShift = earlier.length ? Math.max(...earlier) + 1 : 1;
 	let shiftNumber = firstShift;
 	let firstPlan = true;
@@ -398,7 +459,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			await clock.sleep(WAIT_STEP_MS);
 			continue;
 		}
-		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root });
+		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root, reopenedByReview });
 		const softLimitPct = config.softLimitPct ?? 80;
 		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
 		const publish = await publishShift(runState ?? noRunState(), { ticket, attempt, shift: shiftNumber, route });
@@ -578,57 +639,19 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			decision = { action: NEEDS_INFO, reason: "verify gate passed but no shift changed anything: the gate doesn't test this ticket" };
 		}
 		let redoNext = false;
-		if (workspace && decision.action === "resolve") {
-			let landed = await workspace.land(ticket);
-			// A parallel landing can move the target again while the gate re-runs on the rebased
-			// branch: keep rebasing, re-verifying and landing while it moves, up to `landRetries`
-			// rounds (default 5). In a parallel run every `land` here goes through the queue in
-			// withLandingQueue, so the rounds stay one-landing-at-a-time like any other landing.
-			let rebases = 0;
-			while (!landed.ok && landed.rebase) {
-				if (rebases >= (config.landRetries ?? 5)) {
-					// The target moved once per round of the whole budget: the branch is kept, a human lands it.
-					const branch = (await workspace.keep(ticket)).branch;
-					decision = {
-						action: NEEDS_INFO,
-						reason: `the target kept moving (${rebases} rebases); branch ${branch} kept — land it with shiftwork run --ticket ${ticket.feature}/${ticket.number} or merge it by hand`,
-					};
-					landed = null;
-					break;
-				}
-				// A parallel landing moved the target: the branch is rebased onto it in its worktree,
-				// and the gate must pass on that integrated state before the branch lands (story 4).
-				rebases++;
-				const integrated = await verify(ticket.verify, cwd);
-				const failed = integrated.ok ? null : integrated.results.find((r) => r.code !== 0);
-				notes.push(
-					`- Target moved to ${landed.rebase}: branch rebased onto it, verify gate re-run: ${
-						integrated.ok ? "passed" : `failed at \`${failed?.cmd}\` (${failed?.code})`
-					}`,
-				);
-				if (!integrated.ok) {
-					decision = { action: NEEDS_INFO, reason: `verify gate failed on the branch rebased onto ${landed.rebase} (\`${failed?.cmd}\`)` };
-					landed = null;
-					break;
-				}
-				landed = await workspace.land(ticket);
-			}
-			if (landed) {
-				notes.push(`- Landed: ${landed.message}`);
-				if (landed.ok) landedMessage = landed.message;
-				else if (landed.conflict && !conflictRedone) {
-					// One fix-forward per ticket: the note below tells the next shift what landed first.
-					conflictRedone = true;
-					notes.push(
-						`- Landing conflict with ${landed.conflict.files.join(", ") || "the target"}; redone on top of ${landed.conflict.commit}`,
-					);
-					redoNext = true;
-					// The report says what happens next: this shift's work is redone, not resolved.
-					decision = { action: "redo", reason: "landing conflict" };
-				} else {
-					decision = { action: NEEDS_INFO, reason: `verify gate passed but landing failed: ${landed.message}` };
-				}
-			}
+		// Before-land: the review shift judges the unlanded branch in its worktree first (in the
+		// resolve branch below); the landing, and its notes, happen only after the review accepts.
+		const beforeLand =
+			workspace && decision.action === "resolve" && reviewWhen(config) === "before-land" && shouldReview(config, { ...ticket, type: route.type });
+		if (!beforeLand && workspace && decision.action === "resolve") {
+			const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes, conflictRedone });
+			if (landing.outcome === "landed") landedMessage = landing.message;
+			else if (landing.outcome === "redo") {
+				conflictRedone = true;
+				redoNext = true;
+				// The report says what happens next: this shift's work is redone, not resolved.
+				decision = { action: "redo", reason: "landing conflict" };
+			} else decision = { action: NEEDS_INFO, reason: landing.reason };
 		}
 		if (workspace && decision.action === NEEDS_INFO && notes.length === 0) {
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
@@ -646,11 +669,79 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		}
 
 		if (decision.action === "resolve") {
+			// Before-land: one review shift judges the unlanded branch, in the ticket's worktree,
+			// before anything lands; a landing after an accepted review re-runs the gate only, never
+			// the review.
+			let review = null;
+			if (beforeLand) {
+				review = await runReviewShift({
+					root,
+					ticket,
+					tracker,
+					backend,
+					verify,
+					config,
+					clock,
+					cooldowns,
+					log,
+					type: route.type,
+					cwd,
+					target: typeof workspace.target === "function" ? await workspace.target(ticket) : undefined,
+					slots,
+				});
+				if (review.verdict === "reopen") {
+					// Reopen rounds are bounded: after review.maxRounds reopens on one ticket a human
+					// takes over — nothing has landed, the branch and its worktree are kept.
+					const reopens = countReopenVerdicts(await readFile(ticket.path, "utf8"));
+					if (reopens >= (config.review?.maxRounds ?? 2)) {
+						const branch = (await workspace.keep(ticket)).branch;
+						await tracker.appendComment(ticket, `- Review rejected it ${reopens} times; branch ${branch} kept`);
+						await tracker.setStatus(ticket, NEEDS_INFO);
+						return { action: NEEDS_INFO, reason: `review rejected it ${reopens} times; branch ${branch} kept` };
+					}
+					// runReviewShift has put the ticket back to ready-for-agent: the next shift
+					// continues on the same branch and worktree, with the review findings in its prompt.
+					return { action: "reopen", reason: review.reason, review };
+				}
+				// No verdict twice is no silent accept: nothing lands, the branch is kept for a human.
+				if (review.verdict === "none") {
+					await tracker.appendComment(ticket, `- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+					return { action: NEEDS_INFO, reason: review.reason, review };
+				}
+				// A review stopped by the runner stopping is no missing verdict: no retry, no needs-info —
+				// nothing lands, the ticket goes back to the frontier, the next run reviews it again.
+				if (review.verdict === "stopped") {
+					await tracker.setStatus(ticket, READY);
+					return { action: "stop", reason: "STOP file" };
+				}
+				// accept, follow-up (filed by the review itself) or skip (no reviewer free): land.
+				const landingNotes = [];
+				const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes: landingNotes, conflictRedone });
+				if (landing.outcome === "redo") {
+					// The landing conflicted with a parallel one: the work is redone in a fresh
+					// worktree, and the redone work gets a fresh review after its gate passes.
+					conflictRedone = true;
+					await tracker.appendComment(ticket, landingNotes.join("\n"));
+					if (typeof workspace.redo === "function") await workspace.redo(ticket);
+					cwd = (await workspace.prepare(ticket)).cwd;
+					continue;
+				}
+				if (landing.outcome === "landed") {
+					await tracker.appendComment(ticket, landingNotes.join("\n"));
+					landedMessage = landing.message;
+				} else {
+					if (landingNotes.length === 0) landingNotes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+					await tracker.appendComment(ticket, landingNotes.join("\n"));
+					await tracker.setStatus(ticket, NEEDS_INFO);
+					return { action: NEEDS_INFO, reason: landing.reason };
+				}
+			}
 			await tracker.setStatus(ticket, RESOLVED);
-			const reason = notes.length ? notes[notes.length - 1].replace(/^- Landed: /, "") : "verify passed";
-			// After a landing, one review shift in a fresh context judges the work (stories 4–6).
-			if (shouldReview(config, { ...ticket, type: route.type })) {
-				const review = await runReviewShift({
+			const reason = landedMessage ?? (notes.length ? notes[notes.length - 1].replace(/^- Landed: /, "") : "verify passed");
+			// After a landing (or without a workspace, before-land included), one review shift in
+			// a fresh context judges the work (stories 4–6).
+			if (!beforeLand && shouldReview(config, { ...ticket, type: route.type })) {
+				review = await runReviewShift({
 					root,
 					ticket,
 					tracker,
@@ -667,9 +758,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				if (review.verdict === "reopen") return { action: "reopen", reason: review.reason, review };
 				// No verdict twice is no silent accept: the ticket goes to needs-info, the landed commit stays.
 				if (review.verdict === "none") return { action: NEEDS_INFO, reason: review.reason, review };
-				return { action: "resolve", reason, review };
 			}
-			return { action: "resolve", reason };
+			return { action: "resolve", reason, review: review ?? undefined };
 		}
 		if (decision.action === NEEDS_INFO) {
 			await tracker.setStatus(ticket, NEEDS_INFO);
@@ -709,18 +799,21 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 }
 
 /**
- * One review shift on the review tier, in a fresh context, after a ticket lands.
- * The reviewer reads the ticket, the spec and the landed diff, runs the verify gate
- * and ends with a verdict marker; the runner records it as `### Review` in Comments.
+ * One review shift on the review tier, in a fresh context, judging a ticket's change:
+ * after it lands (`landed`), or on its unlanded branch in the ticket's worktree before
+ * anything lands (`cwd` + `target`: the review runs there, and its prompt points at the
+ * branch diff). The reviewer reads the ticket, the spec and the diff, runs the verify
+ * gate and ends with a verdict marker; the runner records it as `### Review` in Comments.
  * A review that ends without a valid verdict (an unknown verdict word counts as none)
  * is retried once, in a fresh context, on the next model of the review tier's chain;
  * a second miss is no silent accept — the ticket goes to needs-info for a human.
  * A review stopped by the runner stopping (a STOP file or a signal) is none of that:
  * not a missing verdict, so no retry and no needs-info — the ticket stays as it is
- * (resolved, the landed commit kept), recorded as not finished, for the next run.
+ * (after-land: resolved, the landed commit kept; before-land: the caller keeps the
+ * branch and puts the ticket back on the frontier), recorded as not finished, for the next run.
  * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip" | "stopped", reason: string, warnings?: string[], followUp?: object }>}
  */
-async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots }) {
+async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target }) {
 	const review = config.review;
 	const now = clock.now();
 	// Plan on the review tier as if the ticket were untyped and unrouted: the review is its own job.
@@ -743,7 +836,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 	// `unlimited` list lifts it — only `review.budget` itself does.
 	const route = { ...plan, budget: review.budget };
 
-	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots });
+	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target });
 	if (first.notRun) {
 		await tracker.appendComment(ticket, `### Review\n- Not run: ${first.notRun}`);
 		return { verdict: "skip", reason: first.notRun };
@@ -758,7 +851,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		// No verdict is not accept: once more, in a fresh context, on the next model of the chain.
 		warnings.push(outcome.why);
 		retryRoute = nextReviewRoute(route, config, review);
-		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots });
+		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots, cwd, target });
 		finalShift = second.shift ?? finalShift;
 		outcome = second.notRun
 			? { verdict: null, reason: null, why: `${retryRoute.model}: ${second.notRun}` }
@@ -786,12 +879,14 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		reason = NO_VERDICT_REASON;
 	}
 
-	// reopen puts the ticket back on the frontier: the landed commit stays, the next shift fixes forward.
+	// reopen puts the ticket back on the frontier: after-land, the landed commit stays and the
+	// next shift fixes forward; before-land, nothing has landed and the caller keeps the branch.
 	if (verdict === "reopen") await tracker.setStatus(ticket, READY);
-	// none hands the ticket to a human: the landed commit stays, the review is recorded as none.
+	// none hands the ticket to a human: the landed commit stays (after-land) or the branch is
+	// kept (before-land, by the caller); the review is recorded as none.
 	if (verdict === "none") await tracker.setStatus(ticket, NEEDS_INFO);
 
-	const verifyResult = ticket.verify.length ? await verify(ticket.verify, root) : null;
+	const verifyResult = ticket.verify.length ? await verify(ticket.verify, cwd ?? root) : null;
 	let followUp;
 	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { root, type, reason, verify: ticket.verify });
 	await tracker.appendComment(
@@ -804,8 +899,9 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 	return { verdict, reason, warnings, followUp };
 }
 
-/** Run one review shift on `route`: its own provider slot, the reviewer prompt, no handoffs, the wrap-up steer at its soft limit. */
-async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots }) {
+/** Run one review shift on `route`: its own provider slot, the reviewer prompt, no handoffs, the wrap-up steer at its soft limit.
+ * `cwd` is where the review runs — the ticket's worktree for a before-land review, else the repo. */
+async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target }) {
 	const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
 	if (slots && !releaseSlot) return { notRun: `${route.provider} is at its concurrency cap` };
 	try {
@@ -813,9 +909,9 @@ async function runOneReviewShift({ root, ticket, backend, config, route, landed,
 			backend,
 			{
 				root,
-				cwd: root,
+				cwd: cwd ?? root,
 				route,
-				prompt: buildReviewPrompt(ticket, { root, landed }),
+				prompt: buildReviewPrompt(ticket, { root, landed, target, absolute: Boolean(cwd && cwd !== root) }),
 				systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
 				softLimitPct: config.softLimitPct ?? 80,
 				ticketPath: ticket.path,

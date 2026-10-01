@@ -155,6 +155,11 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 			return { ok: true, message: `merged ${branch} into ${into}` };
 		},
 
+		/** The branch tickets land into: a before-land review's branch diff points at it. */
+		async target() {
+			return resolveTarget();
+		},
+
 		/** Drop the ticket's worktree and branch, so the next prepare starts fresh from the target
 		 * (fix-forward after a landing conflict). */
 		async redo(t) {

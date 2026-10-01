@@ -128,6 +128,6 @@ export async function init(argv, { root = process.cwd(), log = console.log, env 
 		log('route ticket types to local models with routing.<type>.tier: "local" in .pi/shiftwork.json');
 	}
 	log("handoffs start a fresh context by default; set allowInPlace: true in .pi/shiftwork.json to restore in-place swaps");
-	log('every resolved ticket gets one review shift on the strongest configured tier; turn reviews off with "review": false or "shiftwork run --no-review"');
+	log('every ticket gets one review shift on the strongest configured tier, on its branch before it lands; turn reviews off with "review": false or "shiftwork run --no-review"');
 	if (!values.model) log('\nNext: replace the CHANGE-ME models in .pi/shiftwork.json (see "pi --list-models"), then "shiftwork run --dry-run".');
 }

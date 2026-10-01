@@ -96,7 +96,10 @@ export interface Review {
 	enabled: boolean;
 	/** Tier the review shift runs on; the strongest configured tier by default. */
 	tier?: string;
-	when?: "resolve";
+	/** Where the review shift runs: on the ticket's unlanded branch, before anything lands (the default), or after the ticket lands. `"resolve"` is `"after-land"`'s old name, still accepted. */
+	when?: "before-land" | "after-land" | "resolve";
+	/** Reopen verdicts a before-land review allows on one ticket before it goes to needs-info with the branch kept (default 2). */
+	maxRounds?: number;
 	/** Why reviews are off despite being on by default: no tier to review on. */
 	reason?: string;
 	/** Feature names that get reviews; every feature when omitted. */
@@ -109,6 +112,8 @@ export interface Review {
 
 /** Whether a resolved ticket gets one review shift on the review tier. */
 export declare function shouldReview(config: { review?: Review } & Record<string, unknown>, ticket: { feature?: string; type?: string }): boolean;
+/** Where the review shift runs: "before-land" (the default) or "after-land" ("resolve" reads as it). */
+export declare function reviewWhen(config: { review?: Review } & Record<string, unknown>): "before-land" | "after-land";
 
 export interface GitHubLabels {
 	/** The label that hands an issue to Shiftwork; required in every `github` block. */

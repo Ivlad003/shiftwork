@@ -1,6 +1,6 @@
 ---
 name: shiftwork
-description: Drive Shiftwork, the ticket runner that works `.scratch/<feature>/issues/*.md` tickets in fresh-context shifts until their Verify commands pass. Use when writing or triaging a Shiftwork ticket (the Status/Type/Model/Skills/Budget/Verify lines), when running or steering the runner (`shiftwork run`, `status`, `tui`, or `/shift` in pi), or when judging a landed ticket as a review shift.
+description: Drive Shiftwork, the ticket runner that works `.scratch/<feature>/issues/*.md` tickets in fresh-context shifts until their Verify commands pass. Use when writing or triaging a Shiftwork ticket (the Status/Type/Model/Skills/Budget/Verify lines), when running or steering the runner (`shiftwork run`, `status`, `tui`, or `/shift` in pi), or when judging a ticket's change as a review shift.
 license: MIT
 ---
 
@@ -29,9 +29,9 @@ Reach for the references when the branch needs them:
 5. Dark-factory takes work from GitHub issues instead: `npx shiftwork run --dark-factory` polls the repo (`github` block in `.pi/shiftwork.json`, collaborators only, labels required), imports and plans each issue, works the frontier and reports back on the issue; `--once` is one poll plus one pass. It needs the operator's `gh` CLI (`gh auth login`) — see docs/guide.md "Dark-factory mode".
 6. The run is done when every ticket is `resolved` and its Verify commands pass in a clean checkout, or when a ticket carries `<shiftwork:needs-info reason="…"/>` for what only the operator knows.
 
-## Review landed work
+## Review work
 
-1. Read the ticket, all of its `## Comments`, the feature spec, and the landed diff: `git log -3 --oneline`, then `git show <sha>` for each landed commit.
+1. Read the ticket, all of its `## Comments`, and the feature spec. The review runs by default on the ticket's unlanded branch, in its worktree, before anything lands: `git diff <target>...HEAD` for the change and `git log <target>..HEAD` for its commits. With `review.when: "after-land"` it runs after the landing instead: `git log -3 --oneline`, then `git show <sha>` for each landed commit.
 2. Run the ticket's Verify commands yourself before deciding anything.
 3. Judge against the ticket's acceptance criteria, the spec and the repo's standards, not against what you would have written.
-4. Change no files: a review reports. End with exactly one marker: `<shiftwork:review verdict="accept" reason="…"/>` — or `reopen` (the ticket goes back to `ready-for-agent`, the landed commit stays) or `follow-up` (the runner files a new ticket from your reason).
+4. Change no files: a review reports. End with exactly one marker: `<shiftwork:review verdict="accept" reason="…"/>` — or `reopen` (the ticket goes back to `ready-for-agent`: before a landing nothing lands and the next shift continues on the same branch; after a landing the landed commit stays) or `follow-up` (the runner files a new ticket from your reason).

@@ -59,12 +59,24 @@ test("tracker and openspec.verify are validated", async () => {
 });
 
 test("review is on by default on the strongest configured tier; filters are arrays; `false` and `{ enabled: false }` opt out", async () => {
-	// No review block and a full tier ladder: reviews on the strongest configured tier.
+	// No review block and a full tier ladder: reviews on the strongest configured tier, before landing.
 	const ladder = await dirs({ model: "a/1", tiers: { quick: { chain: ["a/1"] }, standard: { chain: ["a/1"] }, premium: { chain: ["a/1"] } } });
 	assert.deepEqual((await loadConfig(ladder.root, ladder.userDir)).review, {
 		enabled: true,
 		tier: "premium",
-		when: "resolve",
+		when: "before-land",
+		maxRounds: 2,
+		budget: { maxWallMin: 20, maxTurns: 60 },
+	});
+	// `when` accepts both orders; `resolve` is `after-land`'s old name and normalizes to it.
+	const alias = await dirs({ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: { when: "resolve" } });
+	assert.equal((await loadConfig(alias.root, alias.userDir)).review.when, "after-land");
+	const when = await dirs({ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: { when: "before-land", maxRounds: 3 } });
+	assert.deepEqual((await loadConfig(when.root, when.userDir)).review, {
+		enabled: true,
+		tier: "premium",
+		when: "before-land",
+		maxRounds: 3,
 		budget: { maxWallMin: 20, maxTurns: 60 },
 	});
 	// The review's own budget: `review.budget` over its default, a `null` field lifts its default.
@@ -91,15 +103,16 @@ test("review is on by default on the strongest configured tier; filters are arra
 	const none = await dirs({ model: "a/1" });
 	assert.deepEqual((await loadConfig(none.root, none.userDir)).review, {
 		enabled: false,
-		when: "resolve",
+		when: "before-land",
+		maxRounds: 2,
 		reason: "no tier to review on; set review.tier",
 	});
 
-	// Opt-out forms.
+	// Opt-out forms: both carry the same shape, everything off.
 	const falseForm = await dirs({ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: false });
-	assert.deepEqual((await loadConfig(falseForm.root, falseForm.userDir)).review, { enabled: false, when: "resolve" });
+	assert.deepEqual((await loadConfig(falseForm.root, falseForm.userDir)).review, { enabled: false, when: "before-land", maxRounds: 2 });
 	const disabledForm = await dirs({ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: { enabled: false } });
-	assert.deepEqual((await loadConfig(disabledForm.root, disabledForm.userDir)).review, { enabled: false, when: "resolve" });
+	assert.deepEqual((await loadConfig(disabledForm.root, disabledForm.userDir)).review, { enabled: false, when: "before-land", maxRounds: 2 });
 
 	// An explicit tier wins over the default.
 	const explicit = await dirs({ model: "a/1", tiers: { quick: { chain: ["a/1"] }, premium: { chain: ["a/1"] } }, review: { tier: "quick" } });
@@ -113,7 +126,8 @@ test("review is on by default on the strongest configured tier; filters are arra
 	assert.deepEqual((await loadConfig(good.root, good.userDir)).review, {
 		enabled: true,
 		tier: "premium",
-		when: "resolve",
+		when: "before-land",
+		maxRounds: 2,
 		features: ["f"],
 		types: ["code"],
 		budget: { maxWallMin: 20, maxTurns: 60 },
@@ -123,7 +137,10 @@ test("review is on by default on the strongest configured tier; filters are arra
 		[{ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: { enabled: true, tier: "quick" } }, /review\.tier: unknown tier "quick"/],
 		[{ model: "a/1", tiers: { premium: { chain: ["a/1"] } }, review: { tier: "nope" } }, /review\.tier: unknown tier "nope"/],
 		[{ model: "a/1", review: { enabled: "yes" } }, /review\.enabled: must be true or false/],
-		[{ model: "a/1", review: { when: "land" } }, /review\.when: must be one of resolve/],
+		[{ model: "a/1", review: { when: "land" } }, /review\.when: must be one of before-land, after-land, resolve/],
+		[{ model: "a/1", review: { maxRounds: 0 } }, /review\.maxRounds: must be a positive integer/],
+		[{ model: "a/1", review: { maxRounds: "2" } }, /review\.maxRounds: must be a positive integer/],
+		[{ model: "a/1", review: { maxRounds: 1.5 } }, /review\.maxRounds: must be a positive integer/],
 		[{ model: "a/1", review: { strict: true } }, /review\.strict: unknown review field/],
 		// `reason` is an output of checkReview only (why reviews are off with no tier), never an operator field.
 		[{ model: "a/1", review: { reason: "hi" } }, /review\.reason: unknown review field/],

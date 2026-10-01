@@ -178,6 +178,65 @@ test("run reviews every resolved ticket by default; run --no-review skips the re
 	assert.deepEqual(await readdir(join(root, "logs", "demo", "02")), ["attempt-1.jsonl", "attempt-review.jsonl"]);
 });
 
+test("in a git repo the review runs on the unlanded branch: main gets the commit only after the accept", { timeout: 240_000 }, async () => {
+	const { execFileSync } = await import("node:child_process");
+	const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+	const root = await mkdtemp(join(tmpdir(), "sw-e2e-bla-"));
+	git("init", "-q", "-b", "main");
+	git("config", "user.email", "t@example.com");
+	git("config", "user.name", "T");
+	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
+	await mkdir(join(root, ".pi"));
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "01-hello.md"),
+		"# 01: Hello file\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n",
+	);
+	// No review block: reviews are on by default, before the branch lands.
+	await writeFile(
+		join(root, ".pi", "shiftwork.json"),
+		JSON.stringify({
+			model: "scripted/s1",
+			thinking: "off",
+			routing: { code: { tier: "standard" } },
+			tiers: { standard: { chain: ["scripted/s1"] }, premium: { chain: ["scripted/s2"] } },
+			worktree: { enabled: true, dir: `${root}-worktrees` },
+			pi: { args: ["--offline", "-ns", "-ne", "-e", fixture] },
+		}),
+	);
+	git("add", "-A");
+	git("commit", "-q", "-m", "init");
+	// Every shift replays the same script: each shift first records whether main already carries
+	// the ticket's commit, the worker writes hello.txt, and the review shift replays the marker
+	// text as its verdict. If the branch landed before the review, the review's own record says so.
+	const script = [
+		{
+			tool: {
+				name: "bash",
+				args: {
+					command: `git log --format=%s main | grep -q "^shiftwork: demo/01" && echo landed > ${root}/branch-state.txt || echo unlanded > ${root}/branch-state.txt`,
+				},
+			},
+		},
+		{ tool: { name: "write", args: { path: "hello.txt", content: "hi\n" } } },
+		{ text: 'Looks good. <shiftwork:review verdict="accept" reason="matches the ticket"/>' },
+	];
+
+	const { stdout } = await promisify(execFile)(process.execPath, [bin, "run", "--dir", root], {
+		env: { ...process.env, PI_CODING_AGENT_DIR: await mkdtemp(join(tmpdir(), "sw-e2e-home-")), SHIFTWORK_SCRIPT: JSON.stringify(script) },
+	});
+
+	assert.match(stdout, /✔ demo\/01 resolved/);
+	// The reviewer saw the unlanded branch: main gets the commit only after the accept.
+	assert.equal(await readFile(join(root, "branch-state.txt"), "utf8"), "unlanded\n");
+	assert.match(git("log", "-1", "--format=%s"), /^shiftwork: demo\/01 Hello file$/);
+	assert.equal(await readFile(join(root, "hello.txt"), "utf8"), "hi\n");
+	const ticket = await readFile(join(root, ".scratch", "demo", "issues", "01-hello.md"), "utf8");
+	assert.match(ticket, /\*\*Status:\*\* resolved/);
+	assert.match(ticket, /### Review[\s\S]*- Verdict: accept — matches the ticket/);
+	assert.match(ticket, /- Landed: merged shiftwork\/demo-01 into main/);
+	assert.deepEqual(await readdir(join(root, "logs", "demo", "01")), ["attempt-1.jsonl", "attempt-review.jsonl"]);
+});
+
 test("run --ticket works exactly the chosen ticket end to end", { timeout: 120_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-e2e-ticket-"));
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });

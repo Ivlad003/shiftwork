@@ -149,7 +149,7 @@ export { openCooldowns } from "./cooldowns.js";
 export { lockPath, withLock } from "./lock.js";
 export { noRunState, openRunState } from "./run-state.js";
 export { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, WORKER_PROMPT } from "./prompt.js";
-export { decideNext, runFrontier, shouldReview } from "./runner.js";
+export { decideNext, reviewWhen, runFrontier, shouldReview } from "./runner.js";
 export {
 	GITHUB_LABEL_DEFAULTS,
 	GITHUB_LABELS_IN_REQUIRED,
