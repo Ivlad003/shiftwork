@@ -24,8 +24,9 @@ runs) · / opens a search prompt: on the Queue or Resolved tab it filters the li
 to tickets whose number or title contains the query (case-insensitive) — tab
 toggles the scope between all features and the feature under the cursor, enter
 keeps the filter, esc clears it; with a ticket's details open it highlights the
-matches inside the details ([…] brackets, reverse video in colour) and enter
-scrolls to the next one — a kept details search keeps its keys in the footer
+matches inside the details ([…] brackets, reverse video in colour) — enter there
+stops typing and keeps the search, and enter again scrolls to the next match —
+a kept details search keeps its keys in the footer
 (enter next match · esc clear) instead of the tab's. While you type, letters — n, r, s, d, f, q and digits
 included — go to the query, not their commands (Ctrl-C still quits); the header
 shows the prompt on its own line (/ query · scope) and the footer swaps in the

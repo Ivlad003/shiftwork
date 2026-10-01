@@ -559,7 +559,8 @@ test("renderDashboard: a ticket-scoped search highlights the details' matches, a
 	assert.match(text, /Type: code/); // the first match ("Tabbed [render]ing") is at the top, all lines shown
 	assert.match(text, /What to build: \[render\] the tab of the spec/);
 	assert.match(text, /done \[render\]ing/); // every match in the details is bracketed
-	assert.match(lines.at(-2), /enter next match/); // the footer's details-search keys while editing
+	assert.match(lines.at(-2), /enter keep/); // the footer's details-search keys while editing: enter only stops editing (tui-polish/10)
+	assert.doesNotMatch(lines.at(-2), /next match/); // the jump to the next match is the kept search's enter
 
 	// A kept search (enter stopped editing) keeps its real keys in the footer — not the tab's (tui-polish/09).
 	const kept = renderDashboard({ ...state, search: { ...state.search, editing: false } }, { width: 80, height: 24 }).join("\n");

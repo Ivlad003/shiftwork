@@ -17,10 +17,15 @@ const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", l
 /** The keys every tab shares, the footer's second line. */
 export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · g dark-factory · q quits";
 
-/** The footer's first line while a search is open (GitHub #3): the prompt's keys while it is being edited, list or details — and the keys a kept details search keeps (tui-polish/09). */
+/**
+ * The footer's first line while a search is open (GitHub #3): the prompt's keys while it is
+ * being edited, list or details — and the keys a kept details search keeps (tui-polish/09).
+ * Both prompts' `enter` only stops editing and keeps the search (tui-polish/10): the jump to
+ * the next match is the kept search's `enter`, the one after this.
+ */
 const SEARCH_KEYS = {
 	list: "letters add to the query · backspace delete · tab scope · enter keep · esc clear",
-	ticket: "letters add to the query · backspace delete · enter next match · esc clear",
+	ticket: "letters add to the query · backspace delete · enter keep · esc clear",
 	kept: "enter next match · esc clear",
 };
 
