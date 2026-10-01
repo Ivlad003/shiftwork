@@ -57,7 +57,7 @@ const TONE_OFF = { "▶": FG_OFF, "●": BOLD_OFF, "⧗": DIM_OFF, "?": FG_OFF, 
 
 /** The keys of each tab, the footer's first line. */
 const TAB_KEYS = {
-	queue: "↑↓ move · ←→ fold · enter open · n run this · esc back",
+	queue: "↑↓ move · ←→ fold · enter open · n run this · p pause · esc back",
 	agents: "↑↓ move · enter log",
 	cooldowns: "↑↓ move",
 	log: "↑↓ move",
@@ -556,7 +556,8 @@ function renderQueueSection(state, now) {
 
 /**
  * The queue's visible rows (tui-polish/07): `▾ feature 2/6 done · 2 next · 1 needs you` folders
- * (▸ collapsed; zero `next`/`needs you` parts omitted), their tickets under — a fixed-width status
+ * (▸ collapsed; zero `next`/`needs you` parts omitted; `⏸` while the feature is paused,
+ * feature-pause ticket 01), their tickets under — a fixed-width status
  * column (`ticketStatusColumn`'s words, padded to the widest one rendered) before the `NN title`,
  * so on a narrow terminal the column stays whole and the title is what gets clipped. A feature
  * row also carries its tickets' live workers, collapsed or not (GitHub #2's operator report):
@@ -573,6 +574,7 @@ function renderQueueRows(state, cursor, { resolved = "skip" } = {}) {
 			if (row.next) counts.push(`${row.next} next`);
 			if (row.needsYou) counts.push(`${row.needsYou} needs you`);
 			const parts = [`${row.collapsed ? "▸" : "▾"} ${row.feature} ${counts.join(" · ")}`];
+			if (row.paused) parts.push("⏸");
 			if (row.workers?.length) parts.push(workerMarker(row.workers));
 			return `${mark} ${parts.join(" · ")}`;
 		}

@@ -276,6 +276,7 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 		next: 1,
 		needsYou: 0,
 		total: 3,
+		paused: false,
 		workers: [{ number: "02", model: "fake/m1" }], // the feature row carries its tickets' live workers
 	});
 	assert.deepEqual(rows[1], {
@@ -410,11 +411,30 @@ test("ticketStatusColumn: every status's words — working (worker or claim), ne
 		next: 2,
 		needsYou: 1,
 		total: 10,
+		paused: false,
 		workers: [
 			{ number: "02", model: "opencode-go/glm-5.3" },
 			{ number: "03", model: null, pid: 4242 },
 		],
 	});
+});
+
+test("ticketStatusColumn: a paused feature's tickets read ⏸ paused — except one a live worker still holds", () => {
+	const tickets = [
+		{ feature: "f", number: "01", title: "frozen", status: "ready-for-agent", blockedBy: [], featurePaused: true },
+		{ feature: "f", number: "02", title: "held", status: "claimed", blockedBy: [], featurePaused: true },
+	];
+	const d = {
+		run: { pid: 7, live: true, workers: [{ ticket: { feature: "f", number: "02" }, model: "fake/m1" }] },
+		tickets,
+		frontier: [], // a paused feature's tickets are off the frontier
+		claims: [],
+	};
+	const rows = queueRows(d, {});
+	assert.equal(rows[1].label, "⏸ paused"); // ticket 01: its feature is paused
+	assert.equal(rows[1].tone, null);
+	assert.equal(rows[2].label, "▶ working fake/m1"); // the live shift finishes and lands
+	assert.equal(rows[0].paused, true); // the feature row carries the flag for its ⏸
 });
 
 /** One frame plus a fully resolved feature: shipped (01, 02, both resolved). */
@@ -436,7 +456,7 @@ test("queueRows skips fully resolved features; resolvedRows lists only them, sam
 
 	const resolved = resolvedRows(d, {});
 	assert.equal(resolved.some((r) => r.feature !== "shipped"), false);
-	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, done: 2, next: 0, needsYou: 0, total: 2, workers: [] });
+	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, done: 2, next: 0, needsYou: 0, total: 2, paused: false, workers: [] });
 	assert.deepEqual(resolved[1], {
 		kind: "ticket",
 		feature: "shipped",
@@ -596,6 +616,73 @@ test("reducer: n starts the selected frontier ticket; anything else is refused w
 	const live = reduceKey(press(idle, "down", d), "n", { ...d, run: { pid: 42, live: true } });
 	assert.deepEqual(live.effects, []);
 	assert.match(live.state.notice, /a runner is already working \(pid 42\)/);
+});
+
+test("reducer: p on a feature row and on a ticket row emits toggle-pause for that feature", () => {
+	const d = frame();
+	// The cursor on the demo folder row.
+	const folder = reduceKey(idle, "p", d);
+	assert.deepEqual(folder.effects, [{ type: "toggle-pause", feature: "demo" }]);
+
+	// On a ticket row: its feature.
+	const ticket = reduceKey(press(idle, "down", d), "p", d); // demo/01
+	assert.deepEqual(ticket.effects, [{ type: "toggle-pause", feature: "demo" }]);
+	let state = idle;
+	for (let i = 0; i < 5; i++) state = press(state, "down", d);
+	const other = reduceKey(state, "p", d); // other/01
+	assert.deepEqual(other.effects, [{ type: "toggle-pause", feature: "other" }]);
+
+	// The Resolved tab works the same; the other tabs have no feature rows; an empty queue has none either.
+	const done = reduceKey({ ...idle, tab: "resolved", cursor: { resolved: 0 } }, "p", doneFrame());
+	assert.deepEqual(done.effects, [{ type: "toggle-pause", feature: "shipped" }]);
+	assert.deepEqual(reduceKey({ ...idle, tab: "agents" }, "p", d).effects, []);
+	assert.deepEqual(reduceKey(idle, "p", {}).effects, []);
+
+	// Pausing works while a runner is live: the current shift finishes and lands.
+	const live = reduceKey({ ...idle, run: { pid: 42, live: true } }, "p", d);
+	assert.deepEqual(live.effects, [{ type: "toggle-pause", feature: "demo" }]);
+});
+
+test("reducer: n on a paused feature's ticket is refused with the pause's own words", () => {
+	const d = {
+		...frame(),
+		tickets: frame().tickets.map((t) => (t.feature === "demo" ? { ...t, featurePaused: true } : t)),
+		frontier: [], // a paused feature's tickets are off the frontier
+	};
+	const n = reduceKey(press(idle, "down", d), "n", d); // demo/01
+	assert.deepEqual(n.effects, []);
+	assert.equal(n.state.notice, "feature demo is paused (p resumes it)");
+});
+
+test("p runs the pause effect and sets the paused/resumed notice", async () => {
+	const root = await repo({});
+	const paused = createTuiControls({ root, togglePause: async () => "pause" });
+	paused.setDashboard(frame());
+	await paused.handleKey("p"); // the cursor is on the demo folder row
+	assert.equal(paused.view.notice, "⏸ demo paused");
+
+	const resumed = createTuiControls({ root, togglePause: async () => "resume" });
+	resumed.setDashboard(frame());
+	await resumed.handleKey("down"); // demo/01
+	await resumed.handleKey("p");
+	assert.equal(resumed.view.notice, "▶ demo resumed");
+});
+
+test("p's default effect runs feature pause|resume on the spec", async () => {
+	const root = await repo({ "demo/07-widget.md": ticketBody });
+	await writeFile(join(root, ".scratch", "demo", "spec.md"), "# Spec: Demo\n\n**Status:** ready-for-agent\n");
+	const controls = createTuiControls({ root });
+	controls.setDashboard({ run: null, tickets: [{ feature: "demo", number: "07" }] });
+
+	await controls.handleKey("p"); // the cursor on the demo folder: pause
+	assert.equal(controls.view.notice, "⏸ demo paused");
+	assert.match(await readFile(join(root, ".scratch", "demo", "spec.md"), "utf8"), /\*\*Status:\*\* paused/);
+
+	// A frame that has read the paused spec: p resumes it.
+	controls.setDashboard({ run: null, tickets: [{ feature: "demo", number: "07", featurePaused: true }] });
+	await controls.handleKey("p");
+	assert.equal(controls.view.notice, "▶ demo resumed");
+	assert.match(await readFile(join(root, ".scratch", "demo", "spec.md"), "utf8"), /\*\*Status:\*\* ready-for-agent/);
 });
 
 test("n on a ready ticket starts a detached runner with --ticket; a blocked ticket is refused", async () => {
@@ -874,7 +961,7 @@ test("queueRows: a global query keeps matching tickets from several features and
 			["ticket", "other", "01"],
 		],
 	);
-	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, done: 1, next: 1, needsYou: 0, total: 3, workers: [] });
+	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, done: 1, next: 1, needsYou: 0, total: 3, paused: false, workers: [] });
 
 	// A title matches, case-insensitively.
 	const byTitle = queueRows(d, { search: search({ query: "ELSEWHERE", editing: false }) });

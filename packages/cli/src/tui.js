@@ -15,7 +15,11 @@ Usage:
 
 Keys: 1–6 and tab switch tabs · ↑↓/j k move · ←→ fold · enter opens details
 (an agent's log, or an issue's feature in the Queue, or on the Resolved tab
-if the feature is done) · n runs the selected ticket
+if the feature is done) · n runs the selected ticket (refused with
+feature <f> is paused (p resumes it) while its feature is paused) · p pauses
+or resumes the feature under the cursor — its folder row or one of its
+ticket rows (the notice says ⏸ <f> paused / ▶ <f> resumed; the next frame,
+within a second, shows the frontier without the paused feature's tickets)
 · r starts a detached runner (a second r while one is live is refused) · s writes
 STOP so the runner hands off and stops · d shows a dry-run · f cycles the feature
 filter · g toggles dark-factory (starts run --dark-factory detached when no
@@ -27,7 +31,7 @@ keeps the filter, esc clears it; with a ticket's details open it highlights the
 matches inside the details ([…] brackets, reverse video in colour) — enter there
 stops typing and keeps the search, and enter again scrolls to the next match —
 a kept details search keeps its keys in the footer
-(enter next match · esc clear) instead of the tab's. While you type, letters — n, r, s, d, f, q and digits
+(enter next match · esc clear) instead of the tab's. While you type, letters — n, r, s, d, f, p, q and digits
 included — go to the query, not their commands (Ctrl-C still quits); the header
 shows the prompt on its own line (/ query · scope) and the footer swaps in the
 search keys while you type · 
@@ -49,7 +53,7 @@ will take the frontier · ⧗ waits 01, 03 — blocked by unresolved tickets, on
 the unresolved ones listed · ? needs you — needs-info; the details view shows
 the reason from the last shift report · ✋ for human — ready-for-human ·
 ○ triage — needs-triage · ✔ done — resolved · ✖ wontfix · ⏸ paused — its feature
-is paused (once feature-pause lands; until then never shown). A feature row
+is paused (p resumes it). A feature row
 counts its tickets: \`2/6 done · 2 next · 1 needs you\`, zero parts omitted. The
 details view's first line carries the same label, plus the reason line for a
 needs-you ticket. --once and the plain-text fallback print the same words
@@ -204,7 +208,7 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 async function fallback(root, error) {
 	const reason = error?.message ? ` (${error.message})` : "";
 	process.stdout.write(
-		`shiftwork tui: pi's TUI library not found${reason}, plain-text mode (1–6 tabs · n run this · r run · s stop · d dry-run · f filter · g dark-factory · q quit)\n`,
+		`shiftwork tui: pi's TUI library not found${reason}, plain-text mode (1–6 tabs · n run this · p pause · r run · s stop · d dry-run · f filter · g dark-factory · q quit)\n`,
 	);
 	let last = null;
 	const paint = () => {

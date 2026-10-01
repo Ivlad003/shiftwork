@@ -5,9 +5,10 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openRunState, READY, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "./dry-run.js";
+import { featurePauseCommand } from "./feature-pause.js";
 
-/** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · / search · q quit. */
-export const TUI_KEYS = ["r", "s", "d", "f", "g", "/", "q", "\x03"];
+/** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · p pause · / search · q quit. */
+export const TUI_KEYS = ["r", "s", "d", "f", "g", "p", "/", "q", "\x03"];
 
 /** The six tabs, switched with `1`–`6` (and `tab`, which cycles): the phase-5 spec's four, Resolved (GitHub #2) and GitHub (github-watch). */
 export const TABS = ["queue", "agents", "cooldowns", "log", "resolved", "github"];
@@ -25,8 +26,9 @@ const ARROWS = { A: "up", B: "down", C: "right", D: "left" };
  * `feature` scope only within the feature the prompt captured. Each feature row also carries
  * its tickets' live workers (`workers: [{ number, model }]`, from `dashboard.run.workers` and
  * from live claims in `dashboard.claims`, so a ticket held by a second runner counts too — such
- * a claim, with no worker entry in the run state, gets `model: null` and its `pid` instead) and
- * counts its tickets (`done`, `next` on the frontier, `needsYou`, `total`). Each ticket row
+ * a claim, with no worker entry in the run state, gets `model: null` and its `pid` instead),
+ * whether the feature is paused (`paused`, from its tickets' `featurePaused`, feature-pause
+ * ticket 01) and counts its tickets (`done`, `next` on the frontier, `needsYou`, `total`). Each ticket row
  * carries its status column (`label` + `tone`, from `ticketStatusColumn`) and its pieces: the
  * unresolved `blockers`, the frontier `order` (`#N`, its place in the order the runner will take
  * it, null off the frontier), the live `worker` and the live `claim` that holds it.
@@ -75,6 +77,7 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 			next: own.filter((t) => frontier.has(`${t.feature}/${t.number}`)).length,
 			needsYou: own.filter((t) => t.status === NEEDS_INFO).length,
 			total: own.length,
+			paused: own.some((t) => t.featurePaused),
 			workers,
 		});
 		if (collapsed.has(feature)) continue;
@@ -121,7 +124,8 @@ const STATUS_COLUMNS = {
  * will take it (`● next #N`), else `⧗ waits 01, 03` for a ready ticket with unresolved blockers
  * — only the unresolved ones listed — else the status's own words (`? needs you` for
  * `needs-info`, `✋ for human`, `○ triage`, `✔ done`, `✖ wontfix`; an unknown status reads as
- * untriaged). `⏸ paused` joins once feature-pause lands; until then no feature is paused.
+ * untriaged). A ticket of a paused feature (ticket 01's `featurePaused`) reads `⏸ paused` —
+ * except one a live worker or claim still holds: the shift finishes and lands, so `▶ working` wins.
  * Returns `{ label, tone, blockers, order, worker, claim }`: the words, their colour tone
  * (`working`/`next`/`waits`/`needs`/`done`, null for the rest), and the pieces they came from.
  * Pure: `(dashboard, ticket) → column`.
@@ -138,6 +142,8 @@ export function ticketStatusColumn(dashboard, ticket) {
 		const who = worker ? worker.model ?? "?" : `pid ${claim.pid ?? "?"}`;
 		return { ...pieces, label: `▶ working ${who}`, tone: "working" };
 	}
+	// A paused feature keeps its tickets off the frontier, so no order follows from here.
+	if (ticket.featurePaused) return { ...pieces, label: "⏸ paused", tone: null };
 	if (order > 0) return { ...pieces, label: `● next #${order}`, tone: "next" };
 	if (ticket.status === READY) {
 		return { ...pieces, label: `⧗ waits ${blockers.join(", ")}`.trimEnd(), tone: "waits" };
@@ -211,11 +217,15 @@ function normalize(state, dashboard) {
  * run, features, featureFilter, notice, dryRun, search }. It is never mutated; `dashboard` (the latest
  * frame, shape `collectDashboardState`) bounds the cursors and decides whether `n` may start.
  * While the search prompt is open for typing (`search.editing`, GitHub #3) its keys go to the
- * query: printable keys — `n`, `r`, `s`, `d`, `f`, `q` and digits included — are text, not commands.
+ * query: printable keys — `n`, `r`, `s`, `d`, `f`, `p`, `q` and digits included — are text, not commands.
  * Effects are data for the executor: { type: "start-runner" | "stop-runner" | "dry-run", feature,
- * ticket, darkFactory } or { type: "quit" }. A second `r` while a runner is live is refused with a notice
+ * ticket, darkFactory } or { type: "toggle-pause", feature } (feature-pause, ticket 02) or
+ * { type: "quit" }. A second `r` while a runner is live is refused with a notice
  * (spec story 28); `n` is refused the same way, and when the selected row is not a ready
- * frontier ticket. `g` toggles dark-factory: it starts `run --dark-factory` detached when no
+ * frontier ticket — or belongs to a paused feature (`feature <f> is paused (p resumes it)`).
+ * `p` toggles pause on the feature under the Queue or Resolved cursor — the folder's or the
+ * ticket's — even while a runner is live: a live shift finishes and lands, the runner just
+ * takes no further ticket of the feature. `g` toggles dark-factory: it starts `run --dark-factory` detached when no
  * runner is live (github-watch, ticket 06) and writes STOP when one is. An unrecognized key
  * leaves the state untouched.
  */
@@ -310,6 +320,8 @@ export function reduceKey(state, key, dashboard = {}) {
 			if (!norm.details) return { state: norm, effects: [] };
 			return { state: { ...norm, details: null }, effects: [] };
 		}
+		case "p":
+			return pauseKey(state, dashboard);
 		case "n":
 			return startSelected(state, dashboard);
 		default:
@@ -504,7 +516,7 @@ export function keptTicketSearch(state) {
 
 /**
  * The search prompt's keys while it is open for typing (`search.editing`, GitHub #3):
- * printable keys append to the query — `n`, `r`, `s`, `d`, `f`, `q` and digits are text,
+ * printable keys append to the query — `n`, `r`, `s`, `d`, `f`, `p`, `q` and digits are text,
  * not commands — `backspace` deletes the last character, `tab` toggles the scope between
  * `global` and `feature` (the feature captured when the prompt opened), `enter` stops
  * editing and keeps the filter, `esc` clears the query and closes the prompt. Anything
@@ -537,9 +549,25 @@ function editSearchKey(state, key, dashboard) {
 }
 
 /**
+ * `p`: toggle pause on the feature under the Queue or Resolved cursor — the folder row's or
+ * the ticket row's (feature-pause, ticket 02). Emits { type: "toggle-pause", feature }; the
+ * executor runs ticket 01's `feature pause|resume` and sets the ⏸/▶ notice. Works while a
+ * runner is live: a live shift finishes and lands, the runner takes no further ticket of it.
+ * The other tabs have no feature rows; an empty queue has no row under the cursor.
+ */
+function pauseKey(state, dashboard) {
+	const norm = normalize(state, dashboard);
+	if (norm.tab !== "queue" && norm.tab !== "resolved") return { state: norm, effects: [] };
+	const row = folderRows(norm.tab, dashboard, norm)[norm.cursor[norm.tab]];
+	if (!row?.feature) return { state: norm, effects: [] };
+	return { state: norm, effects: [{ type: "toggle-pause", feature: row.feature }] };
+}
+
+/**
  * `n`: start the selected Queue ticket, refused with a notice unless it is a ready frontier
- * ticket and no runner is live. On the Resolved tab every ticket is resolved, so the notice
- * says it is not on the frontier: status resolved.
+ * ticket and no runner is live. A ticket of a paused feature is refused with the pause's own
+ * words (`feature <f> is paused (p resumes it)`). On the Resolved tab every ticket is resolved,
+ * so the notice says it is not on the frontier: status resolved.
  */
 function startSelected(state, dashboard) {
 	const norm = normalize(state, dashboard);
@@ -554,6 +582,9 @@ function startSelected(state, dashboard) {
 		return { state: { ...norm, notice: `no ticket selected: the cursor is on ${where}` }, effects: [] };
 	}
 	const spec = `${row.feature}/${row.number}`;
+	if (isFeaturePaused(dashboard, row.feature)) {
+		return { state: { ...norm, notice: `feature ${row.feature} is paused (p resumes it)` }, effects: [] };
+	}
 	const onFrontier = (dashboard?.frontier ?? []).some((t) => t.feature === row.feature && t.number === row.number);
 	if (!onFrontier) {
 		return { state: { ...norm, notice: `${spec} is not on the frontier: ${refusalReason(dashboard, row)}` }, effects: [] };
@@ -562,6 +593,11 @@ function startSelected(state, dashboard) {
 		state: { ...norm, notice: `starting ${spec}…` },
 		effects: [{ type: "start-runner", feature: null, ticket: spec }],
 	};
+}
+
+/** Whether the feature is paused in this frame (ticket 01's `featurePaused` flag on its tickets). */
+function isFeaturePaused(dashboard, feature) {
+	return (dashboard?.tickets ?? []).some((t) => t.feature === feature && t.featurePaused);
 }
 
 /** Why a ticket is not on the frontier, in `run --ticket`'s words: claimed, blocked, or its status. */
@@ -676,12 +712,13 @@ function decodeCsiU(params) {
  * `onChange` fires after every change.
  * Effects are injectable so tests can drive them with a stub runner.
  */
-export function createTuiControls({ root, start, stop, plan, onChange, onQuit } = {}) {
+export function createTuiControls({ root, start, stop, plan, togglePause, onChange, onQuit } = {}) {
 	const effects = {
 		"start-runner": start ??
 			((root_, effect) => startDetachedRunner(root_, { feature: effect.feature, ticket: effect.ticket, darkFactory: effect.darkFactory })),
 		"stop-runner": stop ?? writeStopFile,
 		"dry-run": plan ?? ((root_, effect) => collectDryRunLines(root_, { feature: effect.feature })),
+		"toggle-pause": togglePause ?? defaultTogglePause,
 	};
 	let dashboard = { run: null, tickets: [] };
 	let view = {
@@ -720,6 +757,16 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
 				case "dry-run": {
 					const lines = await effects["dry-run"](root, effect);
 					setView({ ...view, dryRun: { lines } });
+					break;
+				}
+				case "toggle-pause": {
+					// The effect's action becomes the notice's word; the next frame refresh
+					// re-reads the spec, so the frontier line and the ⏸ marker update.
+					const action = await effects["toggle-pause"](root, effect, dashboard);
+					setView({
+						...view,
+						notice: action === "resume" ? `▶ ${effect.feature} resumed` : `⏸ ${effect.feature} paused`,
+					});
 					break;
 				}
 				case "quit":
@@ -819,6 +866,19 @@ export async function startDetachedRunner(root, { feature, ticket, darkFactory, 
 		logFile,
 	});
 	return { started: true, pid: child.pid, logFile, removedStop };
+}
+
+/**
+ * The default pause toggle (feature-pause, ticket 02): ticket 01's `feature pause|resume`,
+ * decided by the frame's `featurePaused` flags — a paused feature resumes, anything else
+ * pauses. Returns the action it ran ("pause" or "resume"), which the executor turns into
+ * the ⏸/▶ notice. The interactive view re-collects the frame every second (REFRESH_MS),
+ * so the frontier line and the feature row's ⏸ follow the spec.
+ */
+async function defaultTogglePause(root, effect, dashboard) {
+	const action = isFeaturePaused(dashboard, effect.feature) ? "resume" : "pause";
+	await featurePauseCommand({ root, action, feature: effect.feature, log: () => {} });
+	return action;
 }
 
 /** Write the STOP file: the runner hands off (ticket 02), releases the ticket and exits. */

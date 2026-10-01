@@ -316,6 +316,20 @@ test("dashboard: feature rows count done, next and needs you, omitting the zero 
 	assert.doesNotMatch(frame, /\/\d+ resolved|· \d+ ready/); // the old counts are gone
 });
 
+test("dashboard: a paused feature's row shows ⏸ and its tickets read ⏸ paused; the Queue footer lists p pause", () => {
+	const tickets = [ticket("f", "01", "Next up"), { ...ticket("g", "01", "Frozen"), featurePaused: true }];
+	const state = { ...base, tickets, frontier: [tickets[0]] }; // the paused feature's tickets are off the frontier
+	const frame = renderDashboard(state).join("\n");
+
+	assert.match(frame, /▾ g 0\/1 done · ⏸/); // the paused feature's row carries the marker
+	assert.match(frame, /⏸ paused +01 Frozen/); // its tickets' status column reads ⏸ paused
+	assert.doesNotMatch(frame, /Frontier: [^\n]*g\/01/); // its tickets left the frontier line
+
+	// The Queue tab's footer key hints include p pause.
+	const sized = renderDashboard({ ...state, tab: "queue", cursor: { queue: 0 } }, { width: 120, height: 24 }).join("\n");
+	assert.match(sized, /↑↓ move · ←→ fold · enter open · n run this · p pause · esc back/);
+});
+
 test("renderDashboard: at a narrow width the status column stays whole, the title is what gets clipped", () => {
 	const tickets = [
 		{ ...ticket("f", "01", "A very long title that cannot fit"), blockedBy: ["03"] }, // 03 is needs-info: an unresolved blocker
@@ -944,7 +958,8 @@ test("shiftwork tui --help describes the tabs and keys", async () => {
 	assert.match(stdout, /g toggles dark-factory/);
 	assert.match(stdout, /n runs the selected ticket/);
 	assert.match(stdout, /\/ opens a search prompt/); // search: / filters the list or the details (GitHub #3)
-	assert.match(stdout, /letters — n, r, s, d, f, q and digits/);
+	assert.match(stdout, /letters — n, r, s, d, f, p, q and digits/);
+	assert.match(stdout, /p pauses\nor resumes the feature under the cursor/);
 	assert.match(stdout, /▶ working glm-5\.3/); // the status column's legend (tui-polish/07)
 	assert.match(stdout, /● next #1 — its place in the order the runner/);
 	assert.match(stdout, /⧗ waits 01, 03/);
