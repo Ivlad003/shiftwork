@@ -113,3 +113,6 @@ test at packages/cli/test/pi-backend.test.js:34:1
 ### Notes
 
 Landed by the operator (2026-10-01): the verify gate had passed but landing stopped because main moved; merged shiftwork/review-default-01 onto main by hand after `npm test` passed (581 pass, 0 fail). No review shift ran for it.
+
+### Review — operator (by hand, after landing)
+- Verdict: accept — every acceptance criterion is met: on by default on the strongest tier, `review: false` / `--no-review`, no-tier reason, start line, docs with the cost note, tests updated. One nit moved to ticket 02: `reason` became an accepted config field.

@@ -6,7 +6,8 @@
 2. **No handoff prompt in a review.** A review shift gets no worker soft-limit/handoff prompt. At the soft limit it gets instead: "Time is almost up: stop investigating and give your verdict now from what you have checked, with the marker." (`REVIEW_WRAP_UP_PROMPT` in `prompt.js`.)
 3. **Its own budget.** `review.budget` (same fields as other budgets) is the review shift's whole budget; default `{ maxWallMin: 20, maxTurns: 60 }`. Ticket, tier and model budgets do not apply to reviews; `unlimited` lists do not lift it (only `review.budget` itself does).
 4. **Local only.** `REVIEWER_PROMPT` adds: "Work locally: read the code, run the verify gate and the repo's tests. Do not call network services or live APIs (no `gh api`, `curl` or package installs); judge external calls by the code and the tests' stubs."
-5. Update `packages/core/src/index.d.ts` (`review.budget`), `docs/guide.md` + `docs/guide.uk.md` ("Reviews after each ticket": retry, needs-info, the budget, local-only), `skills/shiftwork/references/config.md` (then `npm run sync-skills`), and run `npm run llms`.
+5. **`reason` is not a config field.** Ticket 01 added `reason` to `REVIEW_FIELDS`, so `"review": { "reason": "hi" }` in the config is silently accepted. Keep `reason` as an output of `checkReview` only: an operator-written `review.reason` fails as an unknown review field (operator review of ticket 01, 2026-10-01).
+6. Update `packages/core/src/index.d.ts` (`review.budget`), `docs/guide.md` + `docs/guide.uk.md` ("Reviews after each ticket": retry, needs-info, the budget, local-only), `skills/shiftwork/references/config.md` (then `npm run sync-skills`), and run `npm run llms`.
 
 **Blocked by:** 01
 
@@ -19,4 +20,5 @@
 - [ ] Runner test: at the soft limit a review shift receives `REVIEW_WRAP_UP_PROMPT`, never the handoff prompt
 - [ ] Planner/runner test: the review route's budget is `review.budget` (default 20 min / 60 turns), independent of ticket, tier and model budgets
 - [ ] `REVIEWER_PROMPT` contains the local-only rule (prompt test)
+- [ ] Config test: `review: { reason: "x" }` fails as an unknown review field; the no-tier case still reports its reason
 - [ ] Guides (en + uk) and `references/config.md` describe retry, needs-info, `review.budget` and local-only
