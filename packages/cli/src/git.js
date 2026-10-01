@@ -1,12 +1,11 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { promisify } from "node:util";
 
-const run = promisify(execFile);
+import { execIn } from "./exec.js";
+
 const TRACKER = ":(exclude).scratch";
 
 /**
@@ -16,7 +15,7 @@ const TRACKER = ":(exclude).scratch";
  * walk up from the worktree never find the main checkout.
  */
 export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
-	const git = async (cwd, ...args) => (await run("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 })).stdout.trim();
+	const git = async (cwd, ...args) => (await execIn(cwd)(["git", ...args])).trim();
 	const base =
 		dir ??
 		join(
@@ -41,7 +40,7 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 
 	/** Changed and untracked paths. Uses -z output: `trim()`ing porcelain text would eat the first entry's leading status column. */
 	async function changedPaths(cwd) {
-		const { stdout } = await run("git", ["status", "--porcelain", "-z", "--untracked-files=normal"], { cwd, maxBuffer: 16 * 1024 * 1024 });
+		const stdout = await execIn(cwd)(["git", "status", "--porcelain", "-z", "--untracked-files=normal"]);
 		return stdout
 			.split("\0")
 			.filter(Boolean)
@@ -98,7 +97,7 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 			await git(root, "worktree", "prune");
 			if (await branchExists(branch)) await git(root, "worktree", "add", "-q", cwd, branch);
 			else await git(root, "worktree", "add", "-q", "-b", branch, cwd, await resolveTarget());
-			for (const command of setup) await run("sh", ["-c", command], { cwd, maxBuffer: 16 * 1024 * 1024 });
+			for (const command of setup) await execIn(cwd)(["sh", "-c", command]);
 			if (setup.length) await writeFile(await setupPathsFile(cwd), (await changedPaths(cwd)).join("\n"));
 			return { cwd, branch, reused: false };
 		},

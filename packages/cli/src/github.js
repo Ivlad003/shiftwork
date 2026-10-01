@@ -1,7 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const run = promisify(execFile);
+import { execIn } from "./exec.js";
 
 /** The hidden marker every comment Shiftwork posts ends with, so its own comments are never mistaken for a collaborator's reply. */
 export const SHIFTWORK_MARKER = "<!-- shiftwork -->";
@@ -51,9 +48,7 @@ export async function ghPreFlight({ gh = "gh", exec } = {}) {
 export function createGitHub({ root, repo, gh = "gh", exec } = {}) {
 	// The default exec runs the binary in `root`, inheriting the environment
 	// (so the operator's `gh auth login` session applies).
-	const runCmd =
-		exec ??
-		(async (args) => (await run(args[0], args.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+	const runCmd = exec ?? execIn(root);
 
 	const ghCmd = async (...args) => (await runCmd([gh, ...args])).trim();
 	const ghJson = async (...args) => JSON.parse(await ghCmd(...args));

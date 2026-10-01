@@ -115,6 +115,11 @@ export function validateConfig(input) {
 	if (config.defaultTier !== undefined && !tiers[config.defaultTier]) fail("defaultTier", `unknown tier "${config.defaultTier}"`);
 	config.review = checkReview(config.review, "review", tiers);
 	config.github = checkGitHub(config.github, "github", tiers);
+	// `github.planTier` routes plan tickets unless the config already routes `plan`.
+	// Done here, not in the importer, so every validated config carries it before a runner sees it.
+	if (config.github?.planTier && !config.routing?.plan) {
+		config.routing = { ...config.routing, plan: { tier: config.github.planTier } };
+	}
 
 	const worktree = config.worktree ?? {};
 	if (worktree.enabled !== undefined && typeof worktree.enabled !== "boolean") fail("worktree.enabled", "must be true or false");
@@ -302,9 +307,11 @@ export const GITHUB_LABEL_DEFAULTS = {
 	done: "shiftwork:done",
 };
 
+/** The `labels.in` problem, without the field path `fail` adds. The guide pointer stays in the message. */
+const LABELS_IN_PROBLEM = 'required: the label that hands an issue to Shiftwork (see docs/guide.md "Dark-factory: labels")';
+
 /** The error for a `github` block without `labels.in`: it is required, never silently defaulted. */
-export const GITHUB_LABELS_IN_REQUIRED =
-	'github.labels.in: required: the label that hands an issue to Shiftwork (see docs/guide.md "Dark-factory: labels")';
+export const GITHUB_LABELS_IN_REQUIRED = `github.labels.in: ${LABELS_IN_PROBLEM}`;
 
 /** The `github` block: the dark-factory watcher's source repo and behavior (spec: github-watch). */
 function checkGitHub(value, path, tiers) {
@@ -330,7 +337,7 @@ function checkGitHub(value, path, tiers) {
 	for (const key of Object.keys(out.labels ?? {})) {
 		if (!GITHUB_LABEL_FIELDS.includes(key)) fail(`${path}.labels.${key}`, `unknown labels field; expected one of ${GITHUB_LABEL_FIELDS.join(", ")}`);
 	}
-	if (labels.in === undefined || labels.in === null) throw new Error(GITHUB_LABELS_IN_REQUIRED);
+	if (labels.in === undefined || labels.in === null) fail(`${path}.labels.in`, LABELS_IN_PROBLEM);
 	for (const key of GITHUB_LABEL_FIELDS) {
 		if (typeof labels[key] !== "string" || labels[key].length === 0) fail(`${path}.labels.${key}`, "must be a label name");
 	}

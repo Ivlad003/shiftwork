@@ -19,12 +19,12 @@ Usage:
   shiftwork tui [--once] [--dir <path>]
                                 Full-screen dashboard (Queue, Agents, Cooldowns, Log);
                                 1–4 tabs, n runs the selected ticket, r runs, s stops, d dry-runs
-  shiftwork tickets check <feature> [--min <n>] [--except NN]
+  shiftwork tickets check <feature> [--min <n>] [--except NN] [--dir <path>]
                                 Planning gate: exit 0 when at least n (default 1) tickets
                                 besides the excepted ones (default 01) are ready-for-agent
                                 or later, each with checkboxes and a Verify line, and every
                                 Blocked-by number exists in the feature
-  shiftwork github labels [--create]
+  shiftwork github labels [--create] [--dir <path>]
                                 Check the dark-factory labels (github.labels) exist in the
                                 GitHub repo: ✔ exists / ✖ missing per label, exit 1 when any
                                 is missing; --create creates the missing ones with a colour
@@ -227,7 +227,7 @@ async function github(argv) {
 	const [subcommand, ...rest] = argv;
 	if (subcommand !== "labels") {
 		console.log(HELP);
-		return 0;
+		return 1;
 	}
 	const { values } = parseArgs({
 		args: rest,

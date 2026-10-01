@@ -62,9 +62,8 @@ export async function writeIssueState(root, state) {
  * `config.github.authors`. Issues already in `.pi/shiftwork-github.json` are
  * left alone; non-collaborators are not imported and not recorded.
  *
- * When `config.github.planTier` is set, plan tickets route to it: `routing.plan.tier`
- * is set on `config` in place (the caller passes the config on to the runner),
- * unless the config already routes `plan`.
+ * Plan-ticket routing (`routing.plan` from `github.planTier`) is applied by
+ * `validateConfig`, not here.
  *
  * @returns {Promise<{ imported: { number, title, url, author, feature }[], skipped: { number, login }[] }>}
  */
@@ -92,14 +91,7 @@ export async function importIssues({ root, github, config, now }) {
 	}
 
 	if (imported.length) await writeIssueState(root, state);
-	routePlans(config);
 	return { imported, skipped };
-}
-
-/** `github.planTier` routes plan tickets (`routing.plan.tier`) unless the config already routes `plan`. */
-function routePlans(config) {
-	if (!config?.github?.planTier || config.routing?.plan) return;
-	config.routing = { ...config.routing, plan: { tier: config.github.planTier } };
 }
 
 /** Write the feature's `spec.md` (the issue) and `issues/01-plan.md` (the planning ticket). */

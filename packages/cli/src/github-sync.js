@@ -1,21 +1,13 @@
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { promisify } from "node:util";
 
+import { CLAIMED, GITHUB_LABEL_DEFAULTS, READY, RESOLVED } from "shiftwork-core";
+
+import { execIn } from "./exec.js";
 import { readIssueState, writeIssueState } from "./github-import.js";
+import { parsePostKey, postKey } from "./github-post.js";
 import { SHIFTWORK_MARKER } from "./github.js";
 
-const run = promisify(execFile);
-
-const CLAIMED = "claimed";
-const RESOLVED = "resolved";
 const NEEDS_INFO = "needs-info";
-const READY = "ready-for-agent";
-
-// The labels Shiftwork sets itself (spec: github-watch). `labels.in` hands an
-// issue over, so it is never needed here; names come defaulted for a config
-// that was not validated (labels.in is only required to *start* dark-factory).
-const LABEL_DEFAULTS = { working: "shiftwork:working", needsInfo: "shiftwork:needs-info", done: "shiftwork:done" };
 
 /** The last runner shift report in a ticket: `### Shift N — <backend> <model> (<thinking>)` and its bullets. */
 const SHIFT_HEADING = /^### Shift \d+ — \S+ \S+ \([^)]*\)$/gm;
@@ -63,12 +55,13 @@ const TICKET_REF = /^\s*(?:#(\d+)(?!\d)|(\d+):(?!\d))/;
  */
 export async function syncIssues({ root, github, config, tracker, git, linkCommits } = {}) {
 	const githubConfig = config?.github ?? {};
-	const labels = { ...LABEL_DEFAULTS, ...(githubConfig.labels ?? {}) };
-	const autoClose = githubConfig.autoClose ?? true;
-	const link = linkCommits ?? (githubConfig.push ?? false);
+	// A validated config already has the label names; the defaults cover a caller
+	// that passed labels partially (`labels.in` is only required to start dark-factory).
+	const labels = { ...GITHUB_LABEL_DEFAULTS, ...(githubConfig.labels ?? {}) };
+	const autoClose = githubConfig.autoClose;
+	const link = linkCommits ?? githubConfig.push;
 	const extraAuthors = new Set(githubConfig.authors ?? []);
-	const runGit =
-		git ?? (async (args) => (await run("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+	const runGit = git ?? ((args) => execIn(root)(["git", ...args]));
 	// Collaborators are fetched at most once per sync, however many replies arrive.
 	let collaborators;
 	const allowedAuthors = async () => {
@@ -109,8 +102,13 @@ export async function syncIssues({ root, github, config, tracker, git, linkCommi
 		};
 		// Questions and replies are keyed per occurrence (`needs-info:NN:<k>` /
 		// `replied:NN:<k>`): a ticket that needs information again asks again.
-		const questions = (t) => entry.posted.filter((key) => key.startsWith(`needs-info:${t.number}:`)).length;
-		const answers = (t) => entry.posted.filter((key) => key.startsWith(`replied:${t.number}:`)).length;
+		const occurrences = (kind, ticket) =>
+			entry.posted.filter((key) => {
+				const parsed = parsePostKey(key);
+				return parsed.kind === kind && parsed.ticket === ticket && parsed.n !== undefined;
+			}).length;
+		const questions = (t) => occurrences("needs-info", t.number);
+		const answers = (t) => occurrences("replied", t.number);
 		const waiting = () => tickets.filter((t) => t.status === NEEDS_INFO && questions(t) > answers(t));
 
 		// A collaborator's reply to a needs-info question (d): every ticket of the
@@ -131,7 +129,7 @@ export async function syncIssues({ root, github, config, tracker, git, linkCommi
 					await tracker.appendComment(t, `### Reply from @${reply.author}\n\n${String(reply.body ?? "").trim()}`);
 					await tracker.setStatus(t, READY);
 					t.status = READY; // the same sync's later loops look at these tickets too
-					await post(`replied:${t.number}:${answers(t) + 1}`);
+					await post(postKey("replied", t.number, answers(t) + 1));
 				}
 			}
 			// Every comment is consumed now, whoever wrote it: the newest id is
@@ -143,22 +141,22 @@ export async function syncIssues({ root, github, config, tracker, git, linkCommi
 		}
 
 		// Work started (a): the working label once, then a comment per first-claimed ticket.
-		for (const t of tickets.filter((t) => t.status === CLAIMED && !wasPosted(`started:${t.number}`))) {
-			if (!wasPosted("working")) {
+		for (const t of tickets.filter((t) => t.status === CLAIMED && !wasPosted(postKey("started", t.number)))) {
+			if (!wasPosted(postKey("working"))) {
 				await github.addLabels(entry.number, [labels.working]);
-				await post("working");
+				await post(postKey("working"));
 			}
 			await postComment(`**Work started** — ticket ${t.number}: ${t.title}`);
-			await post(`started:${t.number}`);
+			await post(postKey("started", t.number));
 		}
 
 		// Resolved tickets (b): title, latest shift report, landed commits.
-		for (const t of tickets.filter((t) => t.status === RESOLVED && !wasPosted(`resolved:${t.number}`))) {
+		for (const t of tickets.filter((t) => t.status === RESOLVED && !wasPosted(postKey("resolved", t.number)))) {
 			const markdown = await readFile(t.path, "utf8");
 			const repo = link ? githubConfig.repo ?? (typeof github.repo === "function" ? await github.repo() : undefined) : undefined;
 			const shas = await landedCommits(runGit, entry.feature, t.number);
 			await postComment(resolvedComment(t, markdown, shas, repo));
-			await post(`resolved:${t.number}`);
+			await post(postKey("resolved", t.number));
 		}
 
 		// The needs-info question (c), once per occurrence: fresh comments are the
@@ -172,7 +170,7 @@ export async function syncIssues({ root, github, config, tracker, git, linkCommi
 				? Number(id)
 				: maxCommentId(await github.issueComments(entry.number)) ?? entry.lastCommentId;
 			await writeIssueState(root, state);
-			await post(`needs-info:${t.number}:${questions(t) + 1}`);
+			await post(postKey("needs-info", t.number, questions(t) + 1));
 			await github.addLabels(entry.number, [labels.needsInfo]);
 		}
 
@@ -180,21 +178,21 @@ export async function syncIssues({ root, github, config, tracker, git, linkCommi
 		// working) — each its own key, so a failed close or label is retried next
 		// sync without re-posting the comment.
 		if (autoClose && tickets.every((t) => t.status === RESOLVED)) {
-			if (!wasPosted("summary")) {
+			if (!wasPosted(postKey("summary"))) {
 				await postComment(summaryComment(tickets));
-				await post("summary");
+				await post(postKey("summary"));
 			}
-			if (!wasPosted("done")) {
+			if (!wasPosted(postKey("done"))) {
 				await github.close(entry.number);
-				await post("done");
+				await post(postKey("done"));
 			}
-			if (!wasPosted("done-label")) {
+			if (!wasPosted(postKey("done-label"))) {
 				await github.addLabels(entry.number, [labels.done]);
-				await post("done-label");
+				await post(postKey("done-label"));
 			}
-			if (wasPosted("working") && !wasPosted("working-removed")) {
+			if (wasPosted(postKey("working")) && !wasPosted(postKey("working-removed"))) {
 				await github.removeLabel(entry.number, labels.working);
-				await post("working-removed");
+				await post(postKey("working-removed"));
 			}
 		}
 	}

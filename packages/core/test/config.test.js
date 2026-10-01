@@ -206,6 +206,23 @@ test("github is validated: defaults when absent, full block passes, bad values f
 	}
 });
 
+test("github.planTier sets routing.plan unless the config already routes plan", () => {
+	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] }, plan: { chain: ["a/2"] } } };
+	const routed = validateConfig({ ...base, github: { planTier: "plan", labels: { in: "sw" } } });
+	assert.deepEqual(routed.routing.plan, { tier: "plan" });
+	assert.deepEqual(routed.routing.code, { tier: "quick" }, "other routes stay");
+
+	const own = validateConfig({
+		...base,
+		routing: { ...base.routing, plan: { model: "xai/grok-4.7" } },
+		github: { planTier: "plan", labels: { in: "sw" } },
+	});
+	assert.deepEqual(own.routing.plan, { model: "xai/grok-4.7" }, "an existing plan route is kept");
+
+	const plain = validateConfig({ ...base, github: { labels: { in: "sw" } } });
+	assert.equal(plain.routing.plan, undefined, "no planTier: no plan route");
+});
+
 test("verifyTimeoutMin must be a positive number of minutes", () => {
 	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] } } };
 	assert.equal(validateConfig({ ...base, verifyTimeoutMin: 20 }).verifyTimeoutMin, 20);

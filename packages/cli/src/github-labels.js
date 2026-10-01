@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { GITHUB_LABELS_IN_REQUIRED } from "shiftwork-core";
 
+import { execIn } from "./exec.js";
 import { createGitHub, ghPreFlight } from "./github.js";
-
-const run = promisify(execFile);
 
 /** Colour + description for each label kind when `--create` creates it. */
 export const LABEL_META = {
@@ -28,11 +26,7 @@ export const LABEL_META = {
 /** The four configured labels in fixed order: `in` first, then the ones Shiftwork sets. */
 export function configuredLabels(config) {
 	const labels = config?.github?.labels;
-	if (typeof labels?.in !== "string" || labels.in.length === 0) {
-		throw new Error(
-			'github.labels.in: required: the label that hands an issue to Shiftwork (see docs/guide.md "Dark-factory: labels")',
-		);
-	}
+	if (typeof labels?.in !== "string" || labels.in.length === 0) throw new Error(GITHUB_LABELS_IN_REQUIRED);
 	return { in: labels.in, working: labels.working, needsInfo: labels.needsInfo, done: labels.done };
 }
 
@@ -62,7 +56,7 @@ export function missingLabelsMessage(repo, missing) {
 export async function githubLabelsCommand({ root, config, create = false, exec, log = console.log, err = console.error } = {}) {
 	const labels = configuredLabels(config);
 	const ghBinary = config?.github?.gh ?? "gh";
-	const execFn = exec ?? (async (args) => (await run(args[0], args.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+	const execFn = exec ?? execIn(root);
 
 	const problem = await ghPreFlight({ gh: ghBinary, exec: execFn });
 	if (problem) {

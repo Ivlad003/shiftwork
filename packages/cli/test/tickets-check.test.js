@@ -193,5 +193,12 @@ test("shiftwork --help lists the command", async () => {
 		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
 	});
 
-	assert.match(stdout, /shiftwork tickets check <feature> \[--min <n>\] \[--except NN\]/);
+	assert.match(stdout, /shiftwork tickets check <feature> \[--min <n>\] \[--except NN\] \[--dir <path>\]/);
+	assert.match(stdout, /shiftwork github labels \[--create\] \[--dir <path>\]/);
+});
+
+test("an unknown github subcommand prints help and exits 1", async () => {
+	const result = await exec(["github", "nope"]);
+	assert.equal(result.code, 1);
+	assert.match(result.stdout, /shiftwork github labels \[--create\] \[--dir <path>\]/);
 });

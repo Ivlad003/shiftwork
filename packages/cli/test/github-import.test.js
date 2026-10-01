@@ -146,21 +146,17 @@ test("the generated 01-plan.md passes parseTicket and the spec names the issue U
 	assert.ok(spec.includes(theIssue.url));
 });
 
-test("planTier routes plan tickets to it, unless the config already routes plan", async () => {
+test("importIssues does not route plan tickets; validateConfig applies github.planTier", async () => {
 	const dir = await root();
 	const issues = [issue()];
 
 	const routed = { github: { planTier: "light" } };
 	await importIssues({ root: dir, github: stubGitHub({ issues }).github, config: routed, now });
-	assert.deepEqual(routed.routing, { plan: { tier: "light" } });
+	assert.equal(routed.routing, undefined, "the importer no longer sets routing.plan");
 
 	const own = { github: { planTier: "light" }, routing: { plan: { model: "xai/grok-4.7" } } };
 	await importIssues({ root: dir, github: stubGitHub({ issues }).github, config: own, now });
-	assert.deepEqual(own.routing, { plan: { model: "xai/grok-4.7" } });
-
-	const plain = { github: {} };
-	await importIssues({ root: dir, github: stubGitHub({ issues }).github, config: plain, now });
-	assert.equal(plain.routing, undefined);
+	assert.deepEqual(own.routing, { plan: { model: "xai/grok-4.7" } }, "an existing route is left alone");
 });
 
 test("the slug is the title lower-cased, ASCII-folded, 40 characters max", () => {

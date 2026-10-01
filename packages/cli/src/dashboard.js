@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { CLAIMED, openCooldowns, openRepoTracker, openRunState, RESOLVED, VERSION } from "shiftwork-core";
 import { formatBudget } from "./dry-run.js";
 import { readIssueState } from "./github-import.js";
+import { parsePostKey } from "./github-post.js";
 import { githubRows, queueRows, TABS } from "./tui-controls.js";
 
 /** One frame per second, per the spec. */
@@ -95,11 +96,17 @@ export async function readGithubIssues(root, tickets) {
 function issueState(entry, tickets) {
 	const own = (tickets ?? []).filter((t) => t.feature === entry.feature && t.number);
 	if (!own.length) return "planning";
-	if ((entry.posted ?? []).includes("done")) return "closed";
+	if ((entry.posted ?? []).some(isClosedPost)) return "closed";
 	if (own.every((t) => t.status === RESOLVED)) return "done";
 	if (own.some((t) => t.status === NEEDS_INFO)) return "needs-info";
 	if (own.some((t) => t.status === CLAIMED || t.status === RESOLVED)) return "working";
 	return "planning";
+}
+
+/** Whether a `posted` key is the issue-closed key (`done`), not `done-label`. */
+function isClosedPost(key) {
+	const parsed = parsePostKey(key);
+	return parsed.kind === "done" && parsed.ticket === undefined;
 }
 
 /** The last `maxLines` events of the selected worker's log (else the first live worker's); null when none. */
@@ -318,7 +325,7 @@ function tabBody(state, tab, height, now) {
 			const issues = githubRows(state);
 			if (!issues.length) return plain([...head, "no issues imported (.pi/shiftwork-github.json, written by run --dark-factory)"]);
 			const at = clampCursor(cursor.github, issues.length);
-			const rows = issues.map((issue, i) => `${i === at ? ">" : " "} #${issue.number} ${issue.title ?? ""} · ${issue.feature} · ${issue.state}`.trim());
+			const rows = issues.map((issue, i) => `${i === at ? ">" : " "} ${githubIssueRow(issue)}`.trim());
 			return underHead(head, scrolled(rows, at, height - 1));
 		}
 		default:
@@ -500,7 +507,12 @@ function renderGithubSection(state, now) {
 	const issues = githubRows(state);
 	const lines = [githubHead(state, now)];
 	if (!issues.length) return lines;
-	return [...lines, ...issues.map((issue) => `  #${issue.number} ${issue.title ?? ""} · ${issue.feature} · ${issue.state}`.trimEnd())];
+	return [...lines, ...issues.map((issue) => `  ${githubIssueRow(issue)}`)];
+}
+
+/** One GitHub issue row, shared by the tab body and the plain-frame section: `#N title · feature · state`. */
+function githubIssueRow(issue) {
+	return `#${issue.number} ${issue.title ?? ""} · ${issue.feature} · ${issue.state}`.trim();
 }
 
 function renderDryRun(dryRun, filter) {

@@ -1,16 +1,14 @@
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import { openRunState, runFrontier } from "shiftwork-core";
 
+import { execIn } from "./exec.js";
 import { createGitHub, ghPreFlight, GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE } from "./github.js";
 import { importIssues } from "./github-import.js";
 import { checkLabels, missingLabelsMessage } from "./github-labels.js";
+import { parsePostKey } from "./github-post.js";
 import { syncIssues } from "./github-sync.js";
-
-const run = promisify(execFile);
 
 const STOP_FILE = "STOP";
 /** The wait between polls wakes at least this often, so a STOP file is noticed (like the runner's cooldown waits). */
@@ -65,7 +63,7 @@ export async function darkFactoryRun({
 		return 1;
 	}
 	const ghBinary = config.github.gh ?? "gh";
-	const execFn = exec ?? (async (args) => (await run(args[0], args.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+	const execFn = exec ?? execIn(root);
 
 	// Before anything else: the operator's gh must exist and be logged in.
 	const problem = await ghPreFlight({ gh: ghBinary, exec: execFn });
@@ -81,14 +79,14 @@ export async function darkFactoryRun({
 		err(missingLabelsMessage(await githubApi.repo(), missing));
 		return 1;
 	}
-	const pollMin = config.github.pollMin ?? 5;
+	const pollMin = config.github.pollMin;
 	log(`dark-factory: watching ${await githubApi.repo()} (a poll every ${pollMin} min; a STOP file or a signal ends it)`);
 
 	// The run state records the mode (the TUI's header shows dark-factory while it is
 	// live), whether it was started from the shell or with the TUI's `g`.
 	await openRunState(root).update({ pid: process.pid, running: true, mode: "dark-factory" });
 
-	const runGit = git ?? (async (args) => (await run("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+	const runGit = git ?? ((args) => execIn(root)(["git", ...args]));
 	const gitHead = async () => {
 		try {
 			return String(await runGit(["rev-parse", "HEAD"])).trim() || undefined;
@@ -104,7 +102,7 @@ export async function darkFactoryRun({
 	// every poll until one succeeds.
 	let commitsOnGitHub = true;
 	let retryPush = false;
-	const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit, linkCommits: (config.github.push ?? false) && commitsOnGitHub });
+	const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit, linkCommits: config.github.push && commitsOnGitHub });
 
 	for (;;) {
 		const { imported } = await importIssues({ root, github: githubApi, config });
@@ -166,16 +164,16 @@ async function printSync({ posted }, log) {
 
 /** What one `posted` key means, as one line. */
 function describePost(key) {
-	if (key === "working") return "labeled working";
-	if (key === "summary") return "comment: closing summary";
-	if (key === "done") return "closed the issue";
-	if (key === "done-label") return "labeled done";
-	if (key === "working-removed") return "dropped the working label";
-	const [kind, number] = key.split(":");
-	if (kind === "started") return `comment: work started on ticket ${number}`;
-	if (kind === "resolved") return `comment: ticket ${number} resolved`;
-	if (kind === "needs-info") return `comment: ticket ${number} needs information`;
-	if (kind === "replied") return `comment: a collaborator replied (ticket ${number} back to ready)`;
+	const { kind, ticket } = parsePostKey(key);
+	if (kind === "working") return "labeled working";
+	if (kind === "summary") return "comment: closing summary";
+	if (kind === "done") return "closed the issue";
+	if (kind === "done-label") return "labeled done";
+	if (kind === "working-removed") return "dropped the working label";
+	if (kind === "started") return `comment: work started on ticket ${ticket}`;
+	if (kind === "resolved") return `comment: ticket ${ticket} resolved`;
+	if (kind === "needs-info") return `comment: ticket ${ticket} needs information`;
+	if (kind === "replied") return `comment: a collaborator replied (ticket ${ticket} back to ready)`;
 	return `posted ${key}`;
 }
 
