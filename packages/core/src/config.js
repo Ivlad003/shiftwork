@@ -22,6 +22,7 @@ const DEFAULTS = {
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
 	review: { enabled: false, when: "resolve" },
+	github: { authors: [], pollMin: 5, autoClose: true, push: false },
 };
 
 /**
@@ -110,6 +111,7 @@ export function validateConfig(input) {
 	}
 	if (config.defaultTier !== undefined && !tiers[config.defaultTier]) fail("defaultTier", `unknown tier "${config.defaultTier}"`);
 	config.review = checkReview(config.review, "review", tiers);
+	config.github = checkGitHub(config.github, "github", tiers);
 
 	const worktree = config.worktree ?? {};
 	if (worktree.enabled !== undefined && typeof worktree.enabled !== "boolean") fail("worktree.enabled", "must be true or false");
@@ -284,6 +286,41 @@ function checkReview(value, path, tiers) {
 	if (out.types !== undefined && !(Array.isArray(out.types) && out.types.every((t) => typeof t === "string" && t.length > 0))) {
 		fail(`${path}.types`, "must be an array of ticket types");
 	}
+	return out;
+}
+
+const GITHUB_FIELDS = ["repo", "authors", "labels", "pollMin", "autoClose", "push", "planTier"];
+const GITHUB_LABEL_FIELDS = ["in"];
+
+/** The `github` block: the dark-factory watcher's source repo and behavior (spec: github-watch). */
+function checkGitHub(value, path, tiers) {
+	if (value === undefined) return { ...DEFAULTS.github };
+	if (!isPlainObject(value)) fail(path, "must be an object");
+	for (const key of Object.keys(value)) {
+		if (!GITHUB_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown github field; expected one of ${GITHUB_FIELDS.join(", ")}`);
+	}
+	const out = { ...DEFAULTS.github, ...value };
+	if (out.repo !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
+		fail(`${path}.repo`, `must be "owner/name", got ${JSON.stringify(out.repo)}`);
+	}
+	if (out.authors !== undefined && !(Array.isArray(out.authors) && out.authors.every((a) => typeof a === "string" && a.length > 0))) {
+		fail(`${path}.authors`, "must be an array of GitHub logins");
+	}
+	if (out.labels !== undefined) {
+		if (!isPlainObject(out.labels)) fail(`${path}.labels`, "must be an object");
+		for (const key of Object.keys(out.labels)) {
+			if (!GITHUB_LABEL_FIELDS.includes(key)) fail(`${path}.labels.${key}`, `unknown labels field; expected one of ${GITHUB_LABEL_FIELDS.join(", ")}`);
+		}
+		if (out.labels.in !== undefined && !(typeof out.labels.in === "string" && out.labels.in.length > 0)) {
+			fail(`${path}.labels.in`, "must be a label name");
+		}
+	}
+	if (out.pollMin !== undefined && !(typeof out.pollMin === "number" && Number.isFinite(out.pollMin) && out.pollMin > 0)) {
+		fail(`${path}.pollMin`, "must be a number of minutes > 0");
+	}
+	if (out.autoClose !== undefined && typeof out.autoClose !== "boolean") fail(`${path}.autoClose`, "must be true or false");
+	if (out.push !== undefined && typeof out.push !== "boolean") fail(`${path}.push`, "must be true or false");
+	if (out.planTier !== undefined && !tiers[out.planTier]) fail(`${path}.planTier`, `unknown tier "${out.planTier}"`);
 	return out;
 }
 

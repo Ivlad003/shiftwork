@@ -98,6 +98,28 @@ export interface Review {
 /** Whether a resolved ticket gets one review shift on the review tier. */
 export declare function shouldReview(config: { review?: Review } & Record<string, unknown>, ticket: { feature?: string; type?: string }): boolean;
 
+export interface GitHubLabels {
+	/** Only import issues carrying this label; every collaborator issue when omitted. */
+	in?: string;
+}
+
+/** The `github` block of `.pi/shiftwork.json`: the dark-factory watcher's source repo and behavior. */
+export interface GitHub {
+	/** `owner/name`; the `origin` remote when omitted. */
+	repo?: string;
+	/** Extra logins whose issues are imported, on top of repo collaborators. */
+	authors?: string[];
+	labels?: GitHubLabels;
+	/** Minutes between polls of the repo's issues. */
+	pollMin: number;
+	/** Close the GitHub issue when every ticket of it is resolved. */
+	autoClose: boolean;
+	/** Push main after a landing so commit links in comments resolve. */
+	push: boolean;
+	/** Tier the planning ticket runs on; any configured tier when omitted. */
+	planTier?: string;
+}
+
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
 export declare function loadConfig(root: string, userDir?: string): Promise<Record<string, unknown>>;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;

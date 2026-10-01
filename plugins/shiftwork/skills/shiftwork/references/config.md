@@ -15,6 +15,7 @@
 - `review`: `{ enabled, tier, features?, types? }` — off by default. Enabled, one review shift runs in a fresh context on `tier` after every ticket lands; the reviewer ends with `<shiftwork:review verdict="accept|reopen|follow-up" reason="…"/>`.
 - `worktree`: `{ enabled, setup }` — `setup` is shell commands (for example `["npm ci --ignore-scripts"]`) whose files are never committed.
 - `tracker`: `"scratch"` (default) or `"openspec"`.
+- `github`: dark-factory mode's source repo — `{ repo, authors, labels: { in }, pollMin, autoClose, push, planTier }`. `repo` is `owner/name` (defaults to the `origin` remote), `authors` adds logins whose issues are imported on top of repo collaborators, `labels.in` narrows imports to issues with that label, `pollMin` (minutes between polls, default 5), `autoClose` (close the issue when every ticket of it is resolved, default true), `push` (`git push` main after a landing so commit links resolve, default false), `planTier` (the tier the planning ticket runs on).
 - Local models (`ollama/…`) are never paid, and a stopped Ollama server (`OLLAMA_HOST`, default `http://localhost:11434`) makes them unavailable, not cooling.
 
 ## Commands

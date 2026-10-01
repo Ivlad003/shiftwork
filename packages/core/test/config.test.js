@@ -134,6 +134,56 @@ test("unlimited on a tier and a model profile normalizes to budget field names",
 	);
 });
 
+test("github is validated: defaults when absent, full block passes, bad values fail with their path", () => {
+	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] }, plan: { chain: ["a/2"] } } };
+	assert.deepEqual(validateConfig({ ...base }).github, { authors: [], pollMin: 5, autoClose: true, push: false });
+
+	const full = validateConfig({
+		...base,
+		github: {
+			repo: "ivlad003/shiftwork",
+			authors: ["octocat"],
+			labels: { in: "sw" },
+			pollMin: 2,
+			autoClose: false,
+			push: true,
+			planTier: "plan",
+		},
+	});
+	assert.deepEqual(full.github, {
+		repo: "ivlad003/shiftwork",
+		authors: ["octocat"],
+		labels: { in: "sw" },
+		pollMin: 2,
+		autoClose: false,
+		push: true,
+		planTier: "plan",
+	});
+
+	const partial = validateConfig({ ...base, github: { repo: "ivlad003/shiftwork", labels: { in: "sw" } } });
+	assert.equal(partial.github.autoClose, true, "autoClose defaults");
+	assert.equal(partial.github.push, false, "push defaults");
+	assert.equal(partial.github.pollMin, 5, "pollMin defaults");
+	assert.equal(partial.github.planTier, undefined, "planTier stays optional");
+
+	for (const [project, message] of [
+		[{ ...base, github: { repo: "shiftwork" } }, /github\.repo: must be "owner\/name"/],
+		[{ ...base, github: { repo: "a/b/c" } }, /github\.repo: must be "owner\/name"/],
+		[{ ...base, github: { pollMin: -1 } }, /github\.pollMin: must be a number of minutes > 0/],
+		[{ ...base, github: { pollMin: "5" } }, /github\.pollMin: must be a number of minutes > 0/],
+		[{ ...base, github: { planTier: "nope" } }, /github\.planTier: unknown tier "nope"/],
+		[{ ...base, github: { strict: true } }, /github\.strict: unknown github field/],
+		[{ ...base, github: { authors: "octocat" } }, /github\.authors: must be an array of GitHub logins/],
+		[{ ...base, github: { labels: { in: "" } } }, /github\.labels\.in: must be a label name/],
+		[{ ...base, github: { labels: { out: "x" } } }, /github\.labels\.out: unknown labels field/],
+		[{ ...base, github: { autoClose: "yes" } }, /github\.autoClose: must be true or false/],
+		[{ ...base, github: { push: 1 } }, /github\.push: must be true or false/],
+		[{ ...base, github: "on" }, /github: must be an object/],
+	]) {
+		assert.throws(() => validateConfig(project), message);
+	}
+});
+
 test("verifyTimeoutMin must be a positive number of minutes", () => {
 	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] } } };
 	assert.equal(validateConfig({ ...base, verifyTimeoutMin: 20 }).verifyTimeoutMin, 20);
