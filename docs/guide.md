@@ -98,6 +98,7 @@ A ticket without a `Type` gets `defaultType`, unless Jev (a small classifier mod
 | `preferWaitMin` | If a free model will be back within this many minutes, wait for it instead of using a paid one. |
 | `cooldown` | How long a provider rests after a limit when it gives no reset time: `{ "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" }`. |
 | `maxAttempts` | Failed Verify runs before a ticket becomes `needs-info` (default 3). |
+| `verifyTimeoutMin` | Minutes one Verify command may run before it is killed, with everything it started, and the gate fails (default 10). E.g. `"verifyTimeoutMin": 20` for slow test suites. |
 | `parallel` | How many frontier tickets the runner works at once (default 1). Above 1 needs `"worktree": { "enabled": true }`: every parallel ticket gets its own worktree. |
 | `concurrency` | Caps the shifts running at once per provider, e.g. `{ "ollama": 1 }` for a single GPU. A full provider is skipped like a cooling one. The keys are the cooldown keys: `ollama`, `claude`, `opencode:opencode-go`. |
 
@@ -286,7 +287,7 @@ npx shiftwork run --parallel 3         # up to three tickets at once
 npx shiftwork tui                      # live dashboard
 ```
 
-Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. Shift logs are in `logs/<feature>/<NN>/`.
+Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. `Ctrl-C`, `kill` (SIGTERM) and a closed terminal (SIGHUP) do the same; a second signal, or 60 s without the runner finishing, stops the agents and Verify commands at once, so no agent process outlives the runner. Shift logs are in `logs/<feature>/<NN>/`.
 
 ### What the TUI does
 
@@ -323,6 +324,7 @@ One `.pi/shiftwork.json` that uses most of this guide: five different agents, a 
   "thinking": "medium",
   "maxAttempts": 3,
   "maxHandoffs": 3,
+  "verifyTimeoutMin": 20,
   "softLimitPct": 80,
   "parallel": 2,
   "worktree": { "enabled": true, "setup": ["npm ci --ignore-scripts"] },

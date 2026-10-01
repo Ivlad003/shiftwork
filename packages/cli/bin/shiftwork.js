@@ -202,25 +202,33 @@ async function run(argv) {
 
 	const { createBackend } = await import("../src/backend-registry.js");
 	const { createJevClassifier } = await import("../src/jev.js");
-	const { runVerify } = await import("../src/verify.js");
-	const backend = createBackend({ pi: config.pi, claude: config.claude, codex: config.codex, opencode: config.opencode, grok: config.grok, cursor: config.cursor });
+	const { createVerify, killRunningVerify } = await import("../src/verify.js");
+	const { installSignalStop, trackShifts } = await import("../src/signal-stop.js");
+	const backend = trackShifts(createBackend({ pi: config.pi, claude: config.claude, codex: config.codex, opencode: config.opencode, grok: config.grok, cursor: config.cursor }));
 	const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 	const classifyTicket = createJevClassifier({ config, agentDir });
 	const workspace = await createWorkspace(root, config, values["no-worktree"]);
 	console.log(`shiftwork: registry · max ${config.maxAttempts} attempts per ticket`);
 	if ((config.parallel ?? 1) > 1) console.log(`shiftwork: parallel · up to ${config.parallel} tickets at once`);
 
-	const summary = await runFrontier({
-		root,
-		tracker: await openRepoTracker(root, config),
-		backend,
-		verify: (commands, cwd) => runVerify(commands, cwd),
-		config,
-		workspace,
-		classifyTicket,
-		log: shiftLogger(root),
-		options: { once: values.once, feature: values.feature, ticket: values.ticket },
-	});
+	// A signal stops like a STOP file; a second one aborts the shifts, so no agent outlives the runner.
+	const signalStop = installSignalStop({ root, abortShifts: () => backend.abortAll(), killVerify: killRunningVerify });
+	let summary;
+	try {
+		summary = await runFrontier({
+			root,
+			tracker: await openRepoTracker(root, config),
+			backend,
+			verify: createVerify(config),
+			config,
+			workspace,
+			classifyTicket,
+			log: shiftLogger(root),
+			options: { once: values.once, feature: values.feature, ticket: values.ticket },
+		});
+	} finally {
+		signalStop.dispose();
+	}
 
 	for (const t of summary.resolved) {
 		console.log(`✔ ${t.feature}/${t.number} resolved: ${t.reason}`);
