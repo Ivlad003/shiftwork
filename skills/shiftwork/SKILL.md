@@ -26,7 +26,8 @@ Reach for the references when the branch needs them:
 2. See the frontier and the routing before spending anything: `npx shiftwork status`, then `npx shiftwork run --dry-run`.
 3. Run: `npx shiftwork run --once` works one ticket; `npx shiftwork run` works the frontier until nothing is left. Watch `npx shiftwork tui` (r run · s stop · d dry-run · f filter · q quit); in pi, `/shift`, `/shift run`, `/shift stop`.
 4. Stopping is graceful: a runner told to stop finishes its current shift first, so change the ticket or the config and let the shift land.
-5. The run is done when every ticket is `resolved` and its Verify commands pass in a clean checkout, or when a ticket carries `<shiftwork:needs-info reason="…"/>` for what only the operator knows.
+5. Dark-factory takes work from GitHub issues instead: `npx shiftwork run --dark-factory` polls the repo (`github` block in `.pi/shiftwork.json`, collaborators only, labels required), imports and plans each issue, works the frontier and reports back on the issue; `--once` is one poll plus one pass. It needs the operator's `gh` CLI (`gh auth login`) — see docs/guide.md "Dark-factory mode".
+6. The run is done when every ticket is `resolved` and its Verify commands pass in a clean checkout, or when a ticket carries `<shiftwork:needs-info reason="…"/>` for what only the operator knows.
 
 ## Review landed work
 

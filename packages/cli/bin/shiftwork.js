@@ -34,6 +34,11 @@ Usage:
 
 Run options:
   --once                 Work exactly one ticket
+  --dark-factory         Watch the repo's GitHub issues (the "github" config block):
+                        every github.pollMin minutes import collaborators' issues,
+                        report back on them, and work the frontier; STOP or a signal
+                        ends it after the current shift; --once is one poll + one pass
+                        (see docs/guide.md "Dark-factory mode")
   --ticket <feature>/<NN>
                         Work exactly that ticket (implies --once; refused with the reason
                         when it is not on the frontier; not with --feature or --parallel)
@@ -256,6 +261,7 @@ async function run(argv) {
 		args: argv,
 		options: {
 			once: { type: "boolean" },
+			"dark-factory": { type: "boolean" },
 			ticket: { type: "string" },
 			"dry-run": { type: "boolean" },
 			feature: { type: "string" },
@@ -319,6 +325,20 @@ async function run(argv) {
 	const signalStop = installSignalStop({ root, abortShifts: () => backend.abortAll(), killVerify: killRunningVerify });
 	let summary;
 	try {
+		if (values["dark-factory"]) {
+			const { darkFactoryRun } = await import("../src/dark-factory.js");
+			return await darkFactoryRun({
+				root,
+				tracker: await openRepoTracker(root, config),
+				backend,
+				verify: createVerify(config),
+				config,
+				workspace,
+				classifyTicket,
+				shiftLog: shiftLogger(root),
+				once: values.once,
+			});
+		}
 		summary = await runFrontier({
 			root,
 			tracker: await openRepoTracker(root, config),

@@ -27,6 +27,7 @@
 | `npx shiftwork run --dry-run` | which model, tier and thinking each ticket gets, and whether it gets a review |
 | `npx shiftwork run --once` | work one ticket |
 | `npx shiftwork run` | work the frontier until nothing is left |
+| `npx shiftwork run --dark-factory` | poll the repo's GitHub issues (`github` block), report back and work the frontier; `--once` is one poll + one pass |
 | `npx shiftwork tickets check <feature> [--min <n>] [--except NN]` | planning gate: at least n tickets besides the excepted ones (default `01`) are ready with checkboxes and a Verify line, and every Blocked-by number exists |
 | `npx shiftwork github labels [--create]` | check the dark-factory labels exist in the GitHub repo (`✔ exists` / `✖ missing`, exit 1 when any is missing); `--create` creates the missing ones with a colour and a description, never edits or deletes one |
 | `npx shiftwork tui` | live dashboard: r run · s stop · d dry-run · f filter · q quit |

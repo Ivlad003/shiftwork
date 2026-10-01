@@ -475,6 +475,19 @@ Shiftwork does all GitHub work with the GitHub CLI and its login — no token in
 5. Create the labels: `npx shiftwork github labels --create`. It prints `✔ name exists` / `✖ name missing` for each configured label and creates the missing ones with a colour and a description; it never edits or deletes a label. Without `--create` it only checks, and exits 1 when a label is missing.
 6. Hand work over: a collaborator puts the `in` label on an issue.
 
+## Dark-factory mode
+
+`npx shiftwork run --dark-factory` runs the whole loop unattended: every `github.pollMin` minutes (default 5) it polls the repo's issues, imports the new ones, reports back, works the frontier until it is empty, reports back again, and waits for the next poll. It stops like any runner: a STOP file or a signal ends it after the current shift. `npx shiftwork run --dark-factory --once` does one poll plus one frontier pass, then exits.
+
+How it treats the issues:
+
+- **Collaborators only.** An issue is imported only when its author is a collaborator of the repo (plus the logins in `github.authors`) — issue text is untrusted input to an unattended agent, so anyone else's issue is ignored, and so is an issue without the `in` label. Each issue becomes a feature under `.scratch/`: a spec (the issue itself) and a planning ticket that splits it into implementation tickets.
+- **It reports back, never deletes.** A comment when work starts, a comment per resolved ticket with its shift report and links to the landed commits, a question when a ticket needs information — and a collaborator's answer to that question goes back into the ticket. See [`Dark-factory: labels`](#dark-factory-labels) for the labels it sets.
+- **Closing.** When every ticket of an issue is resolved, the issue is closed with a summary comment (`github.autoClose`, default true). Nothing on GitHub is ever deleted.
+- **Push.** The runner lands on local `main`; the commit links in the comments resolve only once the commits are on GitHub. Set `"push": true` in the `github` block and dark-factory runs `git push origin HEAD` in the main checkout after every pass that landed commits. Without it the comments show the short shas only.
+
+At start, before anything is imported, dark-factory checks your `gh` and its labels: no GitHub CLI, no logged-in `gh`, or a missing label each ends it with an error and how to fix it. Set up all of it once in [`Dark-factory: labels`](#dark-factory-labels).
+
 ## 9. Not there yet
 
 - Editing config from the TUI.
