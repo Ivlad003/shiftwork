@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadConfig } from "../src/index.js";
+import { loadConfig, validateConfig } from "../src/index.js";
 
 async function dirs(project, user) {
 	const root = await mkdtemp(join(tmpdir(), "sw-cfg-"));
@@ -111,4 +111,12 @@ test("parallel and concurrency are validated: > 1 needs worktree.enabled, caps a
 		const bad = await dirs(project);
 		await assert.rejects(loadConfig(bad.root, bad.userDir), message);
 	}
+});
+
+test("verifyTimeoutMin must be a positive number of minutes", () => {
+	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] } } };
+	assert.equal(validateConfig({ ...base, verifyTimeoutMin: 20 }).verifyTimeoutMin, 20);
+	assert.equal(validateConfig(base).verifyTimeoutMin, 10);
+	assert.throws(() => validateConfig({ ...base, verifyTimeoutMin: 0 }), /verifyTimeoutMin/);
+	assert.throws(() => validateConfig({ ...base, verifyTimeoutMin: "20m" }), /verifyTimeoutMin/);
 });

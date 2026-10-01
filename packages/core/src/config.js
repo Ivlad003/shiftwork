@@ -9,6 +9,7 @@ const DEFAULTS = {
 	thinking: "medium",
 	maxAttempts: 3,
 	maxHandoffs: 3,
+	verifyTimeoutMin: 10,
 	softLimitPct: 80,
 	crossTier: "none",
 	allowInPlace: false,
@@ -53,6 +54,9 @@ export function validateConfig(input) {
 	}
 	checkOpenSpec(config.openspec, "openspec");
 	if (!Number.isInteger(config.maxAttempts) || config.maxAttempts < 1) fail("maxAttempts", "must be a positive integer");
+	if (typeof config.verifyTimeoutMin !== "number" || !Number.isFinite(config.verifyTimeoutMin) || config.verifyTimeoutMin <= 0) {
+		fail("verifyTimeoutMin", "must be a number of minutes > 0");
+	}
 	if (!Number.isInteger(config.maxHandoffs) || config.maxHandoffs < 0) fail("maxHandoffs", "must be a non-negative integer");
 	if (typeof config.softLimitPct !== "number" || config.softLimitPct < 0 || config.softLimitPct > 100) {
 		fail("softLimitPct", "must be a number between 0 and 100");
