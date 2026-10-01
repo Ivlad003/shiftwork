@@ -6,11 +6,13 @@ import { readIssueState } from "./github-import.js";
 import { parsePostKey } from "./github-post.js";
 import { githubRows, queueRows, TABS } from "./tui-controls.js";
 
+// queueRows' `resolved` option: "skip" is the Queue tab's view, "only" the Resolved tab's, null the plain frame's.
+
 /** One frame per second, per the spec. */
 export const REFRESH_MS = 1000;
 const LOG_TAIL = 8;
 
-const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", log: "Log", github: "GitHub" };
+const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", log: "Log", resolved: "Resolved", github: "GitHub" };
 
 /** The keys every tab shares, the footer's second line. */
 export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · g dark-factory · q quits";
@@ -35,6 +37,7 @@ const TAB_KEYS = {
 	agents: "↑↓ move · enter log",
 	cooldowns: "↑↓ move",
 	log: "↑↓ move",
+	resolved: "↑↓ move · ←→ fold · enter open · esc back",
 	github: "↑↓ move · enter open in queue",
 };
 
@@ -273,12 +276,13 @@ function renderSized(state, height) {
 }
 
 /**
- * The body of one tab: the queue's rows or open details, the agents' rows, the cooldowns,
- * the log — as its lines plus where the cursor row and the red cooldown rows sit among them.
+ * The body of one tab: the queue's or the Resolved tab's rows or open details, the agents'
+ * rows, the cooldowns, the log — as its lines plus where the cursor row and the red cooldown
+ * rows sit among them.
  */
 function tabBody(state, tab, height, now) {
 	if (height <= 0) return { lines: [], cursor: -1, redRows: [] };
-	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0, ...(state.cursor ?? {}) };
+	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0, ...(state.cursor ?? {}) };
 	const plain = (lines) => ({ lines: lines.slice(0, height), cursor: -1, redRows: [] });
 	/** A tab whose rows sit under a one-line head: the cursor row index shifts by one. */
 	const underHead = (head, window) => ({
@@ -293,6 +297,15 @@ function tabBody(state, tab, height, now) {
 			if (!rows.length) return plain(["Tickets: none (.scratch/<feature>/issues/*.md)"]);
 			const at = clampCursor(cursor.queue, rows.length);
 			const window = scrolled(renderQueueRows(state, at), at, height);
+			return { lines: window.lines, cursor: window.cursor, redRows: [] };
+		}
+		case "resolved": {
+			// The Queue's fully resolved features (GitHub #2), same rows, same cursor and fold.
+			if (state.details) return plain(renderDetails(state));
+			const rows = renderQueueRows(state, -1, { resolved: "only" });
+			if (!rows.length) return plain(["Resolved: none"]);
+			const at = clampCursor(cursor.resolved, rows.length);
+			const window = scrolled(renderQueueRows(state, at, { resolved: "only" }), at, height);
 			return { lines: window.lines, cursor: window.cursor, redRows: [] };
 		}
 		case "agents": {
@@ -362,7 +375,7 @@ function renderPlain(state) {
 	return lines;
 }
 
-/** The header line: version, time, the five tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter. */
+/** The header line: version, time, the six tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter. */
 function headerLine(state, now, tab) {
 	const tabs = TABS.map((t, i) => `${t === tab ? "[" : ""}${i + 1} ${TAB_LABELS[t]}${t === tab ? "]" : ""}`).join("  ");
 	let line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${tabs}`;
@@ -383,13 +396,14 @@ function renderQueueSection(state, now) {
 		const list = state.claims.map((c) => `${keyOf(c.ticket)} pid ${c.pid} · ${formatAge(now - new Date(c.at))}`).join(", ");
 		lines.push(`Claims: ${list}`);
 	}
-	lines.push(...renderQueueRows(state, -1));
+	// The plain frame lists every feature, resolved ones included, as it always has.
+	lines.push(...renderQueueRows(state, -1, { resolved: null }));
 	return lines;
 }
 
 /** The queue's visible rows: `▾ feature 1/3 resolved · 1 ready` folders (▸ collapsed), their tickets under, `> ` marks the cursor. */
-function renderQueueRows(state, cursor) {
-	return queueRows(state, state).map((row, i) => {
+function renderQueueRows(state, cursor, { resolved = "skip" } = {}) {
+	return queueRows(state, state, { resolved }).map((row, i) => {
 		const mark = i === cursor ? ">" : " ";
 		if (row.kind === "feature") {
 			return `${mark} ${row.collapsed ? "▸" : "▾"} ${row.feature} ${row.resolved}/${row.total} resolved · ${row.ready} ready`;

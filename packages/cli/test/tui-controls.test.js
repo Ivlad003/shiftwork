@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { openRunState } from "shiftwork-core";
+import { openRunState, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "../src/dry-run.js";
-import { createTuiControls, decodeKeys, githubRows, queueRows, reduceKey, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
+import { createTuiControls, decodeKeys, githubRows, queueRows, reduceKey, resolvedRows, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
 
 const stubRunner = fileURLToPath(new URL("./fixtures/stub-runner.js", import.meta.url));
 const argvRunner = fileURLToPath(new URL("./fixtures/argv-runner.js", import.meta.url));
@@ -290,15 +290,85 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 	);
 });
 
-test("reducer: 1–5 switch tabs, tab cycles through all five and back", () => {
+/** One frame plus a fully resolved feature: shipped (01, 02, both resolved). */
+const doneFrame = () => ({
+	...frame(),
+	tickets: [
+		...frame().tickets,
+		{ feature: "shipped", number: "01", title: "old", status: RESOLVED, blockedBy: [] },
+		{ feature: "shipped", number: "02", title: "older", status: RESOLVED, blockedBy: [] },
+	],
+});
+
+test("queueRows skips fully resolved features; resolvedRows lists only them, same row shape", () => {
+	const d = doneFrame();
+	const queue = queueRows(d, {});
+	assert.equal(queue.some((r) => r.feature === "shipped"), false); // it lives on the Resolved tab
+	assert.equal(queue.some((r) => r.feature === "demo"), true); // one open ticket: stays on the Queue
+	assert.equal(queue.some((r) => r.feature === "other"), true);
+
+	const resolved = resolvedRows(d, {});
+	assert.equal(resolved.some((r) => r.feature !== "shipped"), false);
+	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, resolved: 2, ready: 0, total: 2 });
+	assert.deepEqual(resolved[1], {
+		kind: "ticket",
+		feature: "shipped",
+		number: "01",
+		title: "old",
+		status: RESOLVED,
+		blockedBy: [],
+		frontier: false,
+		worker: null,
+	});
+
+	// Both honour collapsed and featureFilter like the Queue always has.
+	assert.deepEqual(resolvedRows(d, { collapsed: ["shipped"] }).map((r) => r.kind), ["feature"]);
+	assert.deepEqual(resolvedRows(d, { featureFilter: "shipped" }).length, 3);
+	assert.deepEqual(resolvedRows(d, { featureFilter: "demo" }), []); // demo has an open ticket
+});
+
+test("reducer: 5 reaches the Resolved tab; enter there opens details and esc closes them", () => {
+	const d = doneFrame();
+	assert.equal(press(idle, "5", d).tab, "resolved");
+	let state = press(press(idle, "5", d), "down", d); // onto shipped/01
+	assert.equal(state.cursor.resolved, 1);
+	state = press(state, "enter", d);
+	assert.equal(state.details, "shipped/01");
+	state = press(state, "esc", d);
+	assert.equal(state.details, null);
+});
+
+test("reducer: the Resolved tab's ←→ fold works like the Queue's; n there is refused", () => {
+	const d = doneFrame();
+	let state = press(press(idle, "5", d), "left", d); // the cursor is on the shipped folder
+	assert.deepEqual(state.collapsed, ["shipped"]);
+	assert.equal(resolvedRows(d, state).length, 1); // its tickets are hidden
+	state = press(state, "right", d);
+	assert.deepEqual(state.collapsed, []);
+
+	// n is refused with the usual frontier notice: the ticket's status is resolved.
+	const n = reduceKey({ ...idle, tab: "resolved", cursor: { resolved: 1 } }, "n", d);
+	assert.deepEqual(n.effects, []);
+	assert.match(n.state.notice, /shipped\/01 is not on the frontier: status resolved/);
+});
+
+test("reducer: enter on a GitHub row whose feature is fully resolved opens the Resolved tab", () => {
+	const d = { ...doneFrame(), github: { syncedAt: null, issues: [{ number: 3, title: "Done issue", feature: "shipped", state: "done" }] } };
+	const state = press({ ...idle, tab: "github" }, "enter", d);
+	assert.equal(state.tab, "resolved");
+	assert.equal(state.cursor.resolved, 0); // the shipped folder row
+});
+
+test("reducer: 1–6 switch tabs, tab cycles through all six and back", () => {
 	const d = frame();
 	assert.equal(press(idle, "1", d).tab, "queue");
 	assert.equal(press(idle, "2", d).tab, "agents");
 	assert.equal(press(idle, "3", d).tab, "cooldowns");
 	assert.equal(press(idle, "4", d).tab, "log");
-	assert.equal(press(idle, "5", d).tab, "github");
+	assert.equal(press(idle, "5", d).tab, "resolved");
+	assert.equal(press(idle, "6", d).tab, "github");
 	let state = idle;
-	for (const tab of ["agents", "cooldowns", "log", "github", "queue"]) {
+	for (const tab of ["agents", "cooldowns", "log", "resolved", "github", "queue"]) {
 		state = press(state, "tab", d);
 		assert.equal(state.tab, tab);
 	}
@@ -322,7 +392,7 @@ test("reducer: up/down (k/j) move the cursor, clamped at both ends, each tab its
 	assert.equal(state.cursor.log, 1);
 	assert.equal(state.cursor.queue, 0); // the queue cursor is kept
 	// Empty rows: the cursor stays at 0.
-	assert.deepEqual(press(idle, "down", {}).cursor, { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0 });
+	assert.deepEqual(press(idle, "down", {}).cursor, { queue: 0, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0 });
 });
 
 test("reducer: left collapses the feature under the cursor, right expands it; queueRows hides the tickets", () => {
@@ -453,7 +523,7 @@ test("reducer: n's start effect is wired through the controls like r's", async (
 	await controls.handleKey("n");
 	assert.deepEqual(started, [{ type: "start-runner", feature: null, ticket: "demo/07" }]);
 	assert.equal(controls.view.tab, "queue"); // the tabbed view state survives the round-trip
-	assert.deepEqual(controls.view.cursor, { queue: 1, agents: 0, cooldowns: 0, log: 0, github: 0 });
+	assert.deepEqual(controls.view.cursor, { queue: 1, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0 });
 });
 
 // --- The GitHub tab and the dark-factory toggle (github-watch, ticket 06) ---

@@ -9,17 +9,20 @@ import { collectDryRunLines } from "./dry-run.js";
 /** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · q quit. */
 export const TUI_KEYS = ["r", "s", "d", "f", "g", "q", "\x03"];
 
-/** The five tabs, switched with `1`–`5` (and `tab`, which cycles): the phase-5 spec's four plus GitHub (github-watch). */
-export const TABS = ["queue", "agents", "cooldowns", "log", "github"];
+/** The six tabs, switched with `1`–`6` (and `tab`, which cycles): the phase-5 spec's four, Resolved (GitHub #2) and GitHub (github-watch). */
+export const TABS = ["queue", "agents", "cooldowns", "log", "resolved", "github"];
 
 const ARROWS = { A: "up", B: "down", C: "right", D: "left" };
 
 /**
  * The rows the Queue tab shows and its cursor moves over (spec stories 1, 2, 4, 7):
  * one `feature` folder row, then its `ticket` rows — a collapsed feature hides its tickets.
- * A `featureFilter` narrows the list to that feature. Pure, and shared with rendering.
+ * A `featureFilter` narrows the list to that feature. A feature whose tickets are all
+ * resolved leaves the Queue for the Resolved tab (GitHub #2): `resolved: "only"` lists
+ * just those features (the Resolved tab's rows), `resolved: null` keeps them (the plain
+ * frame of `--once`). Pure, and shared with rendering.
  */
-export function queueRows(dashboard, view) {
+export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 	const filter = view?.featureFilter ?? null;
 	const collapsed = new Set(view?.collapsed ?? []);
 	const tickets = (dashboard?.tickets ?? []).filter((t) => !filter || t.feature === filter);
@@ -32,6 +35,9 @@ export function queueRows(dashboard, view) {
 	const rows = [];
 	for (const feature of [...new Set(tickets.map((t) => t.feature))].sort()) {
 		const own = tickets.filter((t) => t.feature === feature);
+		const done = own.length > 0 && own.every((t) => t.status === RESOLVED);
+		// The Queue and the Resolved tab split on it; null keeps both.
+		if (resolved === "only" ? !done : resolved === "skip" && done) continue;
 		rows.push({
 			kind: "feature",
 			feature,
@@ -58,6 +64,14 @@ export function queueRows(dashboard, view) {
 }
 
 /**
+ * The rows the Resolved tab shows (GitHub #2): the same shape as the Queue's, but only
+ * the features whose tickets are all resolved. Honours `collapsed` and `featureFilter` too.
+ */
+export function resolvedRows(dashboard, view) {
+	return queueRows(dashboard, view, { resolved: "only" });
+}
+
+/**
  * The rows the GitHub tab shows (github-watch, ticket 06): one per issue in
  * `.pi/shiftwork-github.json` — `{ number, title, feature, state }` (state from
  * the feature's tickets, derived by `readGithubIssues` in dashboard.js) — one
@@ -67,11 +81,12 @@ export function githubRows(dashboard) {
 	return [...(dashboard?.github?.issues ?? [])].sort((a, b) => Number(a.number) - Number(b.number));
 }
 
-/** The rows one tab's cursor moves over: Queue's folders and tickets, the live shifts, the cooldowns, the log lines, the GitHub issues. */
+/** The rows one tab's cursor moves over: the Queue's and the Resolved tab's folders and tickets, the live shifts, the cooldowns, the log lines, the GitHub issues. */
 function tabRows(tab, dashboard, view) {
 	switch (tab) {
 		case "queue":
-			return queueRows(dashboard, view);
+		case "resolved":
+			return folderRows(tab, dashboard, view);
 		case "agents":
 			return dashboard?.run?.workers ?? [];
 		case "cooldowns":
@@ -87,7 +102,7 @@ function tabRows(tab, dashboard, view) {
 
 /** The view state with every optional field filled in and each tab's cursor clamped to its rows. */
 function normalize(state, dashboard) {
-	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0, ...state.cursor };
+	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0, ...state.cursor };
 	for (const tab of TABS) {
 		const rows = tabRows(tab, dashboard, state);
 		cursor[tab] = rows.length ? Math.max(0, Math.min(cursor[tab] ?? 0, rows.length - 1)) : 0;
@@ -104,7 +119,7 @@ function normalize(state, dashboard) {
 
 /**
  * The pure key reducer: (state, key, dashboard) → { state, effects }.
- * State: { tab, cursor: { queue, agents, cooldowns, log, github }, collapsed, details, selectedWorker,
+ * State: { tab, cursor: { queue, agents, cooldowns, log, resolved, github }, collapsed, details, selectedWorker,
  * run, features, featureFilter, notice, dryRun }. It is never mutated; `dashboard` (the latest
  * frame, shape `collectDashboardState`) bounds the cursors and decides whether `n` may start.
  * Effects are data for the executor: { type: "start-runner" | "stop-runner" | "dry-run", feature,
@@ -165,6 +180,7 @@ export function reduceKey(state, key, dashboard = {}) {
 		case "3":
 		case "4":
 		case "5":
+		case "6":
 			return { state: { ...normalize(state, dashboard), tab: TABS[Number(key) - 1] }, effects: [] };
 		case "tab": {
 			const current = TABS.includes(state.tab) ? state.tab : "queue";
@@ -204,11 +220,16 @@ function moveCursor(state, dashboard, step) {
 	return { state: { ...norm, cursor: { ...norm.cursor, [norm.tab]: next } }, effects: [] };
 }
 
-/** Collapse (or expand) the feature under the Queue cursor; the other tabs have no folders. */
+/** The rows of the tab whose rows are feature folders with tickets: the Queue's and the Resolved tab's. */
+function folderRows(tab, dashboard, view) {
+	return tab === "resolved" ? resolvedRows(dashboard, view) : queueRows(dashboard, view);
+}
+
+/** Collapse (or expand) the feature under the Queue or Resolved cursor; the other tabs have no folders. */
 function collapse(state, dashboard, fold) {
 	const norm = normalize(state, dashboard);
-	if (norm.tab !== "queue") return { state: norm, effects: [] };
-	const row = queueRows(dashboard, norm)[norm.cursor.queue];
+	if (norm.tab !== "queue" && norm.tab !== "resolved") return { state: norm, effects: [] };
+	const row = folderRows(norm.tab, dashboard, norm)[norm.cursor[norm.tab]];
 	if (!row) return { state: norm, effects: [] };
 	const collapsed = new Set(norm.collapsed);
 	if (fold) collapsed.add(row.feature);
@@ -216,11 +237,11 @@ function collapse(state, dashboard, fold) {
 	return { state: normalize({ ...norm, collapsed: [...collapsed] }, dashboard), effects: [] };
 }
 
-/** Enter: open the selected ticket's details (Queue), select a worker's log (Agents), or jump to the issue's feature (GitHub). */
+/** Enter: open the selected ticket's details (Queue, Resolved), select a worker's log (Agents), or jump to the issue's feature (GitHub). */
 function enterKey(state, dashboard) {
 	const norm = normalize(state, dashboard);
-	if (norm.tab === "queue") {
-		const row = queueRows(dashboard, norm)[norm.cursor.queue];
+	if (norm.tab === "queue" || norm.tab === "resolved") {
+		const row = folderRows(norm.tab, dashboard, norm)[norm.cursor[norm.tab]];
 		if (row?.kind !== "ticket") return { state: norm, effects: [] };
 		return { state: { ...norm, details: `${row.feature}/${row.number}` }, effects: [] };
 	}
@@ -234,27 +255,37 @@ function enterKey(state, dashboard) {
 		const row = githubRows(dashboard)[norm.cursor.github];
 		if (!row?.feature) return { state: norm, effects: [] };
 		// Open the issue's feature in the Queue tab, the cursor on its folder row — clearing a
-		// feature filter that would hide it.
-		const findFolder = (view) => queueRows(dashboard, view).findIndex((r) => r.kind === "feature" && r.feature === row.feature);
+		// feature filter that would hide it. A fully resolved feature lives on the Resolved tab.
+		const findFolder = (rows) => rows.findIndex((r) => r.kind === "feature" && r.feature === row.feature);
 		let view = norm;
-		let at = findFolder(view);
+		let tab = "queue";
+		let at = findFolder(queueRows(dashboard, view));
 		if (at < 0 && norm.featureFilter) {
 			view = { ...norm, featureFilter: null };
-			at = findFolder(view);
+			at = findFolder(queueRows(dashboard, view));
 		}
-		return { state: { ...view, tab: "queue", cursor: { ...view.cursor, queue: at < 0 ? view.cursor.queue : at } }, effects: [] };
+		if (at < 0) {
+			tab = "resolved";
+			at = findFolder(resolvedRows(dashboard, view));
+		}
+		return { state: { ...view, tab, cursor: { ...view.cursor, [tab]: at < 0 ? view.cursor[tab] : at } }, effects: [] };
 	}
 	return { state: norm, effects: [] };
 }
 
-/** `n`: start the selected Queue ticket, refused with a notice unless it is a ready frontier ticket and no runner is live. */
+/**
+ * `n`: start the selected Queue ticket, refused with a notice unless it is a ready frontier
+ * ticket and no runner is live. On the Resolved tab every ticket is resolved, so the notice
+ * says it is not on the frontier: status resolved.
+ */
 function startSelected(state, dashboard) {
 	const norm = normalize(state, dashboard);
 	const run = state.run ?? dashboard?.run;
 	if (run?.live) {
 		return { state: { ...norm, notice: `a runner is already working (pid ${run.pid})` }, effects: [] };
 	}
-	const row = queueRows(dashboard, norm)[norm.cursor.queue];
+	const rows = folderRows(norm.tab, dashboard, norm);
+	const row = rows[norm.tab === "queue" || norm.tab === "resolved" ? norm.cursor[norm.tab] : norm.cursor.queue];
 	if (row?.kind !== "ticket") {
 		const where = row ? `the feature ${row.feature}` : "an empty queue";
 		return { state: { ...norm, notice: `no ticket selected: the cursor is on ${where}` }, effects: [] };
@@ -392,7 +423,7 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
 	let dashboard = { run: null, tickets: [] };
 	let view = {
 		tab: "queue",
-		cursor: { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0 },
+		cursor: { queue: 0, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0 },
 		collapsed: [],
 		details: null,
 		selectedWorker: null,

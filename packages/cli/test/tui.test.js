@@ -246,6 +246,36 @@ test("dashboard: details render the ticket's fields, route and latest shift repo
 	assert.doesNotMatch(without, /### Shift/);
 });
 
+test("dashboard: the Resolved tab lists the fully resolved features; the header shows 5 Resolved", () => {
+	const tickets = [ticket("f", "01", "Open"), ticket("shipped", "01", "Old", "resolved"), ticket("shipped", "02", "Older", "resolved")];
+	const state = { ...base, tickets, frontier: [tickets[0]] };
+
+	const sized = renderDashboard({ ...state, tab: "resolved" }, { width: 120, height: 20 }).join("\n"); // 120: the six-tab header needs the room
+	assert.match(sized, /\[5 Resolved\]/);
+	assert.match(sized, /6 GitHub/);
+	assert.match(sized, /▾ shipped 2\/2 resolved · 0 ready/);
+	assert.match(sized, /01 Old · resolved/);
+	assert.match(sized, /02 Older · resolved/);
+	assert.doesNotMatch(sized, /▾ f /); // the open feature stays on the Queue
+
+	// The Queue tab no longer lists the fully resolved feature.
+	const queue = renderDashboard({ ...state, tab: "queue" }, { width: 120, height: 20 }).join("\n");
+	assert.match(queue, /▾ f 0\/1 resolved · 1 ready/);
+	assert.doesNotMatch(queue, /shipped/);
+
+	// The plain frame (--once, the fallback) lists every feature as it always has.
+	const plain = renderDashboard(state).join("\n");
+	assert.match(plain, /▾ shipped 2\/2 resolved · 0 ready/);
+	assert.match(plain, /▾ f 0\/1 resolved · 1 ready/);
+
+	// An empty Resolved tab says so.
+	const empty = renderDashboard(
+		{ ...state, tickets: [tickets[0]], frontier: [tickets[0]], tab: "resolved" },
+		{ width: 120, height: 20 },
+	).join("\n");
+	assert.match(empty, /Resolved: none/);
+});
+
 test("renderDashboard: each tab fits height and width; a 40-ticket queue keeps the cursor row visible", () => {
 	const tickets = Array.from({ length: 40 }, (_, i) => {
 		const number = String(i + 1).padStart(2, "0");
@@ -514,7 +544,7 @@ test("collectDashboardState: the GitHub tab's rows come from .pi/shiftwork-githu
 
 test("dashboard: the header shows dark-factory while a dark-factory runner is live", () => {
 	const run = { pid: 7, running: true, live: true, mode: "dark-factory", workers: [], summary: { resolved: 0, needsInfo: 0 } };
-	assert.match(renderDashboard({ ...base, run }).join("\n"), /5 GitHub · dark-factory/);
+	assert.match(renderDashboard({ ...base, run }).join("\n"), /6 GitHub · dark-factory/);
 	// A normal runner, or a finished one, shows no mode in the header.
 	assert.doesNotMatch(renderDashboard({ ...base, run: { ...run, mode: null } }).join("\n"), /GitHub · dark-factory/);
 	assert.doesNotMatch(renderDashboard({ ...base, run: { ...run, live: false } }).join("\n"), /GitHub · dark-factory/);
@@ -541,6 +571,12 @@ test("shiftwork tui --once prints one frame and exits", async () => {
 	await writeFile(
 		join(root, ".scratch", "f", "issues", "01-first.md"),
 		"# 01: First\n\n**Blocked by:** None\n\n**Status:** claimed\n",
+	);
+	// A fully resolved feature: the plain frame of --once still lists it, Queue tab or not.
+	await mkdir(join(root, ".scratch", "shipped", "issues"), { recursive: true });
+	await writeFile(
+		join(root, ".scratch", "shipped", "issues", "01-old.md"),
+		"# 01: Old\n\n**Blocked by:** None\n\n**Status:** resolved\n",
 	);
 	await mkdir(join(root, ".pi"), { recursive: true });
 	await writeFile(
@@ -579,6 +615,8 @@ test("shiftwork tui --once prints one frame and exits", async () => {
 	assert.match(stdout, /f\/01 First · fake\/m1 · shift 1 · attempt 1/);
 	assert.match(stdout, /120 tokens · \$0\.25 · 1 turns · ctx 12%/);
 	assert.match(stdout, /01 First · claimed · ● fake\/m1/);
+	assert.match(stdout, /▾ shipped 1\/1 resolved · 0 ready/); // the plain frame keeps resolved features
+	assert.match(stdout, /01 Old · resolved/);
 	assert.match(stdout, /Log: logs\/f\/01\/attempt-1\.jsonl/);
 	assert.match(stdout, /turn · 120 tokens/);
 });
@@ -623,7 +661,8 @@ test("shiftwork tui --help describes the tabs and keys", async () => {
 	assert.match(stdout, /Agents/);
 	assert.match(stdout, /Cooldowns/);
 	assert.match(stdout, /Log/);
-	assert.match(stdout, /1–5/);
+	assert.match(stdout, /1–6/);
+	assert.match(stdout, /Resolved/);
 	assert.match(stdout, /GitHub/);
 	assert.match(stdout, /g toggles dark-factory/);
 	assert.match(stdout, /n runs the selected ticket/);
