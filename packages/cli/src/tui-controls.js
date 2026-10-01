@@ -241,7 +241,10 @@ function refusalReason(dashboard, row) {
 /**
  * Decode raw terminal input into key names: the arrow escape sequences, `enter`, `esc`, `tab`,
  * `backspace`, Ctrl-C (as `"\x03"`, like today) and printable characters — several keys may
- * arrive in one chunk. Unknown escape sequences are consumed, not decoded into garbage.
+ * arrive in one chunk. Kitty keyboard-protocol CSI-u sequences (`ESC[<code>[;<mods>[:<event>]]u`,
+ * which the terminal sends because pi-tui enables the protocol) decode to the same names:
+ * `ESC[27u` is `esc`, `ESC[99;5u` is Ctrl-C; release events (`:3`) are dropped, repeats keep
+ * the key. Unknown escape sequences are consumed, not decoded into garbage.
  */
 export function decodeKeys(data) {
 	const text = Buffer.isBuffer(data) ? data.toString("utf8") : String(data ?? "");
@@ -256,9 +259,19 @@ export function decodeKeys(data) {
 				continue;
 			}
 			if (seq === "[") {
-				// Some other CSI sequence (page keys, F keys…): consume it through its final byte.
-				const end = text.slice(i + 2).search(/[A-Za-z~]/);
-				i += end < 0 ? text.length - i : end + 3;
+				// Another CSI sequence (page keys, F keys, kitty CSI-u…): consume it through
+				// its final byte; a CSI-u one decodes to its key.
+				const rest = text.slice(i + 2);
+				const end = rest.search(/[A-Za-z~]/);
+				if (end < 0) {
+					i = text.length;
+					continue;
+				}
+				if (rest[end] === "u") {
+					const key = decodeCsiU(rest.slice(0, end));
+					if (key !== null) keys.push(key);
+				}
+				i += end + 3;
 				continue;
 			}
 			keys.push("esc");
@@ -294,6 +307,29 @@ export function decodeKeys(data) {
 		i += 1; // any other control byte is not a key
 	}
 	return keys;
+}
+
+/** The kitty CSI-u codes with a key name the reducer understands: Esc, enter, tab, backspace. */
+const CSI_U_KEYS = { 27: "esc", 13: "enter", 9: "tab", 127: "backspace" };
+
+/**
+ * Decode one kitty CSI-u sequence's parameters (`<code>[;<mods>[:<event>]]`): the named keys
+ * map to their key names, `c` with Ctrl (mods 5) to `"\x03"`, other printables without Ctrl/Alt
+ * to their character, release events (`:3`) to null (dropped). Any other combination — a
+ * Ctrl/Alt-modified printable, a control code — is consumed (null) rather than a garbage key.
+ */
+function decodeCsiU(params) {
+	const [keyPart = "", modPart = ""] = params.split(";");
+	const code = Number(keyPart.split(":")[0]) || 0;
+	const mods = Number(modPart.split(":")[0]) || 1; // the bitmask + 1
+	const event = modPart.split(":")[1] ?? "1"; // 1 press, 2 repeat, 3 release
+	if (event === "3") return null; // key released: not a key press
+	const ctrl = (mods - 1) & 4;
+	const alt = (mods - 1) & 2;
+	if (code === 99 && ctrl) return "\x03"; // Ctrl-C keeps today's key name
+	if (code in CSI_U_KEYS) return CSI_U_KEYS[code];
+	if (!ctrl && !alt && code >= 0x20 && code !== 0x7f) return String.fromCodePoint(code);
+	return null;
 }
 
 /**

@@ -476,3 +476,32 @@ test("decodeKeys: each key, and several keys arriving in one chunk", () => {
 	assert.deepEqual(decodeKeys("\x1b[5~n"), ["n"]);
 	assert.deepEqual(decodeKeys("\x1b[1;5Aq"), ["q"]);
 });
+
+test("decodeKeys: kitty keyboard-protocol CSI-u sequences (pi-tui's ProcessTerminal sends them)", () => {
+	assert.deepEqual(decodeKeys("\x1b[27u"), ["esc"]);
+	assert.deepEqual(decodeKeys("\x1b[27;1:1u"), ["esc"]); // press, fully spelled out
+	assert.deepEqual(decodeKeys("\x1b[27;1:3u"), []); // release events are dropped
+	assert.deepEqual(decodeKeys("\x1b[97;1:2u"), ["a"]); // repeat keeps the key
+	assert.deepEqual(decodeKeys("\x1b[99;5u"), ["\x03"]); // Ctrl-C keeps today's key name
+	assert.deepEqual(decodeKeys("\x1b[13u"), ["enter"]);
+	assert.deepEqual(decodeKeys("\x1b[9u"), ["tab"]);
+	assert.deepEqual(decodeKeys("\x1b[127u"), ["backspace"]);
+	assert.deepEqual(decodeKeys("\x1b[110u"), ["n"]);
+	assert.deepEqual(decodeKeys("\x1b[B\x1b[27u"), ["down", "esc"]); // a mixed chunk
+	// Ctrl/Alt-modified printables other than Ctrl-C are consumed, not garbage keys.
+	assert.deepEqual(decodeKeys("\x1b[97;5u"), []);
+	assert.deepEqual(decodeKeys("\x1b[97;3u"), []);
+	// Legacy input still decodes as today alongside the kitty sequences.
+	assert.deepEqual(decodeKeys("\r\x1b[13u\x1b"), ["enter", "enter", "esc"]);
+});
+
+test("kitty keys drive the controls: enter opens details, the kitty esc closes them", async () => {
+	const root = await repo({});
+	const controls = createTuiControls({ root });
+	controls.setDashboard(frame());
+
+	for (const key of decodeKeys("\x1b[B\x1b[13u")) await controls.handleKey(key); // down, enter
+	assert.equal(controls.view.details, "demo/01");
+	for (const key of decodeKeys("\x1b[27u")) await controls.handleKey(key); // the kitty esc
+	assert.equal(controls.view.details, null);
+});
