@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 import { openTracker } from "shiftwork-core";
 
-import { darkFactoryRun, GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE, NO_GITHUB_CONFIG_MESSAGE } from "../src/dark-factory.js";
+import { darkFactoryRun, ghAuthMessage, ghInstallMessage, NO_GITHUB_CONFIG_MESSAGE } from "../src/dark-factory.js";
 import { missingLabelsMessage } from "../src/github-labels.js";
 
 const run = promisify(execFile);
@@ -224,7 +224,8 @@ test("gh auth status failing exits 1 with the login message, importing nothing",
 	});
 
 	assert.equal(code, 1);
-	assert.equal(out[0], GH_AUTH_MESSAGE);
+	assert.ok(out[0].startsWith("dark-factory:"), out[0]);
+	assert.equal(out[0], ghAuthMessage());
 	assert.equal(passes.length, 0);
 	assert.equal(calls.filter((c) => c.op === "listIssues" || c.op === "listLabels").length, 0, "nothing is read from GitHub");
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
@@ -251,7 +252,8 @@ test("gh missing (a bad github.gh, or no gh on PATH) exits 1 with the install me
 	});
 
 	assert.equal(code, 1);
-	assert.equal(out[0], GH_INSTALL_MESSAGE);
+	assert.ok(out[0].startsWith("dark-factory:"), out[0]);
+	assert.equal(out[0], ghInstallMessage());
 	assert.equal(passes.length, 0);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
 });

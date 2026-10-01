@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { openRunState, runFrontier } from "shiftwork-core";
 
 import { execIn } from "./exec.js";
-import { createGitHub, ghPreFlight, GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE } from "./github.js";
+import { createGitHub, ghPreFlight, ghAuthMessage, ghInstallMessage } from "./github.js";
 import { importIssues } from "./github-import.js";
 import { checkLabels, missingLabelsMessage } from "./github-labels.js";
 import { parsePostKey } from "./github-post.js";
@@ -15,8 +15,9 @@ const STOP_FILE = "STOP";
 const WAKE_MS = 60_000;
 
 // The gh pre-flight messages live with the wrapper (github.js); re-exported
-// here for the TUI and the tests, which know them as dark-factory's.
-export { GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE };
+// here for the TUI and the tests, which know them as dark-factory's (they take
+// the command name; dark-factory passes none, so they use its own).
+export { ghAuthMessage, ghInstallMessage };
 /** `run --dark-factory` without a `github` block: there is nothing to watch. */
 export const NO_GITHUB_CONFIG_MESSAGE = 'dark-factory needs a "github" block in .pi/shiftwork.json (see docs/guide.md "Dark-factory mode")';
 
@@ -29,9 +30,10 @@ export const NO_GITHUB_CONFIG_MESSAGE = 'dark-factory needs a "github" block in 
  * `runFrontier` until it is empty, then — with `github.push` on and a pass that
  * landed commits — `git push origin HEAD` in the main checkout, then sync
  * again. A failed push is caught and retried on the next poll; until one
- * succeeds, the sync's commit comments show short shas, not links. It stops
- * like the runner does: a STOP file or a signal ends it after the current
- * shift; `once` does one poll plus one frontier pass and returns 0.
+ * succeeds, the sync's commit comments show short shas, not links (a commit
+ * is linked only once the local remote-tracking refs show it on the remote).
+ * It stops like the runner does: a STOP file or a signal ends it after the
+ * current shift; `once` does one poll plus one frontier pass and returns 0.
  *
  * Before anything else, using the operator's installed `gh` (`github.gh`, else
  * `gh` on PATH): gh missing and `gh auth status` failing each exit 1, then
@@ -97,12 +99,11 @@ export async function darkFactoryRun({
 	const stopped = () => existsSync(join(root, STOP_FILE));
 	const sleepFor = sleep ?? ((ms) => sleepUntil(root, ms));
 
-	// Commit links need the commits on GitHub: while the last `git push` failed
-	// they stay short shas in the sync's comments, and the push is retried on
+	// Commit links need the commits on GitHub, checked per commit by the sync
+	// itself (`git branch -r --contains`); a failed `git push` is retried on
 	// every poll until one succeeds.
-	let commitsOnGitHub = true;
 	let retryPush = false;
-	const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit, linkCommits: config.github.push && commitsOnGitHub });
+	const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit });
 
 	for (;;) {
 		const { imported } = await importIssues({ root, github: githubApi, config });
@@ -135,11 +136,9 @@ export async function darkFactoryRun({
 			if (after !== undefined && (after !== before || retryPush)) {
 				try {
 					await runGit(["push", "origin", "HEAD"]);
-					commitsOnGitHub = true;
 					retryPush = false;
 					log(`dark-factory: pushed ${after.slice(0, 7)} to origin`);
 				} catch (error) {
-					commitsOnGitHub = false;
 					retryPush = true;
 					log(`dark-factory: git push failed: ${String(error?.message ?? error).trim()}; commit links stay short shas until it succeeds`);
 				}

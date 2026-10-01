@@ -66,7 +66,7 @@ function stubGitHub({ collaborators = ["octocat"], comments = [] } = {}) {
 	return { github, calls };
 }
 
-/** A temp repo root: a real git repo with one initial commit. */
+/** A temp repo root: a real git repo with one initial commit, pushed to a bare `origin` remote. */
 async function makeRoot() {
 	const dir = await mkdtemp(join(tmpdir(), "sw-sync-"));
 	await run("git", ["init", "-q"], { cwd: dir });
@@ -75,6 +75,12 @@ async function makeRoot() {
 	await writeFile(join(dir, "README.md"), "# test\n");
 	await run("git", ["add", "-A"], { cwd: dir });
 	await run("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+	// A bare remote named origin, with the initial commit pushed: the sync links
+	// a landed commit only when origin's remote-tracking ref contains it.
+	const remote = `${dir}-remote.git`;
+	await run("git", ["init", "-q", "--bare", remote]);
+	await run("git", ["remote", "add", "origin", remote], { cwd: dir });
+	await run("git", ["push", "-q", "origin", "HEAD"], { cwd: dir });
 	return dir;
 }
 
@@ -134,8 +140,9 @@ test("claimed → one started comment with the working label; resolved → one c
 	assert.deepEqual(calls.filter((c) => c.op === "addLabels").map((c) => c.args[1]), [["shiftwork:working"]]);
 	assert.deepEqual(calls.filter((c) => c.op === "close"), []);
 
-	// The ticket resolves with a landed commit: one comment with title, report and commit link.
+	// The ticket resolves with a landed commit, pushed to origin: one comment with title, report and commit link.
 	const sha = await commit(dir, `shiftwork: ${feature}/02 Fix the thing`);
+	await run("git", ["push", "-q", "origin", "HEAD"], { cwd: dir });
 	await writeTicket(dir, feature, { number: "02", title: "Fix the thing", status: "resolved", comments: shiftReport("resolved") });
 	await sync(dir, github, config);
 
@@ -176,20 +183,25 @@ test("with github.push off, the resolved comment shows the short sha and no link
 	assertNoDeletes(calls);
 });
 
-test("with github.push on but linkCommits false (the last push failed), the resolved comment shows the short sha", async () => {
+test("a resolved comment links a commit on origin/main and shows the short sha for one still only on local main", async () => {
 	const dir = await makeRoot();
-	const feature = "gh-22-unpushed-thing";
+	const feature = "gh-22-half-pushed-thing";
 	await seedState(dir, feature, { number: 22 });
-	const sha = await commit(dir, `shiftwork: ${feature}/02 Unpushed thing`);
-	await writeTicket(dir, feature, { number: "02", title: "Unpushed thing", status: "resolved", comments: shiftReport("resolved") });
+	// Two landed commits of the ticket: the first pushed to origin, the second still local only.
+	const pushed = await commit(dir, `shiftwork: ${feature}/02 Half-pushed thing (1)`);
+	await run("git", ["push", "-q", "origin", "HEAD"], { cwd: dir });
+	const local = await commit(dir, `shiftwork: ${feature}/02 Half-pushed thing (2)`);
+	await writeTicket(dir, feature, { number: "02", title: "Half-pushed thing", status: "resolved", comments: shiftReport("resolved") });
 	const { github, calls } = stubGitHub();
 	const config = { github: { repo: "owner/name", push: true, autoClose: false } };
 
-	await syncIssues({ root: dir, github, config, tracker: openTracker(dir), linkCommits: false });
+	await sync(dir, github, config);
 
+	// The link is decided per commit, not per run: the pushed one is a link, the local-only one the short sha.
 	const body = calls.find((c) => c.op === "comment").args[1];
-	assert.match(body, new RegExp(`- \`${sha.slice(0, 7)}\``));
-	assert.doesNotMatch(body, /github\.com\/.*\/commit\//);
+	assert.match(body, new RegExp(`- \\[${pushed.slice(0, 7)}\\]\\(https://github\\.com/owner/name/commit/${pushed}\\)`));
+	assert.match(body, new RegExp(`- \`${local.slice(0, 7)}\``));
+	assert.doesNotMatch(body, new RegExp(`github\\.com/[^)]+/commit/${local}`));
 	assertNoDeletes(calls);
 });
 
@@ -210,8 +222,9 @@ test("needs-info → one question comment with the reason and the needs-info lab
 
 	const state = await readIssueState(dir);
 	assert.deepEqual(state.issues["10"].posted, ["needs-info:03:1"]);
-	// The question's id is where fresh replies start, and it is Shiftwork's own.
-	assert.equal(state.issues["10"].lastCommentId, 1001);
+	// The question never moves the reply floor (a reply posted between two
+	// questions of one sync is still seen by the next); it is Shiftwork's own.
+	assert.equal(state.issues["10"].lastCommentId, null);
 	assert.deepEqual(state.issues["10"].ownComments, [1001]);
 	assertNoDeletes(calls);
 });
@@ -343,6 +356,97 @@ test("a reply names one waiting ticket with #NN; a deleted comment does not hide
 	assert.match(ticket03, /Use AWS\./);
 	assert.equal(parseTicket(ticket03).status, "ready-for-agent");
 	// The label went once, when the last waiting ticket got its reply.
+	assert.deepEqual(calls.filter((c) => c.op === "removeLabel").map((c) => c.args[1]), ["shiftwork:needs-info"]);
+	assertNoDeletes(calls);
+});
+
+test("a reply posted between two questions of one sync is still delivered on the next", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-21-between-questions";
+	await seedState(dir, feature, { number: 21 });
+	const path02 = await writeTicket(dir, feature, { number: "02", title: "First wait", status: "needs-info", comments: shiftReport("needs-info: Which database?") });
+	const path03 = await writeTicket(dir, feature, { number: "03", title: "Second wait", status: "needs-info", comments: shiftReport("needs-info: Which cloud?") });
+	const comments = [];
+	const { github, calls } = stubGitHub({ comments });
+	const config = { github: { repo: "owner/name", autoClose: false } };
+
+	// A collaborator's reply to ticket 02 lands on GitHub between the two
+	// questions of one sync (after the first post, before the second).
+	let posts = 0;
+	const comment = github.comment;
+	github.comment = async (n, body) => {
+		posts += 1;
+		if (posts === 2) comments.push({ id: 2001, author: "octocat", body: "#02: Use Postgres.", createdAt: "2026-10-01T12:00:00Z" });
+		return comment(n, body);
+	};
+
+	await sync(dir, github, config); // two questions, the reply between them
+	assert.equal(calls.filter((c) => c.op === "comment").length, 2);
+
+	// The next sync still sees the reply: it names ticket 02, so only 02 gets it.
+	await sync(dir, github, config);
+	const first = await readFile(path02, "utf8");
+	assert.match(first, /^### Reply from @octocat$/m);
+	assert.match(first, /Use Postgres\./);
+	assert.equal(parseTicket(first).status, "ready-for-agent");
+	const second = await readFile(path03, "utf8");
+	assert.doesNotMatch(second, /### Reply from/);
+	assert.equal(parseTicket(second).status, "needs-info");
+	assert.deepEqual(calls.filter((c) => c.op === "removeLabel"), []);
+	assertNoDeletes(calls);
+});
+
+test("a reply naming a ticket that isn't waiting gets one comment back and changes no ticket", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-25-not-waiting";
+	await seedState(dir, feature, { number: 25 });
+	const path = await writeTicket(dir, feature, { number: "02", title: "The wait", status: "needs-info", comments: shiftReport("needs-info: Which database?") });
+	const comments = [];
+	const { github, calls } = stubGitHub({ comments });
+	const config = { github: { repo: "owner/name", autoClose: false } };
+
+	await sync(dir, github, config); // the question
+	comments.push({ id: 2001, author: "octocat", body: "#07: Postgres.", createdAt: "2026-10-01T12:00:00Z" });
+	await sync(dir, github, config);
+
+	// One comment back, naming the ticket and the waiting ones; no ticket changed.
+	const bodies = calls.filter((c) => c.op === "comment").map((c) => c.args[1]);
+	assert.equal(bodies.filter((b) => /Ticket 07 isn't waiting/.test(b)).length, 1);
+	assert.equal(bodies[1], "Ticket 07 isn't waiting for an answer; the waiting tickets are: 02");
+	const ticket = await readFile(path, "utf8");
+	assert.doesNotMatch(ticket, /### Reply from/);
+	assert.equal(parseTicket(ticket).status, "needs-info");
+	assert.deepEqual(calls.filter((c) => c.op === "removeLabel"), []);
+	const state = await readIssueState(dir);
+	assert.deepEqual(state.issues["25"].posted, ["needs-info:02:1"]);
+
+	// Once is once: the reply is consumed, so a later sync posts nothing (it
+	// still fetches the comments — the ticket keeps waiting on its question).
+	const actions = (list) => list.filter((c) => ["comment", "addLabels", "removeLabel", "close"].includes(c.op)).length;
+	const before = actions(calls);
+	await sync(dir, github, config);
+	assert.equal(actions(calls), before);
+	assertNoDeletes(calls);
+});
+
+test("a reply naming a ticket when none waits any more says so", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-26-none-waiting";
+	await seedState(dir, feature, { number: 26 });
+	await writeTicket(dir, feature, { number: "02", title: "The wait", status: "needs-info", comments: shiftReport("needs-info: Which database?") });
+	const comments = [];
+	const { github, calls } = stubGitHub({ comments });
+	const config = { github: { repo: "owner/name", autoClose: false } };
+
+	await sync(dir, github, config); // the question
+	// One reply answers the only waiting ticket; a later reply names a ticket when none waits any more.
+	comments.push({ id: 2001, author: "octocat", body: "#02: Postgres.", createdAt: "2026-10-01T12:00:00Z" });
+	comments.push({ id: 2002, author: "octocat", body: "#07: and Redis?", createdAt: "2026-10-01T12:01:00Z" });
+	const { posted } = await sync(dir, github, config);
+
+	const bodies = calls.filter((c) => c.op === "comment").map((c) => c.args[1]);
+	assert.equal(bodies[1], "Ticket 07 isn't waiting for an answer; no ticket is waiting");
+	assert.deepEqual(posted.map((p) => p.key), ["replied:02:1"]);
 	assert.deepEqual(calls.filter((c) => c.op === "removeLabel").map((c) => c.args[1]), ["shiftwork:needs-info"]);
 	assertNoDeletes(calls);
 });

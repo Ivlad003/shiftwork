@@ -23,6 +23,9 @@ export const LABEL_META = {
 	},
 };
 
+/** The command's own name, the prefix of every error it prints (`run --dark-factory` keeps `dark-factory:`). */
+export const LABELS_COMMAND = "shiftwork github labels";
+
 /** The four configured labels in fixed order: `in` first, then the ones Shiftwork sets. */
 export function configuredLabels(config) {
 	const labels = config?.github?.labels;
@@ -41,9 +44,9 @@ export async function checkLabels({ github, config }) {
 	return { missing: Object.values(labels).filter((name) => !existing.has(name)) };
 }
 
-/** The dark-factory start-up error: the repo, the missing labels, the fix and the guide (ticket 05). */
-export function missingLabelsMessage(repo, missing) {
-	return `dark-factory: missing GitHub labels in ${repo}: ${missing.join(", ")}. Create them: shiftwork github labels --create (see docs/guide.md "Dark-factory: labels")`;
+/** The missing-labels error: the repo, the missing labels, the fix and the guide (ticket 05), under the calling command's prefix. */
+export function missingLabelsMessage(repo, missing, command = "dark-factory") {
+	return `${command}: missing GitHub labels in ${repo}: ${missing.join(", ")}. Create them: shiftwork github labels --create (see docs/guide.md "Dark-factory: labels")`;
 }
 
 /**
@@ -58,7 +61,7 @@ export async function githubLabelsCommand({ root, config, create = false, exec, 
 	const ghBinary = config?.github?.gh ?? "gh";
 	const execFn = exec ?? execIn(root);
 
-	const problem = await ghPreFlight({ gh: ghBinary, exec: execFn });
+	const problem = await ghPreFlight({ gh: ghBinary, exec: execFn, command: LABELS_COMMAND });
 	if (problem) {
 		err(problem);
 		return 1;
@@ -83,7 +86,7 @@ export async function githubLabelsCommand({ root, config, create = false, exec, 
 		log(missing.includes(name) ? `✖ ${name} missing` : `✔ ${name} exists`);
 	}
 	if (missing.length) {
-		log(missingLabelsMessage(await github.repo(), missing));
+		log(missingLabelsMessage(await github.repo(), missing, LABELS_COMMAND));
 		return 1;
 	}
 	return 0;

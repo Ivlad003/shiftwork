@@ -164,7 +164,7 @@ test("gh auth status failing exits 1 with the login message", { timeout: 60_000 
 	const { root, statePath, pathDir } = await makeRoot({ noAuth: true });
 	const { code, stderr } = await runOnce({ root, statePath, pathDir });
 	assert.equal(code, 1);
-	assert.match(stderr, /dark-factory needs an authenticated gh: run gh auth login/);
+	assert.match(stderr, /dark-factory: needs an authenticated gh: run gh auth login/);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
 });
 
@@ -172,7 +172,7 @@ test("a bad github.gh exits 1 with the install message", { timeout: 60_000 }, as
 	const { root, statePath, pathDir } = await makeRoot({ gh: "/nonexistent/gh" });
 	const { code, stderr } = await runOnce({ root, statePath, pathDir });
 	assert.equal(code, 1);
-	assert.match(stderr, /dark-factory needs the GitHub CLI: install it from https:\/\/cli\.github\.com, then run gh auth login/);
+	assert.match(stderr, /dark-factory: needs the GitHub CLI: install it from https:\/\/cli\.github\.com, then run gh auth login/);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
 });
 

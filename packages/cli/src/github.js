@@ -4,9 +4,10 @@ import { execIn } from "./exec.js";
 export const SHIFTWORK_MARKER = "<!-- shiftwork -->";
 
 /** gh missing: the binary was not found (a bad `github.gh`, or no `gh` on PATH). */
-export const GH_INSTALL_MESSAGE = "dark-factory needs the GitHub CLI: install it from https://cli.github.com, then run gh auth login";
+export const ghInstallMessage = (command = "dark-factory") =>
+	`${command}: needs the GitHub CLI: install it from https://cli.github.com, then run gh auth login`;
 /** gh found but `gh auth status` failed: no logged-in session for Shiftwork to use. */
-export const GH_AUTH_MESSAGE = "dark-factory needs an authenticated gh: run gh auth login";
+export const ghAuthMessage = (command = "dark-factory") => `${command}: needs an authenticated gh: run gh auth login`;
 
 /** `execFile` could not spawn the gh binary (it is missing or not executable). */
 export function isGhMissing(error) {
@@ -16,14 +17,15 @@ export function isGhMissing(error) {
 /**
  * The gh pre-flight, shared by dark-factory and `github labels` (ticket 10): the
  * binary must exist and `gh auth status` must pass. Resolves null when OK, else
- * the message to print and exit 1 with.
+ * the message to print and exit 1 with. The messages carry the calling command's
+ * name (`command`, default `dark-factory`; `github labels` passes its own).
  */
-export async function ghPreFlight({ gh = "gh", exec } = {}) {
+export async function ghPreFlight({ gh = "gh", exec, command = "dark-factory" } = {}) {
 	try {
 		await exec([gh, "auth", "status"]);
 		return null;
 	} catch (error) {
-		return isGhMissing(error) ? GH_INSTALL_MESSAGE : GH_AUTH_MESSAGE;
+		return isGhMissing(error) ? ghInstallMessage(command) : ghAuthMessage(command);
 	}
 }
 

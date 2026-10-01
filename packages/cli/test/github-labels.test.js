@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createGitHub, GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE } from "../src/github.js";
-import { checkLabels, configuredLabels, githubLabelsCommand, missingLabelsMessage } from "../src/github-labels.js";
+import { createGitHub, ghAuthMessage, ghInstallMessage } from "../src/github.js";
+import { checkLabels, configuredLabels, githubLabelsCommand, LABELS_COMMAND, missingLabelsMessage } from "../src/github-labels.js";
 
 const CONFIG = {
 	github: {
@@ -64,10 +64,15 @@ test("checkLabels returns the absent names, in configured order", async () => {
 	assert.deepEqual(await checkLabels({ github, config: CONFIG }), { missing: ["sw", "sw:needs-info"] });
 });
 
-test("missingLabelsMessage names the repo, the labels, the --create command and the guide section", () => {
+test("missingLabelsMessage names the repo, the labels, the --create command and the guide section, under the command's prefix", () => {
 	assert.equal(
 		missingLabelsMessage("owner/name", ["sw", "sw:done"]),
 		'dark-factory: missing GitHub labels in owner/name: sw, sw:done. '
+			+ 'Create them: shiftwork github labels --create (see docs/guide.md "Dark-factory: labels")',
+	);
+	assert.equal(
+		missingLabelsMessage("owner/name", ["sw"], LABELS_COMMAND),
+		'shiftwork github labels: missing GitHub labels in owner/name: sw. '
 			+ 'Create them: shiftwork github labels --create (see docs/guide.md "Dark-factory: labels")',
 	);
 });
@@ -83,7 +88,7 @@ test("github labels prints ✔/✖ per label and exits 1 when one is missing", a
 		"✔ sw:working exists",
 		"✔ sw:needs-info exists",
 		"✔ sw:done exists",
-		missingLabelsMessage("owner/name", ["sw"]),
+		missingLabelsMessage("owner/name", ["sw"], LABELS_COMMAND),
 	]);
 	assert.ok(calls.every((args) => !args.includes("create")), "no label is created without --create");
 });
@@ -148,7 +153,9 @@ test("github labels exits 1 with the install message when gh is missing, before 
 	});
 
 	assert.equal(code, 1);
-	assert.deepEqual(errs, [GH_INSTALL_MESSAGE]);
+	// The error is the labels command's own, not dark-factory's.
+	assert.ok(errs[0].startsWith("shiftwork github labels:"), errs[0]);
+	assert.deepEqual(errs, [ghInstallMessage(LABELS_COMMAND)]);
 });
 
 test("github labels exits 1 with the login message when gh auth status fails, before listing anything", async () => {
@@ -165,7 +172,7 @@ test("github labels exits 1 with the login message when gh auth status fails, be
 	});
 
 	assert.equal(code, 1);
-	assert.deepEqual(errs, [GH_AUTH_MESSAGE]);
+	assert.deepEqual(errs, [ghAuthMessage(LABELS_COMMAND)]);
 });
 
 test("github labels runs the binary from github.gh, not gh from PATH", async () => {

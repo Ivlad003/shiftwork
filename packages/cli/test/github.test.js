@@ -9,8 +9,8 @@ import { promisify } from "node:util";
 
 import {
 	createGitHub,
-	GH_AUTH_MESSAGE,
-	GH_INSTALL_MESSAGE,
+	ghAuthMessage,
+	ghInstallMessage,
 	ghPreFlight,
 	parseRepoUrl,
 	SHIFTWORK_MARKER,
@@ -197,16 +197,24 @@ test("close(n) closes the issue, with an optional final comment that ends with t
 	]);
 });
 
-test("ghPreFlight: null when gh auth status passes, the two messages when it does not", async () => {
+test("ghPreFlight: null when gh auth status passes, the two messages (per command) when it does not", async () => {
 	assert.equal(await ghPreFlight({ gh: "gh", exec: stubExec(() => "").exec }), null);
 
 	const missing = async () => {
 		throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
 	};
-	assert.equal(await ghPreFlight({ gh: "gh", exec: missing }), GH_INSTALL_MESSAGE);
+	assert.equal(await ghPreFlight({ gh: "gh", exec: missing }), ghInstallMessage());
 
 	const noAuth = async () => {
 		throw Object.assign(new Error("gh: exit status 1"), { code: 1, stderr: "not logged in" });
 	};
-	assert.equal(await ghPreFlight({ gh: "/x/gh", exec: noAuth }), GH_AUTH_MESSAGE);
+	assert.equal(await ghPreFlight({ gh: "/x/gh", exec: noAuth }), ghAuthMessage());
+
+	// The messages take the calling command's name: `github labels` gets its own prefix.
+	assert.equal(await ghPreFlight({ gh: "gh", exec: missing, command: "shiftwork github labels" }), ghInstallMessage("shiftwork github labels"));
+	assert.equal(
+		ghInstallMessage("shiftwork github labels"),
+		"shiftwork github labels: needs the GitHub CLI: install it from https://cli.github.com, then run gh auth login",
+	);
+	assert.equal(ghAuthMessage("shiftwork github labels"), "shiftwork github labels: needs an authenticated gh: run gh auth login");
 });
