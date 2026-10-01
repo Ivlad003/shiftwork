@@ -954,6 +954,39 @@ test("a provider limit before any change hands the ticket to the next model, eve
 	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: quota on fake/);
 });
 
+test("a shift cut short by a budget with nothing changed is handed on, even when the gate already passes", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `npm test`" }) });
+	let changed = false;
+	const workspace = { ...fakeWorkspace(), async hasChanges() { return changed; } };
+	const backend = fakeBackend([{ events: [turn, turn, { type: "end", stopReason: "stop" }] }, { events: [{ type: "end", stopReason: "stop" }] }]);
+	// The gate passes before any work (it doesn't test the ticket); the second shift makes a change.
+	const verify = async () => {
+		if (backend.shifts.length === 2) changed = true;
+		return { ok: true, results: [{ cmd: "npm test", code: 0, outputTail: "" }] };
+	};
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config: chainConfig("new-process"), workspace });
+
+	assert.equal(backend.shifts.length, 2, "the budget handoff goes ahead");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Handoff — shift 1, fake\/m1 → fake\/m2, reason: budget\.maxTurns/);
+	assert.doesNotMatch(text, /no shift changed anything/);
+});
+
+test("a shift that ends on its own with nothing changed and a passing gate still needs info", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `npm test`" }) });
+	const workspace = fakeWorkspace({ changed: false });
+	const backend = fakeBackend([{ events: [turn, { type: "end", stopReason: "stop" }] }]);
+	const verify = async () => ({ ok: true, results: [{ cmd: "npm test", code: 0, outputTail: "" }] });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config: chainConfig("new-process"), workspace });
+
+	assert.equal(backend.shifts.length, 1);
+	assert.match(summary.needsInfo[0].reason, /no shift changed anything/);
+});
+
 function stallConfig(extra = {}) {
 	return {
 		defaultType: "code",

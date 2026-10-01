@@ -508,6 +508,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		) {
 			freshHandoff = { reason: "verify gate failed", kind: "verifyFailed" };
 		}
+		// A gate that passes with nothing changed doesn't test the ticket. If a budget cut the
+		// shift short, nobody has worked the ticket yet: hand it on instead of giving up.
+		const unchanged = decision.action === "resolve" && workspace?.hasChanges ? !(await workspace.hasChanges(ticket)) : false;
+		if (unchanged && freshHandoff) decision = { action: "retry" };
 		let nextRoute = undefined;
 		handoffCount += inPlaceHandoffs.length;
 		for (const handoff of inPlaceHandoffs) {
@@ -550,7 +554,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			decision = { action: NEEDS_INFO, reason: `maxHandoffs (${maxHandoffs}) exceeded` };
 		}
 
-		if (workspace?.hasChanges && decision.action === "resolve" && !(await workspace.hasChanges(ticket))) {
+		if (unchanged && decision.action === "resolve") {
 			decision = { action: NEEDS_INFO, reason: "verify gate passed but no shift changed anything: the gate doesn't test this ticket" };
 		}
 		let redoNext = false;

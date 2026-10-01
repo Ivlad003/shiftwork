@@ -190,7 +190,7 @@ Yes, all of these exist. There are two levels:
 | Field | Limits | In a `Budget:` line |
 |---|---|---|
 | `maxTurns` | agent turns | `50 turns` |
-| `maxTokens` | tokens | `200k tokens` |
+| `maxTokens` | tokens: every token of every turn, cached context included, so 3M ≈ 20 turns at a 140k context | `200k tokens` |
 | `maxCostUsd` | dollars | `$2` |
 | `maxWallMin` | wall-clock minutes | `30 min`, `1h 30min` |
 | `maxContextPct` | how full the context window may get | `60% context` |
