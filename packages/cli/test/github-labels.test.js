@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createGitHub } from "../src/github.js";
+import { createGitHub, GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE } from "../src/github.js";
 import { checkLabels, configuredLabels, githubLabelsCommand, missingLabelsMessage } from "../src/github-labels.js";
 
 const CONFIG = {
@@ -25,9 +25,10 @@ function stubExec(reply) {
 	return { exec, calls };
 }
 
-/** Reply to `gh label list` with the names, and to `gh label create` with "". */
+/** Reply to `gh auth status` with "", to `gh label list` with the names, and to `gh label create` with "". */
 function labelExec(names) {
 	return stubExec((args) => {
+		if (args[1] === "auth") return "";
 		if (args.includes("list")) return JSON.stringify(names.map((name) => ({ name })));
 		if (args.includes("create")) return "";
 		return undefined;
@@ -132,6 +133,39 @@ test("createGitHub runs the configured gh binary (github.gh), default gh from PA
 
 	assert.deepEqual(await checkLabels({ github, config: CONFIG }), { missing: [] });
 	assert.equal(calls[0][0], "/x/gh", "the stub exec sees the configured binary");
+});
+
+test("github labels exits 1 with the install message when gh is missing, before listing anything", async () => {
+	const errs = [];
+	const code = await githubLabelsCommand({
+		root: "/repo",
+		config: CONFIG,
+		exec: async () => {
+			throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
+		},
+		log: () => {},
+		err: (line) => errs.push(line),
+	});
+
+	assert.equal(code, 1);
+	assert.deepEqual(errs, [GH_INSTALL_MESSAGE]);
+});
+
+test("github labels exits 1 with the login message when gh auth status fails, before listing anything", async () => {
+	const errs = [];
+	const code = await githubLabelsCommand({
+		root: "/repo",
+		config: CONFIG,
+		exec: async (args) => {
+			if (args[1] === "auth") throw Object.assign(new Error("gh: exit status 1"), { code: 1, stderr: "not logged in" });
+			throw new Error(`unexpected exec: ${args.join(" ")}`);
+		},
+		log: () => {},
+		err: (line) => errs.push(line),
+	});
+
+	assert.equal(code, 1);
+	assert.deepEqual(errs, [GH_AUTH_MESSAGE]);
 });
 
 test("github labels runs the binary from github.gh, not gh from PATH", async () => {

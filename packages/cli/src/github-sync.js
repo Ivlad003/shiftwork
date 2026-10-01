@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { readIssueState, writeIssueState } from "./github-import.js";
+import { SHIFTWORK_MARKER } from "./github.js";
 
 const run = promisify(execFile);
 
@@ -22,6 +23,9 @@ const SHIFT_HEADING = /^### Shift \d+ — \S+ \S+ \([^)]*\)$/gm;
 /** The reason of the newest needs-info outcome: `- Outcome: needs-info: …` or `- Stopped: …`. */
 const REASON_LINE = /^- (?:Outcome: needs-info|Stopped): (.+)$/gm;
 
+/** `#NN` or `NN:` at the start of a reply names the ticket it is for. */
+const TICKET_REF = /^\s*(?:#(\d+)(?!\d)|(\d+):(?!\d))/;
+
 /**
  * Report ticket progress back to the GitHub issue (spec: github-watch, ticket 04).
  *
@@ -32,34 +36,60 @@ const REASON_LINE = /^- (?:Outcome: needs-info|Stopped): (.+)$/gm;
  * - `working` label + a "Work started" comment when a ticket is first `claimed`;
  * - per resolved ticket, a comment with its title, its latest `### Shift`
  *   report and the landed commits (`git log --grep "shiftwork: <feature>/<NN>"`)
- *   as commit links when `github.push` is on, else the short sha;
- * - a needs-info ticket's reason as a question comment + the `needsInfo` label;
- * - a collaborator's reply after a question: appended to the ticket as
- *   `### Reply from @<login>`, the ticket back to `ready-for-agent`, the
- *   `needsInfo` label removed;
+ *   as commit links when the commits are on GitHub, else the short sha;
+ * - a needs-info ticket's reason as a question comment + the `needsInfo` label,
+ *   once per occurrence (`needs-info:NN:<k>`), so a ticket that needs
+ *   information again asks again;
+ * - a collaborator's reply after a question: appended to the ticket (or to
+ *   every ticket of the issue that waits on a question, or to the one the
+ *   reply names with `#NN`/`NN:`), the ticket back to `ready-for-agent`, and
+ *   the `needsInfo` label removed once no ticket of the issue waits any more;
  * - when every ticket is resolved and `autoClose` is on: a summary comment,
- *   the `done` label (dropping `working`) and the issue closed — once.
+ *   the issue closed, the `done` label (dropping `working`) — each its own
+ *   key, so a failed close or label is retried without re-posting the comment.
  *
- * Labels are never created here (they are checked at dark-factory start), and
- * the only labels ever removed are `needsInfo` and `working` (with `done`).
- * Every post is recorded (state written) before the next one, so a crash
- * re-posts at most one comment.
+ * Comments are tracked by id (`lastCommentId`), not by count: deleting an
+ * earlier comment cannot hide a later reply. Shiftwork's own comments never
+ * count as replies: their ids are recorded (`ownComments`) and they end with
+ * the hidden `<!-- shiftwork -->` marker. Labels are never created here (they
+ * are checked at dark-factory start), and the only labels ever removed are
+ * `needsInfo` and `working` (with `done`). Every post is recorded (state
+ * written) before the next one, so a crash re-posts at most one comment.
  *
+ * @param {boolean} [linkCommits] link landed commits in resolved comments;
+ *   defaults to `github.push`. dark-factory passes false while the last
+ *   `git push` failed, so those comments show short shas until it succeeds.
  * @returns {Promise<{ posted: { number: number, key: string }[] }>} the posts made this sync
  */
-export async function syncIssues({ root, github, config, tracker, git } = {}) {
+export async function syncIssues({ root, github, config, tracker, git, linkCommits } = {}) {
 	const githubConfig = config?.github ?? {};
 	const labels = { ...LABEL_DEFAULTS, ...(githubConfig.labels ?? {}) };
 	const autoClose = githubConfig.autoClose ?? true;
-	const push = githubConfig.push ?? false;
+	const link = linkCommits ?? (githubConfig.push ?? false);
 	const extraAuthors = new Set(githubConfig.authors ?? []);
 	const runGit =
 		git ?? (async (args) => (await run("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+	// Collaborators are fetched at most once per sync, however many replies arrive.
+	let collaborators;
+	const allowedAuthors = async () => {
+		collaborators ??= new Set([...(await github.collaborators()), ...extraAuthors]);
+		return collaborators;
+	};
 
 	const state = await readIssueState(root);
 	const posted = [];
 
 	for (const entry of Object.values(state.issues)) {
+		if (!Array.isArray(entry.ownComments)) entry.ownComments = [];
+
+		// A legacy `commentsSeen` count migrates to `lastCommentId`: every
+		// comment that exists now counts as seen.
+		if (entry.commentsSeen !== undefined) {
+			delete entry.commentsSeen;
+			if (entry.lastCommentId == null) entry.lastCommentId = maxCommentId(await github.issueComments(entry.number)) ?? 0;
+			await writeIssueState(root, state);
+		}
+
 		const tickets = (await tracker.list())
 			.filter((t) => t.feature === entry.feature && t.number && t.path)
 			.sort((a, b) => Number(a.number) - Number(b.number));
@@ -71,26 +101,45 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 			await writeIssueState(root, state);
 			posted.push({ number: entry.number, key });
 		};
+		/** Post a comment and remember its id, so Shiftwork's own comments never count as replies. */
+		const postComment = async (body) => {
+			const id = await github.comment(entry.number, body);
+			if (Number.isFinite(Number(id))) entry.ownComments.push(Number(id));
+			return id;
+		};
+		// Questions and replies are keyed per occurrence (`needs-info:NN:<k>` /
+		// `replied:NN:<k>`): a ticket that needs information again asks again.
+		const questions = (t) => entry.posted.filter((key) => key.startsWith(`needs-info:${t.number}:`)).length;
+		const answers = (t) => entry.posted.filter((key) => key.startsWith(`replied:${t.number}:`)).length;
+		const waiting = () => tickets.filter((t) => t.status === NEEDS_INFO && questions(t) > answers(t));
 
-		// A collaborator's reply to a needs-info question (d): the ticket goes back
-		// to ready-for-agent with the reply under its `## Comments`.
-		for (const t of tickets.filter((t) => t.status === NEEDS_INFO && wasPosted(`needs-info:${t.number}`) && !wasPosted(`replied:${t.number}`))) {
+		// A collaborator's reply to a needs-info question (d): every ticket of the
+		// issue that waits on a question gets it, or the one it names with
+		// `#NN`/`NN:`; each goes back to ready-for-agent with the reply under its
+		// `## Comments`.
+		if (waiting().length) {
 			const comments = await github.issueComments(entry.number);
-			const fresh = comments.slice(entry.commentsSeen ?? 0);
-			if (!fresh.length) continue;
-			for (const reply of fresh) {
-				if (!reply.author) continue;
+			const own = (c) => entry.ownComments.includes(Number(c.id)) || String(c.body ?? "").includes(SHIFTWORK_MARKER);
+			for (const reply of comments.filter((c) => Number(c.id) > (entry.lastCommentId ?? 0))) {
+				if (own(reply) || !reply.author) continue;
 				// Only collaborators and configured authors may steer the work (spec 1).
-				const allowed = new Set([...(await github.collaborators()), ...extraAuthors]);
+				const allowed = await allowedAuthors();
 				if (!allowed.has(reply.author)) continue;
-				await tracker.appendComment(t, `### Reply from @${reply.author}\n\n${String(reply.body ?? "").trim()}`);
-				await tracker.setStatus(t, READY);
-				await github.removeLabel(entry.number, labels.needsInfo);
-				await post(`replied:${t.number}`);
+				const named = parseTicketRef(reply.body);
+				const targets = named === undefined ? waiting() : waiting().filter((t) => Number(t.number) === named);
+				for (const t of targets) {
+					await tracker.appendComment(t, `### Reply from @${reply.author}\n\n${String(reply.body ?? "").trim()}`);
+					await tracker.setStatus(t, READY);
+					t.status = READY; // the same sync's later loops look at these tickets too
+					await post(`replied:${t.number}:${answers(t) + 1}`);
+				}
 			}
-			// Replies are only ever fresh once, whoever wrote them: remember how far we read.
-			entry.commentsSeen = comments.length;
+			// Every comment is consumed now, whoever wrote it: the newest id is
+			// where the next sync starts, so a deleted comment hides nothing.
+			entry.lastCommentId = maxCommentId(comments) ?? entry.lastCommentId;
 			await writeIssueState(root, state);
+			// The needsInfo label goes once no ticket of the issue waits any more.
+			if (!waiting().length) await github.removeLabel(entry.number, labels.needsInfo);
 		}
 
 		// Work started (a): the working label once, then a comment per first-claimed ticket.
@@ -99,37 +148,54 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 				await github.addLabels(entry.number, [labels.working]);
 				await post("working");
 			}
-			await github.comment(entry.number, `**Work started** — ticket ${t.number}: ${t.title}`);
+			await postComment(`**Work started** — ticket ${t.number}: ${t.title}`);
 			await post(`started:${t.number}`);
 		}
 
 		// Resolved tickets (b): title, latest shift report, landed commits.
 		for (const t of tickets.filter((t) => t.status === RESOLVED && !wasPosted(`resolved:${t.number}`))) {
 			const markdown = await readFile(t.path, "utf8");
-			const repo = push ? (githubConfig.repo ?? (typeof github.repo === "function" ? await github.repo() : undefined)) : undefined;
+			const repo = link ? githubConfig.repo ?? (typeof github.repo === "function" ? await github.repo() : undefined) : undefined;
 			const shas = await landedCommits(runGit, entry.feature, t.number);
-			await github.comment(entry.number, resolvedComment(t, markdown, shas, repo));
+			await postComment(resolvedComment(t, markdown, shas, repo));
 			await post(`resolved:${t.number}`);
 		}
 
-		// The needs-info question (c): count the comments first, so the question
-		// itself is never mistaken for a reply to it.
-		for (const t of tickets.filter((t) => t.status === NEEDS_INFO && !wasPosted(`needs-info:${t.number}`))) {
+		// The needs-info question (c), once per occurrence: fresh comments are the
+		// ones after the question, so the question itself is never a reply to it.
+		for (const t of tickets.filter((t) => t.status === NEEDS_INFO && questions(t) === answers(t))) {
 			const markdown = await readFile(t.path, "utf8");
-			entry.commentsSeen = (await github.issueComments(entry.number)).length;
-			await writeIssueState(root, state);
 			const reason = needsInfoReason(markdown) ?? "the ticket needs information from a collaborator";
-			await github.comment(entry.number, `**Ticket ${t.number} needs information: ${t.title}**\n\n${reason}`);
-			await post(`needs-info:${t.number}`);
+			const id = await postComment(`**Ticket ${t.number} needs information: ${t.title}**\n\n${reason}`);
+			// The question's id is the new floor for replies.
+			entry.lastCommentId = Number.isFinite(Number(id))
+				? Number(id)
+				: maxCommentId(await github.issueComments(entry.number)) ?? entry.lastCommentId;
+			await writeIssueState(root, state);
+			await post(`needs-info:${t.number}:${questions(t) + 1}`);
 			await github.addLabels(entry.number, [labels.needsInfo]);
 		}
 
-		// Everything resolved (e): summary, done label (dropping working), close — once.
-		if (autoClose && !wasPosted("done") && tickets.every((t) => t.status === RESOLVED)) {
-			await github.close(entry.number, summaryComment(tickets));
-			await post("done");
-			await github.addLabels(entry.number, [labels.done]);
-			if (wasPosted("working")) await github.removeLabel(entry.number, labels.working);
+		// Everything resolved (e): summary comment, close, done label (dropping
+		// working) — each its own key, so a failed close or label is retried next
+		// sync without re-posting the comment.
+		if (autoClose && tickets.every((t) => t.status === RESOLVED)) {
+			if (!wasPosted("summary")) {
+				await postComment(summaryComment(tickets));
+				await post("summary");
+			}
+			if (!wasPosted("done")) {
+				await github.close(entry.number);
+				await post("done");
+			}
+			if (!wasPosted("done-label")) {
+				await github.addLabels(entry.number, [labels.done]);
+				await post("done-label");
+			}
+			if (wasPosted("working") && !wasPosted("working-removed")) {
+				await github.removeLabel(entry.number, labels.working);
+				await post("working-removed");
+			}
 		}
 	}
 
@@ -139,6 +205,25 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 	await writeIssueState(root, state);
 
 	return { posted };
+}
+
+/**
+ * The ticket number a reply names with `#NN` or `NN:` at the start, or
+ * undefined when it names none (then every waiting ticket gets the reply).
+ */
+export function parseTicketRef(body) {
+	const match = String(body ?? "").match(TICKET_REF);
+	return match ? Number(match[1] ?? match[2]) : undefined;
+}
+
+/** The newest comment id in `comments`, or null when there are none. */
+function maxCommentId(comments) {
+	let max = null;
+	for (const c of comments) {
+		const id = Number(c?.id);
+		if (Number.isFinite(id) && (max === null || id > max)) max = id;
+	}
+	return max;
 }
 
 /** The landed commits of one ticket: `git log --grep "shiftwork: <feature>/<NN>" --format=%H`, newest first. */

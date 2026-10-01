@@ -88,6 +88,7 @@ test("a second run imports nothing: the state file makes it idempotent", async (
 		title: "Support GitHub issues",
 		importedAt: "2026-10-01T10:00:00.000Z",
 		lastCommentId: null,
+		ownComments: [],
 		posted: [],
 	});
 });

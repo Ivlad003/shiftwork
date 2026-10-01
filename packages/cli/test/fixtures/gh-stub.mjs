@@ -21,9 +21,10 @@ const issue = (n) => state.issues.find((i) => i.number === Number(n));
 const save = () => writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
 const comment = (n, body) => {
 	const i = issue(n);
-	i.comments.push({ author: state.login ?? "octocat", body, createdAt: new Date().toISOString() });
+	state.commentId = (state.commentId ?? 1000) + 1;
+	i.comments.push({ id: state.commentId, author: state.login ?? "octocat", body, createdAt: new Date().toISOString() });
 	save();
-	return `https://github.com/${state.repo}/issues/${i.number}#comment-${i.comments.length}`;
+	return state.commentId;
 };
 
 if (cmd === "auth" && rest[0] === "status") {
@@ -37,8 +38,21 @@ if (cmd === "label" && rest[0] === "list") {
 	console.log(JSON.stringify(state.labels.map((name) => ({ name }))));
 	process.exit(0);
 }
-if (cmd === "api" && rest[0]?.startsWith(`repos/${state.repo}/collaborators`)) {
-	console.log(JSON.stringify(state.collaborators.map((login) => ({ login }))));
+if (cmd === "api" && rest[0] === `repos/${state.repo}/collaborators`) {
+	// --paginate --jq .[].login: one login per line.
+	console.log(state.collaborators.join("\n"));
+	process.exit(0);
+}
+if (cmd === "api" && rest[0]?.startsWith(`repos/${state.repo}/issues/`) && rest[0]?.endsWith("/comments")) {
+	const n = rest[0].split("/")[4];
+	const body = flag("-f")?.slice("body=".length);
+	if (body !== undefined) {
+		// POST: record the comment, answer with the created comment's JSON.
+		console.log(JSON.stringify({ id: comment(n, body) }));
+		process.exit(0);
+	}
+	// GET --paginate --jq: one normalized comment per line, oldest first.
+	for (const c of issue(n).comments) console.log(JSON.stringify({ id: c.id, author: c.author, body: c.body, createdAt: c.createdAt }));
 	process.exit(0);
 }
 if (cmd === "issue" && rest[0] === "list") {
@@ -51,14 +65,6 @@ if (cmd === "issue" && rest[0] === "list") {
 	);
 	process.exit(0);
 }
-if (cmd === "issue" && rest[0] === "view") {
-	console.log(JSON.stringify({ comments: issue(rest[1]).comments }));
-	process.exit(0);
-}
-if (cmd === "issue" && rest[0] === "comment") {
-	console.log(comment(rest[1], flag("--body")));
-	process.exit(0);
-}
 if (cmd === "issue" && rest[0] === "edit") {
 	const i = issue(rest[1]);
 	for (const label of flags("--add-label")) if (!i.labels.includes(label)) i.labels.push(label);
@@ -69,7 +75,6 @@ if (cmd === "issue" && rest[0] === "edit") {
 if (cmd === "issue" && rest[0] === "close") {
 	const i = issue(rest[1]);
 	i.state = "closed";
-	if (flag("--comment") !== undefined) comment(rest[1], flag("--comment"));
 	save();
 	console.log(`closed ${i.number}`);
 	process.exit(0);

@@ -16,6 +16,7 @@
 - [The verify gate, not the agent, decides that a ticket is resolved](docs/adr/0003-verify-gate-decides-resolution.md)
 - [One backend-free core with thin adapters, published under unscoped names](docs/adr/0004-core-without-backend-dependencies.md)
 - [Every model change is a fresh handoff by default](docs/adr/0005-fresh-handoffs-only-by-default.md)
+- [GitHub is an import source, not the tracker](docs/adr/0006-github-is-an-import-source.md)
 
 ## Specs
 

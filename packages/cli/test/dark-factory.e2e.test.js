@@ -54,11 +54,11 @@ async function makeRoot({ issues = [], labels = [...LABELS], noAuth = false, gh 
 	return { root, statePath, pathDir };
 }
 
-/** Run `shiftwork run --dark-factory --once --no-worktree` in `root` and collect stdout/stderr/exit code. */
-async function runOnce({ root, statePath, pathDir, script }) {
+/** Run `shiftwork <args>` in `root` and collect stdout/stderr/exit code. */
+async function shiftwork(args, { root, statePath, pathDir, script }) {
 	const home = await mkdtemp(join(tmpdir(), "sw-df-home-"));
 	try {
-		const { stdout, stderr } = await promisify(execFile)(process.execPath, [bin, "run", "--dark-factory", "--once", "--no-worktree", "--dir", root], {
+		const { stdout, stderr } = await promisify(execFile)(process.execPath, [bin, ...args], {
 			env: {
 				...process.env,
 				PATH: `${pathDir}:${process.env.PATH}`,
@@ -71,6 +71,11 @@ async function runOnce({ root, statePath, pathDir, script }) {
 	} catch (error) {
 		return { code: error.code ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
 	}
+}
+
+/** Run `shiftwork run --dark-factory --once --no-worktree` in `root`. */
+function runOnce(ctx) {
+	return shiftwork(["run", "--dark-factory", "--once", "--no-worktree", "--dir", ctx.root], ctx);
 }
 
 test("run --dark-factory --once: an issue is imported, planned and built, its comments land, it is closed, exit 0", { timeout: 240_000 }, async () => {
@@ -126,7 +131,9 @@ test("run --dark-factory --once: an issue is imported, planned and built, its co
 	assert.match(stdout, /✔ gh-5-add-a-greeting-file\/02 resolved/);
 	assert.match(stdout, /github#5: comment: ticket 01 resolved/);
 	assert.match(stdout, /github#5: comment: ticket 02 resolved/);
-	assert.match(stdout, /github#5: closed with a summary, labeled done/);
+	assert.match(stdout, /github#5: comment: closing summary/);
+	assert.match(stdout, /github#5: closed the issue/);
+	assert.match(stdout, /github#5: labeled done/);
 
 	// Both tickets are resolved on disk; the plan shift filed exactly one ticket.
 	const plan = await readFile(join(root, ".scratch", feature, "issues", "01-plan.md"), "utf8");
@@ -144,6 +151,13 @@ test("run --dark-factory --once: an issue is imported, planned and built, its co
 	assert.equal(bodies.filter((b) => /Ticket 01 resolved/.test(b)).length, 1);
 	assert.equal(bodies.filter((b) => /Ticket 02 resolved/.test(b)).length, 1);
 	assert.equal(bodies.filter((b) => /All tickets of this issue are resolved/.test(b)).length, 1);
+});
+
+test("run --dark-factory --ticket exits 1 with the combination message", { timeout: 60_000 }, async () => {
+	const ctx = await makeRoot();
+	const { code, stderr } = await shiftwork(["run", "--dark-factory", "--ticket", "gh-8-fix-the-thing/01", "--dir", ctx.root], ctx);
+	assert.equal(code, 1);
+	assert.match(stderr, /--dark-factory cannot be combined with --ticket/);
 });
 
 test("gh auth status failing exits 1 with the login message", { timeout: 60_000 }, async () => {

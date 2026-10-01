@@ -280,6 +280,14 @@ async function run(argv) {
 		console.log(HELP);
 		return 0;
 	}
+	// --dark-factory watches every issue's feature itself: it cannot work one
+	// chosen ticket, one feature, several at once, or only print the route.
+	if (values["dark-factory"]) {
+		const combined = ["ticket", "feature", "parallel", "dry-run"].find((flag) => values[flag] !== undefined);
+		if (combined !== undefined) {
+			throw new Error(`--dark-factory cannot be combined with --${combined}`);
+		}
+	}
 	if (values.ticket && (values.feature || values.parallel !== undefined)) {
 		throw new Error("--ticket cannot be combined with --feature or --parallel: it works exactly one chosen ticket");
 	}

@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 
 import { openRunState, runFrontier } from "shiftwork-core";
 
-import { createGitHub } from "./github.js";
+import { createGitHub, ghPreFlight, GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE } from "./github.js";
 import { importIssues } from "./github-import.js";
 import { checkLabels, missingLabelsMessage } from "./github-labels.js";
 import { syncIssues } from "./github-sync.js";
@@ -16,17 +16,11 @@ const STOP_FILE = "STOP";
 /** The wait between polls wakes at least this often, so a STOP file is noticed (like the runner's cooldown waits). */
 const WAKE_MS = 60_000;
 
-/** gh missing: the binary was not found (a bad `github.gh`, or no `gh` on PATH). */
-export const GH_INSTALL_MESSAGE = "dark-factory needs the GitHub CLI: install it from https://cli.github.com, then run gh auth login";
-/** gh found but `gh auth status` failed: no logged-in session for Shiftwork to use. */
-export const GH_AUTH_MESSAGE = "dark-factory needs an authenticated gh: run gh auth login";
+// The gh pre-flight messages live with the wrapper (github.js); re-exported
+// here for the TUI and the tests, which know them as dark-factory's.
+export { GH_AUTH_MESSAGE, GH_INSTALL_MESSAGE };
 /** `run --dark-factory` without a `github` block: there is nothing to watch. */
 export const NO_GITHUB_CONFIG_MESSAGE = 'dark-factory needs a "github" block in .pi/shiftwork.json (see docs/guide.md "Dark-factory mode")';
-
-/** `execFile` could not spawn the gh binary (it is missing or not executable). */
-function isGhMissing(error) {
-	return error?.code === "ENOENT" || error?.code === "EACCES" || /ENOENT/.test(String(error?.message ?? ""));
-}
 
 /**
  * `run --dark-factory` (spec: github-watch, ticket 05): watch the repo's GitHub
@@ -36,8 +30,10 @@ function isGhMissing(error) {
  * `syncIssues` (ticket 04), then a full frontier pass with today's
  * `runFrontier` until it is empty, then — with `github.push` on and a pass that
  * landed commits — `git push origin HEAD` in the main checkout, then sync
- * again. It stops like the runner does: a STOP file or a signal ends it after
- * the current shift; `once` does one poll plus one frontier pass and returns 0.
+ * again. A failed push is caught and retried on the next poll; until one
+ * succeeds, the sync's commit comments show short shas, not links. It stops
+ * like the runner does: a STOP file or a signal ends it after the current
+ * shift; `once` does one poll plus one frontier pass and returns 0.
  *
  * Before anything else, using the operator's installed `gh` (`github.gh`, else
  * `gh` on PATH): gh missing and `gh auth status` failing each exit 1, then
@@ -72,10 +68,9 @@ export async function darkFactoryRun({
 	const execFn = exec ?? (async (args) => (await run(args[0], args.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
 
 	// Before anything else: the operator's gh must exist and be logged in.
-	try {
-		await execFn([ghBinary, "auth", "status"]);
-	} catch (error) {
-		err(isGhMissing(error) ? GH_INSTALL_MESSAGE : GH_AUTH_MESSAGE);
+	const problem = await ghPreFlight({ gh: ghBinary, exec: execFn });
+	if (problem) {
+		err(problem);
 		return 1;
 	}
 	const githubApi = github ?? createGitHub({ root, repo: config.github.repo, gh: ghBinary, exec: execFn });
@@ -104,10 +99,17 @@ export async function darkFactoryRun({
 	const stopped = () => existsSync(join(root, STOP_FILE));
 	const sleepFor = sleep ?? ((ms) => sleepUntil(root, ms));
 
+	// Commit links need the commits on GitHub: while the last `git push` failed
+	// they stay short shas in the sync's comments, and the push is retried on
+	// every poll until one succeeds.
+	let commitsOnGitHub = true;
+	let retryPush = false;
+	const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit, linkCommits: (config.github.push ?? false) && commitsOnGitHub });
+
 	for (;;) {
 		const { imported } = await importIssues({ root, github: githubApi, config });
 		for (const issue of imported) log(`github#${issue.number} imported: ${issue.title} → ${issue.feature}`);
-		await printSync(await syncIssues({ root, github: githubApi, config, tracker }), log);
+		await printSync(await syncOnce(), log);
 
 		// One frontier pass with today's runner, all features, until the frontier is empty.
 		const before = config.github.push ? await gitHead() : undefined;
@@ -127,15 +129,25 @@ export async function darkFactoryRun({
 		for (const t of summary.needsInfo) log(`✖ ${t.feature}/${t.number} needs-info: ${t.reason}`);
 		if (summary.stoppedReason) log(`⚠ Stopped: ${summary.stoppedReason}`);
 
-		// The commits the comments link to need to be on GitHub: push after a pass that landed.
+		// The commits the comments link to need to be on GitHub: push after a pass
+		// that landed. A failed push must not kill the watcher: it is retried on
+		// the next poll, and until one succeeds the comments show short shas.
 		if (config.github.push) {
 			const after = await gitHead();
-			if (after !== undefined && after !== before) {
-				await runGit(["push", "origin", "HEAD"]);
-				log(`dark-factory: pushed ${after.slice(0, 7)} to origin`);
+			if (after !== undefined && (after !== before || retryPush)) {
+				try {
+					await runGit(["push", "origin", "HEAD"]);
+					commitsOnGitHub = true;
+					retryPush = false;
+					log(`dark-factory: pushed ${after.slice(0, 7)} to origin`);
+				} catch (error) {
+					commitsOnGitHub = false;
+					retryPush = true;
+					log(`dark-factory: git push failed: ${String(error?.message ?? error).trim()}; commit links stay short shas until it succeeds`);
+				}
 			}
 		}
-		await printSync(await syncIssues({ root, github: githubApi, config, tracker }), log);
+		await printSync(await syncOnce(), log);
 
 		if (summary.stoppedReason || stopped()) return 3;
 		if (once) return 0;
@@ -155,7 +167,10 @@ async function printSync({ posted }, log) {
 /** What one `posted` key means, as one line. */
 function describePost(key) {
 	if (key === "working") return "labeled working";
-	if (key === "done") return "closed with a summary, labeled done";
+	if (key === "summary") return "comment: closing summary";
+	if (key === "done") return "closed the issue";
+	if (key === "done-label") return "labeled done";
+	if (key === "working-removed") return "dropped the working label";
 	const [kind, number] = key.split(":");
 	if (kind === "started") return `comment: work started on ticket ${number}`;
 	if (kind === "resolved") return `comment: ticket ${number} resolved`;

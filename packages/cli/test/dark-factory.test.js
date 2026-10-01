@@ -89,8 +89,8 @@ function stubFrontier(summaries = []) {
 /** A stub exec for the pre-flight: `gh auth status` passes unless it rejects. */
 const okExec = async () => "";
 
-/** A resolved ticket with a shift report on disk, as a poll's frontier pass would leave it. */
-async function writeResolvedTicket(root, feature) {
+/** A ticket with a shift report on disk, as a poll's frontier pass would leave it. */
+async function writeResolvedTicket(root, feature, status = "resolved") {
 	const path = join(root, ".scratch", feature, "issues", "02-ticket.md");
 	await mkdir(join(root, ".scratch", feature, "issues"), { recursive: true });
 	await writeFile(
@@ -100,7 +100,7 @@ async function writeResolvedTicket(root, feature) {
 			"",
 			"**What to build:** Fix it.",
 			"",
-			"**Status:** resolved",
+			`**Status:** ${status}`,
 			"",
 			"## Comments",
 			"",
@@ -279,6 +279,61 @@ test("a missing label exits 1 with the missing-labels error, importing nothing",
 	assert.equal(passes.length, 0);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported before the labels check");
 	assert.deepEqual(await readdir(join(root, ".pi")).catch(() => []), [], "no issue state written");
+});
+
+test("a failing git push is caught: the message, short shas, the loop continues and the push is retried next poll", async () => {
+	const root = await makeRoot();
+	// Ticket 02 is claimed when the poll starts; the first pass resolves it, so
+	// its resolved comment lands in the sync right after the failed push.
+	await writeResolvedTicket(root, "gh-8-fix-the-thing", "claimed");
+	const { github, calls } = stubGitHub();
+	const passes = [];
+	let pass = 0;
+	const runFrontierImpl = async (args) => {
+		passes.push(args);
+		pass += 1;
+		if (pass === 1) await writeResolvedTicket(root, "gh-8-fix-the-thing");
+		return { resolved: [{ feature: "gh-8-fix-the-thing", number: "02", title: "Fix the thing", reason: "Verify: passed" }], needsInfo: [], reopened: [] };
+	};
+	const { out, log, err } = lines();
+
+	// Every git stub: every frontier pass "lands" (HEAD moves), the landed commit
+	// is found by `git log`, every push fails.
+	const gitCalls = [];
+	let i = 0;
+	const git = async (args) => {
+		gitCalls.push([...args]);
+		if (args[0] === "rev-parse") return ["a", "b", "c", "c"][Math.min(i++, 3)].repeat(40);
+		if (args[0] === "log") return `${"d".repeat(40)}\n`;
+		if (args[0] === "push") throw new Error("git: push declined");
+		return "";
+	};
+	let polls = 0;
+
+	const code = await darkFactoryRun({
+		root,
+		config: { ...config(), github: { ...config().github, push: true } },
+		tracker: openTracker(root),
+		github,
+		exec: okExec,
+		git,
+		runFrontier: runFrontierImpl,
+		shiftLog: () => {},
+		sleep: async () => ++polls === 2, // continue after the first poll, STOP after the second
+		log,
+		err,
+	});
+
+	assert.equal(code, 3);
+	assert.equal(passes.length, 2, "the loop continued to a second poll");
+	// The push failed, and was retried on the next poll.
+	assert.deepEqual(gitCalls.filter((args) => args[0] === "push"), [["push", "origin", "HEAD"], ["push", "origin", "HEAD"]]);
+	assert.equal(out.filter((line) => /dark-factory: git push failed: git: push declined; commit links stay short shas until it succeeds/.test(line)).length, 2, out.join("\n"));
+	// The resolved comment posted while the commits are not on GitHub shows the short sha, not a link.
+	const resolved = calls.filter((c) => c.op === "comment" && /Ticket 02 resolved/.test(c.body)).map((c) => c.body);
+	assert.equal(resolved.length, 1);
+	assert.match(resolved[0], /- `ddddddd`/);
+	assert.doesNotMatch(resolved[0], /github\.com\/.*\/commit\//);
 });
 
 test("no github block: exit 1 with the config message", async () => {

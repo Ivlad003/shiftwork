@@ -8,7 +8,8 @@ import { join } from "node:path";
  * (the issue itself, marked ready) and the planning ticket `issues/01-plan.md`
  * that splits it into implementation tickets. What has been imported lives in
  * `.pi/shiftwork-github.json` — `{ syncedAt, issues: { "<N>": { number, feature,
- * title, importedAt, lastCommentId, posted } } }` — so polling is idempotent.
+ * title, importedAt, lastCommentId, ownComments, posted } } }` — so polling is
+ * idempotent.
  * `syncedAt` is the time of the last sync (github-sync, ticket 04), shown by the
  * TUI's GitHub tab; `title` is the issue title, captured at import.
  */
@@ -86,7 +87,7 @@ export async function importIssues({ root, github, config, now }) {
 		const feature = `gh-${issue.number}-${slugifyTitle(issue.title)}`;
 		await writeFeature(root, feature, issue);
 		const importedAt = new Date(typeof now === "function" ? now() : (now ?? new Date())).toISOString();
-		state.issues[String(issue.number)] = { number: issue.number, feature, title: issue.title, importedAt, lastCommentId: null, posted: [] };
+		state.issues[String(issue.number)] = { number: issue.number, feature, title: issue.title, importedAt, lastCommentId: null, ownComments: [], posted: [] };
 		imported.push({ number: issue.number, title: issue.title, url: issue.url, author: issue.author, feature });
 	}
 

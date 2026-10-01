@@ -1,4 +1,9 @@
-import { createGitHub } from "./github.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+import { createGitHub, ghPreFlight } from "./github.js";
+
+const run = promisify(execFile);
 
 /** Colour + description for each label kind when `--create` creates it. */
 export const LABEL_META = {
@@ -51,11 +56,21 @@ export function missingLabelsMessage(repo, missing) {
  * `shiftwork github labels [--create]`: print each configured label with
  * `✔ exists` / `✖ missing` and exit 1 when any is missing. With `--create`,
  * create only the missing ones (a colour and a description); never edit or
- * delete an existing label.
+ * delete an existing label. Before listing anything, the same gh pre-flight
+ * as dark-factory: gh missing, or not logged in, exits 1 with its message.
  */
-export async function githubLabelsCommand({ root, config, create = false, exec, log = console.log } = {}) {
-	const github = createGitHub({ root, repo: config?.github?.repo, gh: config?.github?.gh, exec });
+export async function githubLabelsCommand({ root, config, create = false, exec, log = console.log, err = console.error } = {}) {
 	const labels = configuredLabels(config);
+	const ghBinary = config?.github?.gh ?? "gh";
+	const execFn = exec ?? (async (args) => (await run(args[0], args.slice(1), { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
+
+	const problem = await ghPreFlight({ gh: ghBinary, exec: execFn });
+	if (problem) {
+		err(problem);
+		return 1;
+	}
+
+	const github = createGitHub({ root, repo: config?.github?.repo, gh: ghBinary, exec: execFn });
 	const { missing } = await checkLabels({ github, config });
 
 	if (create) {
