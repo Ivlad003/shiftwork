@@ -4,8 +4,14 @@
 
 **Blocked by:** 05
 
-**Status:** needs-info
+**Status:** wontfix
 **Type:** code
 **Verify:** `npm test`
 
 - [ ] Operator decides whether the board is wanted at all, and which column names map to "to do", "in progress" and "done"
+
+## Comments
+
+### Notes
+
+Closed by the operator (2026-10-01): labels cover this; no Projects v2 board source.
