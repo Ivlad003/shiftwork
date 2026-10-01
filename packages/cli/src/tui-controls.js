@@ -22,7 +22,11 @@ const ARROWS = { A: "up", B: "down", C: "right", D: "left" };
  * just those features (the Resolved tab's rows), `resolved: null` keeps them (the plain
  * frame of `--once`). A `global`- or `feature`-scoped search (GitHub #3) narrows the list
  * to tickets whose number or title contains the query, keeping their feature rows; a
- * `feature` scope only within the feature the prompt captured. Pure, and shared with rendering.
+ * `feature` scope only within the feature the prompt captured. Each feature row also carries
+ * its tickets' live workers (`workers: [{ number, model }]`, from `dashboard.run.workers` and
+ * from live claims in `dashboard.claims`, so a ticket held by a second runner counts too — such
+ * a claim, with no worker entry in the run state, gets `model: null` and its `pid` instead).
+ * Pure, and shared with rendering.
  */
 export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 	const filter = view?.featureFilter ?? null;
@@ -35,6 +39,11 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 			.filter((w) => w.ticket?.feature && w.ticket?.number)
 			.map((w) => [`${w.ticket.feature}/${w.ticket.number}`, w]),
 	);
+	const claimOf = new Map(
+		(dashboard?.claims ?? [])
+			.filter((c) => c.ticket?.feature && c.ticket?.number)
+			.map((c) => [`${c.ticket.feature}/${c.ticket.number}`, c]),
+	);
 	const rows = [];
 	for (const feature of [...new Set(tickets.map((t) => t.feature))].sort()) {
 		const own = tickets.filter((t) => t.feature === feature);
@@ -44,6 +53,16 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 		if (search?.feature && feature !== search.feature) continue;
 		const shown = search ? own.filter(search.matches) : own;
 		if (search && !shown.length) continue; // a feature with no matching ticket leaves the list
+		// The feature's live workers, collapsed or not (GitHub #2's operator report): a
+		// worker entry in the run state wins, else a live claim (another runner) keeps its pid.
+		const workers = own
+			.flatMap((t) => {
+				const key = `${t.feature}/${t.number}`;
+				const w = workerOf.get(key);
+				if (w) return [{ number: t.number, model: w.model ?? null }];
+				const c = claimOf.get(key);
+				return c ? [{ number: t.number, model: null, pid: c.pid }] : [];
+			});
 		rows.push({
 			kind: "feature",
 			feature,
@@ -51,6 +70,7 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 			resolved: own.filter((t) => t.status === RESOLVED).length,
 			ready: own.filter((t) => frontier.has(`${t.feature}/${t.number}`)).length,
 			total: own.length,
+			workers,
 		});
 		if (collapsed.has(feature)) continue;
 		for (const t of shown) {

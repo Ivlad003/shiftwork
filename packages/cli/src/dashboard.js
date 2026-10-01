@@ -506,18 +506,31 @@ function renderQueueSection(state, now) {
 	return lines;
 }
 
-/** The queue's visible rows: `▾ feature 1/3 resolved · 1 ready` folders (▸ collapsed), their tickets under, `> ` marks the cursor. */
+/**
+ * The queue's visible rows: `▾ feature 1/3 resolved · 1 ready` folders (▸ collapsed), their tickets
+ * under, `> ` marks the cursor. A feature row also carries its tickets' live workers, collapsed
+ * or not (GitHub #2's operator report): `● 12 glm-5.3` for one, `● 2 agents (12 glm-5.3, 03 grok-4.7)`
+ * for several, a live claim without a run-state worker (another runner) as `● 12 pid 4242`.
+ */
 function renderQueueRows(state, cursor, { resolved = "skip" } = {}) {
 	return queueRows(state, state, { resolved }).map((row, i) => {
 		const mark = i === cursor ? ">" : " ";
 		if (row.kind === "feature") {
-			return `${mark} ${row.collapsed ? "▸" : "▾"} ${row.feature} ${row.resolved}/${row.total} resolved · ${row.ready} ready`;
+			const parts = [`${row.collapsed ? "▸" : "▾"} ${row.feature} ${row.resolved}/${row.total} resolved · ${row.ready} ready`];
+			if (row.workers?.length) parts.push(workerMarker(row.workers));
+			return `${mark} ${parts.join(" · ")}`;
 		}
 		const parts = [`${row.number} ${row.title ?? ""}`.trim(), row.status];
 		if (row.blockedBy?.length) parts.push(`blocked by ${row.blockedBy.join(", ")}`);
 		if (row.worker) parts.push(`● ${row.worker.model ?? "?"}`);
 		return `${mark}   ${parts.join(" · ")}`;
 	});
+}
+
+/** A feature row's live workers: one worker's `● 12 glm-5.3`, several agents' summary list; a worker with no model (a claim of another runner, no run-state entry) keeps its pid. */
+function workerMarker(workers) {
+	const label = (w) => (w.model ? `${w.number} ${w.model}` : `${w.number} pid ${w.pid ?? "?"}`);
+	return workers.length === 1 ? `● ${label(workers[0])}` : `● ${workers.length} agents (${workers.map(label).join(", ")})`;
 }
 
 /** The details of the selected ticket: its fields, the dry-run route when known, the latest shift report. */

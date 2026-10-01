@@ -337,7 +337,7 @@ Six full-screen tabs (`1`–`6`, or `tab` to cycle): **Queue**, **Agents**, **Co
 
 | Tab | It shows | Keys |
 |---|---|---|
-| Queue | Features as folders (`▾ parallel 3/4`) with their tickets (number, title, status, blockers, `● model` when an agent holds one) — except the fully resolved ones, which move to the Resolved tab | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `n` run this ticket · `esc` back |
+| Queue | Features as folders (`▾ parallel 3/4`) with their tickets (number, title, status, blockers, `● model` when an agent holds one) — except the fully resolved ones, which move to the Resolved tab. A feature row also shows the feature's live workers, collapsed or not: `● 12 glm-5.3` for one, `● 2 agents (12 glm-5.3, 03 grok-4.7)` for several, `● 12 pid 4242` for a ticket held by another runner's live claim | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `n` run this ticket · `esc` back |
 | Agents | One row per running shift: ticket, model, tier, shift/attempt, tokens, cost, turns, context fill, budget, elapsed | `↑↓`/`j k` move · `enter` opens that agent's log |
 | Cooldowns | Active provider cooldowns and time left | `↑↓`/`j k` move |
 | Log | Tail of the selected agent's shift log (else the first live worker's) | `↑↓`/`j k` move |

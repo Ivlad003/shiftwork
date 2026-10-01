@@ -268,7 +268,15 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 		rows.map((r) => r.kind),
 		["feature", "ticket", "ticket", "ticket", "feature", "ticket"],
 	);
-	assert.deepEqual(rows[0], { kind: "feature", feature: "demo", collapsed: false, resolved: 1, ready: 1, total: 3 });
+	assert.deepEqual(rows[0], {
+		kind: "feature",
+		feature: "demo",
+		collapsed: false,
+		resolved: 1,
+		ready: 1,
+		total: 3,
+		workers: [{ number: "02", model: "fake/m1" }], // the feature row carries its tickets' live workers
+	});
 	assert.deepEqual(rows[1], {
 		kind: "ticket",
 		feature: "demo",
@@ -290,6 +298,33 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 	);
 });
 
+test("queueRows: a feature row carries its tickets' live workers, collapsed or not; a live claim without a run-state worker is included with its pid", () => {
+	const d = frame();
+	d.run = { pid: 7, live: true, workers: [{ ticket: { feature: "demo", number: "02" }, model: "fake/m1" }] };
+	d.claims = [{ ticket: { feature: "demo", number: "01" }, pid: 999, at: "2026-10-01T11:59:00Z" }]; // another runner's live claim
+	const feature = (rows) => rows.find((r) => r.kind === "feature" && r.feature === "demo");
+
+	// The worker entry and the live claim both count, the claim with its pid in place of a model.
+	assert.deepEqual(feature(queueRows(d, {})).workers, [
+		{ number: "01", model: null, pid: 999 },
+		{ number: "02", model: "fake/m1" },
+	]);
+
+	// Collapsed or not, the feature row keeps them.
+	assert.deepEqual(feature(queueRows(d, { collapsed: ["demo"] })).workers, [
+		{ number: "01", model: null, pid: 999 },
+		{ number: "02", model: "fake/m1" },
+	]);
+
+	// A claim with a worker entry (the same runner) is not double-counted: the worker wins.
+	d.claims = [{ ticket: { feature: "demo", number: "02" }, pid: 7, at: "2026-10-01T11:59:00Z" }];
+	assert.deepEqual(feature(queueRows(d, {})).workers, [{ number: "02", model: "fake/m1" }]);
+
+	// A claim or worker on another feature's ticket is not this feature's.
+	d.claims = [{ ticket: { feature: "other", number: "01" }, pid: 999, at: "2026-10-01T11:59:00Z" }];
+	assert.deepEqual(feature(queueRows(d, {})).workers, [{ number: "02", model: "fake/m1" }]);
+});
+
 /** One frame plus a fully resolved feature: shipped (01, 02, both resolved). */
 const doneFrame = () => ({
 	...frame(),
@@ -309,7 +344,7 @@ test("queueRows skips fully resolved features; resolvedRows lists only them, sam
 
 	const resolved = resolvedRows(d, {});
 	assert.equal(resolved.some((r) => r.feature !== "shipped"), false);
-	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, resolved: 2, ready: 0, total: 2 });
+	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, resolved: 2, ready: 0, total: 2, workers: [] });
 	assert.deepEqual(resolved[1], {
 		kind: "ticket",
 		feature: "shipped",
@@ -742,7 +777,7 @@ test("queueRows: a global query keeps matching tickets from several features and
 			["ticket", "other", "01"],
 		],
 	);
-	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, resolved: 1, ready: 1, total: 3 });
+	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, resolved: 1, ready: 1, total: 3, workers: [] });
 
 	// A title matches, case-insensitively.
 	const byTitle = queueRows(d, { search: search({ query: "ELSEWHERE", editing: false }) });

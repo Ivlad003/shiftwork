@@ -197,6 +197,57 @@ test("dashboard: collapsed features use ▸ and hide their tickets", () => {
 	assert.doesNotMatch(frame, /▾ parallel/);
 });
 
+test("dashboard: a feature row carries its live workers, collapsed or not; none shows no marker", () => {
+	const one = renderDashboard({
+		...base,
+		tickets: [ticket("tui-polish", "12", "Held", "claimed"), ticket("empty", "01", "Nothing")],
+		frontier: [ticket("empty", "01", "Nothing")],
+		collapsed: ["tui-polish"],
+		run: { pid: 7, live: true, workers: [{ ticket: { feature: "tui-polish", number: "12" }, model: "glm-5.3", attempt: 1, shift: 1 }] },
+	}).join("\n");
+
+	assert.match(one, /▸ tui-polish 0\/1 resolved · 0 ready · ● 12 glm-5\.3/); // the marker shows on the collapsed feature row too
+	assert.match(one, /▾ empty 0\/1 resolved · 1 ready(?! · ●)/); // a feature with no workers shows no marker
+
+	const two = renderDashboard({
+		...base,
+		tickets: [ticket("tui-polish", "12", "Held", "claimed"), ticket("tui-polish", "03", "Elsewhere", "claimed")],
+		frontier: [],
+		run: {
+			pid: 7,
+			live: true,
+			workers: [
+				{ ticket: { feature: "tui-polish", number: "12" }, model: "glm-5.3", attempt: 1, shift: 1 },
+				{ ticket: { feature: "tui-polish", number: "03" }, model: "grok-4.7", attempt: 1, shift: 1 },
+			],
+		},
+	}).join("\n");
+
+	assert.match(two, /▾ tui-polish 0\/2 resolved · 0 ready · ● 2 agents \(12 glm-5\.3, 03 grok-4\.7\)/);
+
+	// A live claim with no run-state worker (another runner) keeps its pid in place of a model.
+	const claimed = renderDashboard({
+		...base,
+		tickets: [ticket("tui-polish", "12", "Held", "claimed")],
+		frontier: [],
+		claims: [{ ticket: { feature: "tui-polish", number: "12" }, pid: 4242, at: "2026-10-01T11:59:00Z" }],
+	}).join("\n");
+	assert.match(claimed, /▾ tui-polish 0\/1 resolved · 0 ready · ● 12 pid 4242/);
+
+	// The marker is coloured like the ticket row's: cyan when colour is on.
+	const colored = renderDashboard(
+		{
+			...base,
+			tickets: [ticket("tui-polish", "12", "Held", "claimed")],
+			frontier: [],
+			collapsed: ["tui-polish"],
+			run: { pid: 7, live: true, workers: [{ ticket: { feature: "tui-polish", number: "12" }, model: "glm-5.3", attempt: 1, shift: 1 }] },
+		},
+		{ width: 60, height: 24, color: true },
+	).join("\n");
+	assert.match(colored, /\x1b\[36m● 12 glm-5\.3/);
+});
+
 test("dashboard: details render the ticket's fields, route and latest shift report", () => {
 	const held = {
 		...ticket("f", "03", "Tabbed rendering", "ready-for-agent"),
