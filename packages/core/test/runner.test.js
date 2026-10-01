@@ -1815,6 +1815,8 @@ test("parallel: 2 lists both workers in the run state while they run", async () 
 		"both workers are listed while they run",
 	);
 
+	// The run state lists a worker just before its shift starts: wait for both shifts too.
+	await waitFor(() => backend.shifts.length === 2);
 	backend.shifts[0].open();
 	backend.shifts[1].open();
 	const summary = await running;
