@@ -53,8 +53,8 @@ Starting a chosen ticket while a runner is live (it needs a queue the live runne
 <!-- shiftwork:tickets:start -->
 | NN | title | status | last route |
 | -- | ----- | ------ | ---------- |
-| 01 | `shiftwork run --ticket` works one chosen ticket | ready-for-agent |  |
-| 02 | TUI view state and key decoding | ready-for-agent |  |
-| 03 | Tabbed, height-aware dashboard rendering | ready-for-agent |  |
-| 04 | Interactive full-screen TUI with tabs and run-this-ticket | ready-for-agent |  |
+| 01 | `shiftwork run --ticket` works one chosen ticket | resolved | opencode-go/glm-5.3 |
+| 02 | TUI view state and key decoding | resolved | opencode-go/glm-5.3 |
+| 03 | Tabbed, height-aware dashboard rendering | resolved | xai/grok-4.6 |
+| 04 | Interactive full-screen TUI with tabs and run-this-ticket | needs-info | opencode-go/glm-5.3 |
 <!-- shiftwork:tickets:end -->

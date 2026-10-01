@@ -4,7 +4,7 @@
 
 **Blocked by:** 01, 03
 
-**Status:** ready-for-agent
+**Status:** needs-info
 **Type:** code
 **Verify:** `npm test` · `node packages/cli/bin/shiftwork.js tui --once`
 
@@ -12,3 +12,13 @@
 - [ ] `n` on a ready ticket starts a detached runner with `--ticket` (stub runner); on a blocked ticket it shows the refusal notice
 - [ ] Live check in a real terminal on a demo repo: tabs, cursor, collapse, details, `n`, resize; written in the ticket's Notes
 - [ ] Guides (en + uk) and `tui --help` describe the tabs and keys
+
+## Comments
+
+### Shift 1 — pi opencode-go/glm-5.3 (medium)
+- Ended: error, error: 402: {"type":"server_error","message":"Upstream request failed: Insufficient account funds"}
+- Usage: 0 in / 0 out tokens, $0.0000, 4 turns
+- Time: 17s
+- Verify: passed
+- Outcome: needs-info: verify gate passed but no shift changed anything: the gate doesn't test this ticket
+- Branch kept: shiftwork/tui-dashboard-04
