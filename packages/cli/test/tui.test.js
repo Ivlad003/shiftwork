@@ -384,6 +384,64 @@ test("renderDashboard color: reverse-video cursor row, coloured statuses, marker
 	}
 });
 
+test("renderDashboard: a list search filters the queue, the header shows the prompt, the footer the search keys", () => {
+	const tickets = [ticket("f", "01", "First widget"), ticket("f", "02", "Second thing"), ticket("g", "01", "Another widget")];
+	const state = { ...base, tickets, frontier: tickets, search: { query: "widget", scope: "global", feature: "f", editing: true, match: 0 } };
+	const frame = renderDashboard(state, { width: 160, height: 20 }).join("\n"); // 160: the six-tab header plus the prompt needs the room
+
+	assert.match(frame, /\/ widget · global/); // the header shows the prompt while searching
+	assert.match(frame, /▾ f 0\/2 resolved · 2 ready/); // the matching tickets' feature rows stay, counts of the whole feature
+	assert.match(frame, /01 First widget/);
+	assert.match(frame, /01 Another widget/); // matches from several features
+	assert.doesNotMatch(frame, /02 Second thing/); // a non-matching ticket leaves the list
+	assert.match(frame, /letters add to the query · backspace delete/); // the footer swaps in the search keys
+	assert.match(frame, /q quits/); // the shared keys stay
+
+	// A feature scope narrows to the feature captured when the prompt opened.
+	const scoped = renderDashboard(
+		{ ...state, search: { ...state.search, scope: "feature", feature: "f" } },
+		{ width: 160, height: 20 },
+	).join("\n");
+	assert.match(scoped, /\/ widget · feature f/);
+	assert.match(scoped, /01 First widget/);
+	assert.doesNotMatch(scoped, /Another widget/);
+});
+
+test("renderDashboard: a ticket-scoped search highlights the details' matches, and enter scrolls to the next", () => {
+	const t = { ...ticket("f", "03", "Tabbed rendering", "ready-for-agent"), type: "code" };
+	const state = {
+		...base,
+		tickets: [t],
+		frontier: [],
+		details: "f/03",
+		ticketDetails: {
+			key: "f/03",
+			ticket: t,
+			what: "render the tab of the spec",
+			shift: ["### Shift 1 — pi opencode-go/glm-5.3 (medium)", "- Outcome: done rendering"],
+		},
+		search: { query: "render", scope: "ticket", feature: null, editing: false, match: 0 },
+	};
+	const lines = renderDashboard(state, { width: 160, height: 24 }); // 160: the six-tab header plus the prompt needs the room
+	const text = lines.join("\n");
+
+	assert.match(text, /\/ render · ticket/); // the header shows the prompt
+	assert.match(text, /Type: code/); // the first match ("Tabbed [render]ing") is at the top, all lines shown
+	assert.match(text, /What to build: \[render\] the tab of the spec/);
+	assert.match(text, /done \[render\]ing/); // every match in the details is bracketed
+	assert.match(lines.at(-2), /enter next match/); // the footer's details-search keys
+
+	// enter's next match scrolls the details so that match's line is at the top.
+	const next = renderDashboard({ ...state, search: { ...state.search, match: 1 } }, { width: 160, height: 24 }).join("\n");
+	assert.doesNotMatch(next, /Type: code/);
+	assert.match(next, /What to build: \[render\]/);
+
+	// In colour the brackets become reverse video.
+	const colored = renderDashboard(state, { width: 160, height: 24, color: true }).join("\n");
+	assert.match(colored, /\x1b\[7mrender\x1b\[27m/);
+	assert.doesNotMatch(colored, /\[render\]/);
+});
+
 test("dashboardLayout: each list row's y and each tab label's span match the rendered lines, a scrolled list included", () => {
 	const tickets = Array.from({ length: 40 }, (_, i) => ticket("big", String(i + 1).padStart(2, "0"), `Ticket ${i + 1}`));
 	const state = { ...base, tickets, frontier: tickets, cursor: { queue: 39 } }; // the cursor on the last row: the list is scrolled
@@ -723,6 +781,8 @@ test("shiftwork tui --help describes the tabs and keys", async () => {
 	assert.match(stdout, /GitHub/);
 	assert.match(stdout, /g toggles dark-factory/);
 	assert.match(stdout, /n runs the selected ticket/);
+	assert.match(stdout, /\/ opens a search prompt/); // search: / filters the list or the details (GitHub #3)
+	assert.match(stdout, /letters — n, r, s, d, f, q and digits/);
 	assert.match(stdout, /TuiAltScreen/);
 	assert.match(stdout, /colour/i);
 	assert.match(stdout, /NO_COLOR/);

@@ -678,6 +678,135 @@ test("startDetachedRunner passes --dark-factory through and records the mode in 
 	assert.equal(state.mode, "dark-factory");
 });
 
+// --- Search: / across features, within one, inside a ticket (GitHub #3) ---
+
+/** Type text into the open search prompt, one key at a time. */
+const type = (state, text, d) => [...text].reduce((s, ch) => press(s, ch, d), state);
+
+test("reducer: / opens the search prompt; letters build the query, backspace deletes, the command keys are text", () => {
+	const d = frame();
+	let state = press(idle, "/", d);
+	assert.deepEqual(state.search, { query: "", scope: "global", feature: "demo", editing: true, match: 0 });
+	for (const key of ["f", "o", "o"]) state = press(state, key, d);
+	assert.equal(state.search.query, "foo");
+	state = press(state, "backspace", d);
+	assert.equal(state.search.query, "fo");
+
+	// While the prompt is open for typing, the command keys go to the query: q doesn't quit, n/r/s/d/f and digits are text.
+	const q = reduceKey(state, "q", d);
+	assert.deepEqual(q.effects, []);
+	assert.equal(q.state.search.query, "foq");
+	state = press(press(press(state, "n", d), "r", d), "3", d);
+	assert.equal(state.search.query, "fonr3");
+
+	// Enter stops editing and keeps the filter; esc clears the query and closes the prompt.
+	state = press(state, "enter", d);
+	assert.equal(state.search.editing, false);
+	assert.equal(state.search.query, "fonr3");
+	state = press(state, "esc", d);
+	assert.equal(state.search, null);
+});
+
+test("reducer: tab toggles the search scope between global and the feature under the cursor", () => {
+	const d = frame();
+	let state = press(press(idle, "down", d), "/", d); // the cursor is on demo/01
+	assert.equal(state.search.scope, "global");
+	assert.equal(state.search.feature, "demo"); // captured when the prompt opened
+	state = press(state, "tab", d);
+	assert.equal(state.search.scope, "feature");
+	assert.equal(state.search.feature, "demo");
+	state = press(state, "tab", d);
+	assert.equal(state.search.scope, "global");
+	assert.equal(state.tab, "queue"); // tab did not cycle tabs while editing
+	// After enter keeps it, tab cycles tabs again; a kept feature scope reopens with itself.
+	state = press(press(state, "enter", d), "tab", d);
+	assert.equal(state.tab, "agents");
+	assert.equal(state.search.scope, "global");
+	state = press(press(press(state, "1", d), "/", d), "tab", d);
+	assert.equal(state.search.scope, "feature");
+	assert.equal(state.search.feature, "demo"); // still the feature captured at the prompt
+});
+
+test("queueRows: a global query keeps matching tickets from several features and their feature rows; a feature query only that feature's; number or title, case-insensitive", () => {
+	const d = frame(); // demo 01 first, 02 blocked, 03 done; other 01 elsewhere
+	const search = (over) => ({ query: "", scope: "global", feature: null, editing: true, match: 0, ...over });
+
+	// "01" matches by number, across two features; their feature rows stay, with the features' own counts.
+	const global = queueRows(d, { search: search({ query: "01" }) });
+	assert.deepEqual(
+		global.map((r) => [r.kind, r.feature, r.number ?? null]),
+		[
+			["feature", "demo", null],
+			["ticket", "demo", "01"],
+			["feature", "other", null],
+			["ticket", "other", "01"],
+		],
+	);
+	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, resolved: 1, ready: 1, total: 3 });
+
+	// A title matches, case-insensitively.
+	const byTitle = queueRows(d, { search: search({ query: "ELSEWHERE", editing: false }) });
+	assert.deepEqual(byTitle.map((r) => [r.kind, r.feature]), [["feature", "other"], ["ticket", "other"]]);
+	assert.equal(byTitle[1].title, "elsewhere");
+
+	// A feature scope keeps only that feature's matches.
+	const scoped = queueRows(d, { search: search({ query: "01", scope: "feature", feature: "demo" }) });
+	assert.deepEqual(scoped.map((r) => [r.kind, r.feature]), [["feature", "demo"], ["ticket", "demo"]]);
+
+	// A ticket scope (searching inside open details) and an empty query do not filter the list.
+	const unfiltered = queueRows(d, {}).length;
+	assert.equal(queueRows(d, { search: search({ query: "zzz", scope: "ticket" }) }).length, unfiltered);
+	assert.equal(queueRows(d, { search: search({ query: "   " }) }).length, unfiltered);
+});
+
+test("reducer: while a search filters the list, the cursor is clamped to the filtered rows", () => {
+	const d = frame();
+	let state = idle;
+	for (let i = 0; i < 5; i++) state = press(state, "down", d);
+	assert.equal(state.cursor.queue, 5); // other/01, the last row
+	state = press(state, "/", d);
+	state = type(state, "elsewhere", d); // only other/01 matches
+	assert.deepEqual(queueRows(d, state).map((r) => r.kind), ["feature", "ticket"]);
+	assert.equal(state.cursor.queue, 1); // clamped onto other/01, the last filtered row
+	state = press(state, "enter", d); // enter stops editing and keeps the filter
+	assert.equal(state.search.editing, false);
+	assert.equal(state.details, null);
+	state = press(state, "enter", d); // then opens the filtered row's details
+	assert.equal(state.details, "other/01");
+});
+
+test("reducer: / with details open searches inside them; enter advances the match, esc clears then closes", () => {
+	const d = frame();
+	let state = press(press(idle, "down", d), "enter", d); // demo/01's details
+	assert.equal(state.details, "demo/01");
+	state = press(state, "/", d);
+	assert.equal(state.search.scope, "ticket");
+	assert.equal(state.search.editing, true);
+	state = type(state, "first", d); // the word appears in the details' lines
+	state = press(state, "enter", d); // stop editing, keep the search
+	assert.equal(state.search.editing, false);
+	assert.equal(state.search.query, "first");
+	state = press(state, "enter", d); // scroll to the next match
+	assert.equal(state.search.match, 1);
+	state = press(state, "esc", d); // esc leaves the search first
+	assert.equal(state.search, null);
+	assert.equal(state.details, "demo/01");
+	state = press(state, "esc", d); // then closes the details
+	assert.equal(state.details, null);
+});
+
+test("the controls carry the search state through the view", async () => {
+	const root = await repo({});
+	const controls = createTuiControls({ root });
+	controls.setDashboard(frame());
+
+	await controls.handleKey("/");
+	await controls.handleKey("f");
+	assert.deepEqual(controls.view.search, { query: "f", scope: "global", feature: "demo", editing: true, match: 0 });
+	await controls.handleKey("esc");
+	assert.equal(controls.view.search, null);
+});
+
 // --- decodeKeys: raw terminal input → key names ---
 
 test("decodeKeys: each key, and several keys arriving in one chunk", () => {

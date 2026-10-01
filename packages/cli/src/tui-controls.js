@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { openRunState, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "./dry-run.js";
 
-/** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · q quit. */
-export const TUI_KEYS = ["r", "s", "d", "f", "g", "q", "\x03"];
+/** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · / search · q quit. */
+export const TUI_KEYS = ["r", "s", "d", "f", "g", "/", "q", "\x03"];
 
 /** The six tabs, switched with `1`–`6` (and `tab`, which cycles): the phase-5 spec's four, Resolved (GitHub #2) and GitHub (github-watch). */
 export const TABS = ["queue", "agents", "cooldowns", "log", "resolved", "github"];
@@ -20,10 +20,13 @@ const ARROWS = { A: "up", B: "down", C: "right", D: "left" };
  * A `featureFilter` narrows the list to that feature. A feature whose tickets are all
  * resolved leaves the Queue for the Resolved tab (GitHub #2): `resolved: "only"` lists
  * just those features (the Resolved tab's rows), `resolved: null` keeps them (the plain
- * frame of `--once`). Pure, and shared with rendering.
+ * frame of `--once`). A `global`- or `feature`-scoped search (GitHub #3) narrows the list
+ * to tickets whose number or title contains the query, keeping their feature rows; a
+ * `feature` scope only within the feature the prompt captured. Pure, and shared with rendering.
  */
 export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 	const filter = view?.featureFilter ?? null;
+	const search = searchFilter(view);
 	const collapsed = new Set(view?.collapsed ?? []);
 	const tickets = (dashboard?.tickets ?? []).filter((t) => !filter || t.feature === filter);
 	const frontier = new Set((dashboard?.frontier ?? []).map((t) => `${t.feature}/${t.number}`));
@@ -38,6 +41,9 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 		const done = own.length > 0 && own.every((t) => t.status === RESOLVED);
 		// The Queue and the Resolved tab split on it; null keeps both.
 		if (resolved === "only" ? !done : resolved === "skip" && done) continue;
+		if (search?.feature && feature !== search.feature) continue;
+		const shown = search ? own.filter(search.matches) : own;
+		if (search && !shown.length) continue; // a feature with no matching ticket leaves the list
 		rows.push({
 			kind: "feature",
 			feature,
@@ -47,7 +53,7 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 			total: own.length,
 		});
 		if (collapsed.has(feature)) continue;
-		for (const t of own) {
+		for (const t of shown) {
 			rows.push({
 				kind: "ticket",
 				feature: t.feature,
@@ -120,8 +126,10 @@ function normalize(state, dashboard) {
 /**
  * The pure key reducer: (state, key, dashboard) → { state, effects }.
  * State: { tab, cursor: { queue, agents, cooldowns, log, resolved, github }, collapsed, details, selectedWorker,
- * run, features, featureFilter, notice, dryRun }. It is never mutated; `dashboard` (the latest
+ * run, features, featureFilter, notice, dryRun, search }. It is never mutated; `dashboard` (the latest
  * frame, shape `collectDashboardState`) bounds the cursors and decides whether `n` may start.
+ * While the search prompt is open for typing (`search.editing`, GitHub #3) its keys go to the
+ * query: printable keys — `n`, `r`, `s`, `d`, `f`, `q` and digits included — are text, not commands.
  * Effects are data for the executor: { type: "start-runner" | "stop-runner" | "dry-run", feature,
  * ticket, darkFactory } or { type: "quit" }. A second `r` while a runner is live is refused with a notice
  * (spec story 28); `n` is refused the same way, and when the selected row is not a ready
@@ -130,6 +138,8 @@ function normalize(state, dashboard) {
  * leaves the state untouched.
  */
 export function reduceKey(state, key, dashboard = {}) {
+	const editing = editSearchKey(state, key, dashboard);
+	if (editing) return editing;
 	switch (key) {
 		case "r": {
 			if (state.run?.live) {
@@ -196,9 +206,23 @@ export function reduceKey(state, key, dashboard = {}) {
 			return collapse(state, dashboard, true);
 		case "right":
 			return collapse(state, dashboard, false);
-		case "enter":
+		case "/":
+			return openSearch(state, dashboard);
+		case "enter": {
+			// While a kept ticket-scoped search is open, enter scrolls to its next match.
+			if (keptTicketSearch(state)) {
+				const norm = normalize(state, dashboard);
+				return { state: { ...norm, search: { ...norm.search, match: (norm.search.match ?? 0) + 1 } }, effects: [] };
+			}
 			return enterKey(state, dashboard);
-		case "esc":
+		}
+		case "esc": {
+			// esc leaves a kept search first, then closes the details.
+			const norm = normalize(state, dashboard);
+			if (norm.search) return { state: { ...norm, search: null }, effects: [] };
+			if (!norm.details) return { state: norm, effects: [] };
+			return { state: { ...norm, details: null }, effects: [] };
+		}
 		case "backspace": {
 			const norm = normalize(state, dashboard);
 			if (!norm.details) return { state: norm, effects: [] };
@@ -331,6 +355,99 @@ function enterKey(state, dashboard) {
 		return { state: { ...view, tab, cursor: { ...view.cursor, [tab]: at < 0 ? view.cursor[tab] : at } }, effects: [] };
 	}
 	return { state: norm, effects: [] };
+}
+
+/**
+ * The active list search (GitHub #3): while a `global`- or `feature`-scoped query is set,
+ * the list keeps only tickets whose number or title contains it (case-insensitive); a
+ * `feature` scope only within the feature the prompt captured. A `ticket` scope (searching
+ * inside open details) and an empty query do not filter the list. null otherwise.
+ */
+function searchFilter(view) {
+	const search = view?.search ?? null;
+	if (!search || (search.scope !== "global" && search.scope !== "feature")) return null;
+	const query = String(search.query ?? "").trim().toLowerCase();
+	if (!query) return null;
+	return {
+		matches: (t) => `${t.number} ${t.title ?? ""}`.toLowerCase().includes(query),
+		feature: search.scope === "feature" ? search.feature ?? null : null,
+	};
+}
+
+/**
+ * `/` opens the search prompt (GitHub #3): inside open details with scope `ticket`; on
+ * the Queue or Resolved tab with scope `global`, capturing the feature under the cursor
+ * for the `feature` scope `tab` toggles to; anywhere else it does nothing. A query already
+ * kept reopens with itself.
+ */
+function openSearch(state, dashboard) {
+	const norm = normalize(state, dashboard);
+	const scope = norm.details
+		? "ticket"
+		: norm.tab === "queue" || norm.tab === "resolved"
+				? norm.search && (norm.search.scope === "global" || norm.search.scope === "feature") ? norm.search.scope : "global"
+				: null;
+	if (!scope) return { state, effects: [] };
+	return {
+		state: {
+			...norm,
+			search: {
+				query: norm.search?.query ?? "",
+				scope,
+				feature: featureUnderCursor(norm, dashboard),
+				editing: true,
+				match: norm.search?.match ?? 0,
+			},
+		},
+		effects: [],
+	};
+}
+
+/** The feature of the row under the Queue or Resolved cursor (the folder's or the ticket's), captured when the search prompt opens. */
+function featureUnderCursor(state, dashboard) {
+	if (state.tab !== "queue" && state.tab !== "resolved") return null;
+	const row = folderRows(state.tab, dashboard, state)[state.cursor[state.tab]];
+	return row?.feature ?? null;
+}
+
+/** A kept (not editing) ticket-scoped search with a query: `enter` scrolls to its next match. */
+function keptTicketSearch(state) {
+	const search = state.search;
+	return Boolean(search && !search.editing && search.scope === "ticket" && String(search.query ?? "").trim());
+}
+
+/**
+ * The search prompt's keys while it is open for typing (`search.editing`, GitHub #3):
+ * printable keys append to the query — `n`, `r`, `s`, `d`, `f`, `q` and digits are text,
+ * not commands — `backspace` deletes the last character, `tab` toggles the scope between
+ * `global` and `feature` (the feature captured when the prompt opened), `enter` stops
+ * editing and keeps the filter, `esc` clears the query and closes the prompt. Anything
+ * else — arrows, Ctrl-C — falls through to the usual keys. null when the prompt is closed
+ * or the key is not the prompt's.
+ */
+function editSearchKey(state, key, dashboard) {
+	const search = state.search;
+	if (!search?.editing) return null;
+	if ([...key].length === 1) {
+		const code = key.codePointAt(0);
+		if (code >= 0x20 && code !== 0x7f) {
+			return { state: normalize({ ...state, search: { ...search, query: (search.query ?? "") + key } }, dashboard), effects: [] };
+		}
+	}
+	switch (key) {
+		case "backspace":
+			return { state: normalize({ ...state, search: { ...search, query: (search.query ?? "").slice(0, -1) } }, dashboard), effects: [] };
+		case "tab": {
+			if (search.scope === "ticket") return null; // the details search has one scope
+			return { state: normalize({ ...state, search: { ...search, scope: search.scope === "feature" ? "global" : "feature" } }, dashboard), effects: [] };
+		}
+		case "enter":
+			return { state: normalize({ ...state, search: { ...search, editing: false } }, dashboard), effects: [] };
+		case "esc":
+			return { state: normalize({ ...state, search: null }, dashboard), effects: [] };
+		default:
+			return null;
+	}
 }
 
 /**
@@ -469,7 +586,7 @@ function decodeCsiU(params) {
  * Key handling for the interactive TUI: the latest dashboard state goes in through
  * `setDashboard`, keys through `handleKey` (decoded names go straight through), and `view`
  * (the tabbed view state: tab, cursors, collapsed features, details, selectedWorker,
- * featureFilter, notice, dryRun) is merged over the dashboard state for rendering.
+ * featureFilter, notice, dryRun, search) is merged over the dashboard state for rendering.
  * `onChange` fires after every change.
  * Effects are injectable so tests can drive them with a stub runner.
  */
@@ -490,6 +607,7 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
 		featureFilter: null,
 		notice: null,
 		dryRun: null,
+		search: null,
 	};
 	let quit = onQuit ?? (() => {});
 
@@ -538,6 +656,7 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
 			featureFilter: state.featureFilter ?? null,
 			notice: state.notice ?? null,
 			dryRun: state.dryRun ?? null,
+			search: state.search ?? null,
 		});
 	};
 

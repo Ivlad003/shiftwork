@@ -20,7 +20,15 @@ if the feature is done) · n runs the selected ticket
 STOP so the runner hands off and stops · d shows a dry-run · f cycles the feature
 filter · g toggles dark-factory (starts run --dark-factory detached when no
 runner is live, writes STOP when one is; the header shows dark-factory while it
-runs) · q quits. The mouse works in the interactive view: click a tab label to
+runs) · / opens a search prompt: on the Queue or Resolved tab it filters the list
+to tickets whose number or title contains the query (case-insensitive) — tab
+toggles the scope between all features and the feature under the cursor, enter
+keeps the filter, esc clears it; with a ticket's details open it highlights the
+matches inside the details ([…] brackets, reverse video in colour) and enter
+scrolls to the next one. While you type, letters — n, r, s, d, f, q and digits
+included — go to the query, not their commands (Ctrl-C still quits); the header
+shows the prompt (/ query · scope) and the footer swaps in the search keys ·
+q quits. The mouse works in the interactive view: click a tab label to
 switch tabs, click a row to move the cursor there (click it again to open it,
 like enter), the wheel moves the cursor. The Resolved tab (5) lists the
 features whose tickets are all resolved, off the Queue, with the same rows,

@@ -17,6 +17,12 @@ const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", l
 /** The keys every tab shares, the footer's second line. */
 export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · g dark-factory · q quits";
 
+/** The footer's first line while a search is open (GitHub #3): the prompt's keys, list or details. */
+const SEARCH_KEYS = {
+	list: "letters add to the query · backspace delete · tab scope · enter keep · esc clear",
+	ticket: "letters add to the query · backspace delete · enter next match · esc clear",
+};
+
 // Plain SGR codes, applied after fit() clips a line, so escapes are never cut and width counts visible columns.
 const RED = "\x1b[31m";
 const GREEN = "\x1b[32m";
@@ -255,10 +261,11 @@ function fitLines(lines, width) {
 	return max === Infinity ? lines : lines.map((line) => fit(line, max));
 }
 
-/** Sprinkle SGR codes over an already-clipped frame: inline tokens, red cooldown rows, then reverse video over the cursor row, padded across the width. */
-function paint(lines, { cursor, redRows }, width) {
+/** Sprinkle SGR codes over an already-clipped frame: inline tokens, the details' search highlights, red cooldown rows, then reverse video over the cursor row, padded across the width. */
+function paint(lines, { cursor, redRows, highlight }, width) {
 	return lines.map((line, i) => {
 		let out = paintTokens(line, i === 0);
+		if (highlight && i >= highlight.from && i < highlight.to) out = unbracket(out, highlight.query);
 		if (redRows.includes(i)) out = `${RED}${out}${FG_OFF}`;
 		if (i === cursor && Number.isFinite(width)) {
 			const pad = " ".repeat(Math.max(0, width - visibleColumns(out)));
@@ -266,6 +273,11 @@ function paint(lines, { cursor, redRows }, width) {
 		}
 		return out;
 	});
+}
+
+/** A details line's `[query]` search highlights (GitHub #3) become reverse video in colour. */
+function unbracket(line, query) {
+	return line.replace(new RegExp(`\\[(${escapeRe(query)})\\]`, "gi"), (m, text) => `${REVERSE}${text}${REVERSE_OFF}`);
 }
 
 /** A line's width in visible columns: SGR sequences don't count. */
@@ -290,7 +302,7 @@ function renderSized(state, height) {
 	const tab = TABS.includes(state.tab) ? state.tab : "queue";
 	const header = [headerLine(state, now, tab)];
 	if (state.notice) header.push(`» ${state.notice}`);
-	const footer = [TAB_KEYS[tab], GLOBAL_KEYS];
+	const footer = [footerKeys(state, tab), GLOBAL_KEYS];
 	const room = height - header.length - footer.length;
 	const blank = room >= 2 ? 1 : 0;
 	const body = tabBody(state, tab, Math.max(0, room - blank), now);
@@ -298,13 +310,23 @@ function renderSized(state, height) {
 	const cut = lines.length <= height ? lines : lines.slice(0, Math.max(0, height));
 	const offset = header.length + blank;
 	const visible = (i) => offset + i < cut.length; // a row past the cut height is not a hit
+	// The details' ticket search (GitHub #3) highlights its lines: where they sit on screen.
+	const to = Math.min(offset + body.lines.length, cut.length);
+	const highlight = body.highlight && offset < to ? { query: body.highlight, from: offset, to } : null;
 	return {
 		lines: cut,
 		cursor: body.cursor >= 0 && visible(body.cursor) ? offset + body.cursor : -1,
 		redRows: body.redRows.filter(visible).map((i) => offset + i),
 		rows: body.rows.filter((row) => visible(row.i)).map((row) => ({ y: offset + row.i, index: row.index })),
 		tabs: tabSpans(now, tab),
+		highlight,
 	};
+}
+
+/** The footer's first line: the search prompt's keys while one is open, else the tab's. */
+function footerKeys(state, tab) {
+	if (state.search) return state.search.scope === "ticket" ? SEARCH_KEYS.ticket : SEARCH_KEYS.list;
+	return TAB_KEYS[tab];
 }
 
 /**
@@ -327,7 +349,7 @@ function tabBody(state, tab, height, now) {
 	});
 	switch (tab) {
 		case "queue": {
-			if (state.details) return plain(renderDetails(state));
+			if (state.details) return detailsBody(state, height);
 			const rows = renderQueueRows(state, -1);
 			if (!rows.length) return plain(["Tickets: none (.scratch/<feature>/issues/*.md)"]);
 			const at = clampCursor(cursor.queue, rows.length);
@@ -336,7 +358,7 @@ function tabBody(state, tab, height, now) {
 		}
 		case "resolved": {
 			// The Queue's fully resolved features (GitHub #2), same rows, same cursor and fold.
-			if (state.details) return plain(renderDetails(state));
+			if (state.details) return detailsBody(state, height);
 			const rows = renderQueueRows(state, -1, { resolved: "only" });
 			if (!rows.length) return plain(["Resolved: none"]);
 			const at = clampCursor(cursor.resolved, rows.length);
@@ -385,6 +407,23 @@ function clampCursor(cursor, length) {
 	return Math.max(0, Math.min(cursor ?? 0, length - 1));
 }
 
+/**
+ * The open details as a tab body (GitHub #3): their lines, plus the ticket search's
+ * query when one is open — the paint layer turns its `[query]` brackets into reverse
+ * video, and `renderDetails` has already scrolled to the current match.
+ */
+function detailsBody(state, height) {
+	return { lines: renderDetails(state).slice(0, height), cursor: -1, redRows: [], rows: [], highlight: ticketSearch(state) };
+}
+
+/** The query of a ticket-scoped search (inside the open details), or null. */
+function ticketSearch(state) {
+	const search = state.search;
+	if (!search || search.scope !== "ticket") return null;
+	const query = String(search.query ?? "").trim();
+	return query || null;
+}
+
 /** The window of `rows` that keeps row `at` (the cursor) visible, plus the cursor's index in that window. */
 function scrolled(rows, at, max) {
 	if (max <= 0) return { lines: [], cursor: -1, start: 0 };
@@ -410,11 +449,19 @@ function renderPlain(state) {
 	return lines;
 }
 
-/** The header line: version, time, the six tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter. */
+/** The header line: version, time, the six tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter, the search prompt while one is open (GitHub #3). */
 function headerLine(state, now, tab) {
 	let line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${headerTabs(tab).text}`;
 	if (state.run?.live && state.run?.mode === "dark-factory") line = `${line} · dark-factory`;
-	return state.featureFilter ? `${line} · filter: ${state.featureFilter}` : line;
+	if (state.featureFilter) line = `${line} · filter: ${state.featureFilter}`;
+	if (state.search) line = `${line} · / ${state.search.query ?? ""} · ${searchScopeLabel(state.search)}`;
+	return line;
+}
+
+/** The search prompt's scope as the header shows it. */
+function searchScopeLabel(search) {
+	if (search.scope === "feature") return search.feature ? `feature ${search.feature}` : "feature";
+	return search.scope;
 }
 
 /** The header's tab labels joined for display: `1 Queue  2 Agents  …`, the open one bracketed. */
@@ -489,7 +536,29 @@ function renderDetails(state) {
 	if (route) lines.push(`Route: ${route}`);
 	if (data) lines.push(`What to build: ${data.what ?? "-"}`);
 	if (data?.shift?.length) lines.push("Last shift report:", ...data.shift.map((line) => `  ${line}`));
-	return lines;
+	return searchDetails(state, lines);
+}
+
+/**
+ * A ticket-scoped search over the open details (GitHub #3): every match in the rendered
+ * lines is bracketed (`[…query…]`, reverse video in colour), and the lines scroll so the
+ * current match (`enter` advances it, wrapping) is at the top. No query — or one of the
+ * other scopes — leaves the details as they are.
+ */
+function searchDetails(state, lines) {
+	const query = ticketSearch(state);
+	if (!query) return lines;
+	const re = new RegExp(escapeRe(query), "gi");
+	const marked = lines.map((line) => line.replace(re, (m) => `[${m}]`));
+	const matchLines = lines.flatMap((line, i) => (line.match(re) ? [i] : []));
+	if (!matchLines.length) return marked;
+	const at = matchLines[(state.search.match ?? 0) % matchLines.length];
+	return marked.slice(at);
+}
+
+/** A literal text as a RegExp body. */
+function escapeRe(text) {
+	return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // --- The Agents tab: the runner line, one row per worker ---
