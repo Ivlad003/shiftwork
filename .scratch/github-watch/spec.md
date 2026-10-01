@@ -1,36 +1,33 @@
-# Spec: watch GitHub issues and feed them to the runner ("dark factory" mode)
+# Spec: dark-factory mode — take work from GitHub issues, report back
 
-**Status:** needs-triage
+**Status:** ready-for-agent
 
-Source: GitHub issue #8 (Ivlad003/shiftwork, 2026-10-01): "auto-monitor new GitHub issues in the project, investigate, split into tasks, ready-to-implement; may monitor labels; parameters for this mode; a TUI tab and a toggle; `--dark-factory-mode`". Vocabulary: `CONTEXT.md`. Needs design decisions (below) before tickets are ready.
+Source: GitHub issue #8 (Ivlad003/shiftwork, 2026-10-01), operator answers 2026-10-01. Vocabulary: `CONTEXT.md`.
 
 ## Problem Statement
 
-Work arrives as GitHub issues, but Shiftwork only reads `.scratch/`. Today an operator copies each issue into a spec by hand, splits it into tickets and runs the runner. Nothing watches for new issues or reports progress back to GitHub.
+Work arrives as GitHub issues, but Shiftwork only reads `.scratch/`. Today an operator copies each issue into a spec by hand, splits it into tickets and starts the runner, and nothing tells the issue what happened.
 
-## Proposed Solution
+## Solution
 
-1. **Import, don't replace the tracker.** A watcher polls `gh issue list --repo <repo> --label <in-label> --state open --json number,title,body,labels,author,url` every `pollMin` minutes and writes each new issue as `.scratch/gh-<N>-<slug>/spec.md` with `**Status:** needs-triage` and a `Source: github#N <url>` line. The runner, frontier and verify gate stay as they are. `gh` calls live in `packages/cli` (ADR-0004: core has no backend dependencies).
-2. **Split shift.** For a `needs-triage` spec from GitHub, the runner starts a planning shift (cheap tier by default) that investigates the repo and writes `issues/NN-*.md` tickets, each with acceptance checkboxes and `**Verify:**`, then marks them `ready-for-agent`. Too vague → `needs-info`, and the question goes back to GitHub as a comment.
-3. **Write back.** On claimed / resolved / needs-info: sync labels (`shiftwork:claimed`, `shiftwork:resolved`, `shiftwork:needs-info`), comment with the shift report and branch/commit, and optionally close the issue when every ticket is resolved.
-4. **Config.** `github: { repo, labels: { in, claimed, resolved, needsInfo }, pollMin, authors, autoSplit, autoClose, project }`.
-5. **CLI and TUI.** `shiftwork watch` (and `run --dark-factory`: watch + run the frontier continuously). A **GitHub** tab in the TUI lists watched issues and their import state; a key toggles a detached watcher, like `r` for the runner.
+`shiftwork run --dark-factory` watches the repo's GitHub issues and runs the frontier continuously:
 
-## Open Questions (for the operator)
+1. **Who may give work: collaborators.** Only open issues whose author is a collaborator of the repo (`gh api repos/<repo>/collaborators`, cached per poll) are imported; `github.authors` adds logins, `github.labels.in` (optional) narrows to issues with that label. Anyone else's issue is ignored — issue text is untrusted input to an unattended agent.
+2. **Import.** Each new issue becomes `.scratch/gh-<N>-<slug>/spec.md` (title, body, `Source: github#<N> <url>`, author) plus a planning ticket `issues/01-plan.md` (`**Type:** plan`). State lives in `.pi/shiftwork-github.json` (issue → feature, last comment seen, what was posted), so polling is idempotent.
+3. **Plan, then build.** The planning shift investigates the repo and writes the implementation tickets `02…` (`ready-for-agent`, with Verify lines), one or several depending on the issue. If the issue is unclear it ends with `<shiftwork:needs-info reason="…"/>` and the question is posted as a GitHub comment; a collaborator's reply is appended to the ticket's `## Comments` and the ticket goes back to `ready-for-agent`.
+4. **Report back, never delete.** The watcher syncs ticket state to the issue: a comment when work starts, a comment per resolved ticket with its shift report and links to the landed commits (`https://github.com/<repo>/commit/<sha>`, found by `git log --grep "shiftwork: <feature>/<NN>"`), the needs-info question, labels `shiftwork:planning` / `shiftwork:working` / `shiftwork:needs-info` / `shiftwork:done`. When every ticket of the issue is resolved the issue is **closed** with a summary comment (`github.autoClose`, default true). Nothing on GitHub is deleted.
+5. **TUI.** A **GitHub** tab lists watched issues (number, title, feature, state, last sync); a key toggles a detached dark-factory runner.
 
-- **Trust.** Issue text is untrusted input to an unattended agent that spends money and writes code (prompt injection). Proposed default: import only issues by `authors` (default: the repo owner) or carrying the `in` label set by a maintainer; budgets stay on. Agree?
-- **Source of truth.** Labels on repo issues, or the Projects v2 board's Status field (needs `gh auth refresh -s read:project,project`)? Proposed: labels first, the board later.
-- **Splitting.** Is a dedicated split/triage shift (with a `to-issues`-style skill) acceptable, or should every GitHub issue become exactly one ticket?
-- **Closing.** Close the GitHub issue on resolve, or only comment and label?
-- **Mode name.** `--dark-factory` vs `watch --run`.
+## Implementation Decisions
 
-## Draft tickets (once the questions are answered)
+- **Source of truth: issue labels and comments**, not the Projects v2 board (the board's Status column needs the `read:project` / `project` token scopes). The board is a later, optional ticket.
+- **No runner core changes for GitHub.** `gh` calls live in `packages/cli/src/github.js` behind an injectable `exec` (ADR-0004: core has no backend dependencies). Write-back is a reconcile step run every poll: compare tickets on disk and `.pi/shiftwork-github.json` with what was posted, post the difference.
+- **Planning is an ordinary ticket.** Its Verify gate is `shiftwork tickets check <feature> --min 1` (new): passes when the feature has at least one ticket besides `01-plan` that is `ready-for-agent`, has acceptance checkboxes and a `**Verify:**` line.
+- **Config:** `github: { repo, authors, labels: { in }, pollMin (default 5), autoClose (default true), planTier }`, validated in `packages/core/src/config.js`; `repo` defaults to the `origin` remote.
+- **Commit links need the commits on GitHub.** The runner lands on local `main`; `github.push: true` (default false) lets dark-factory mode `git push` main after a landing so the links resolve. Without it the comment shows the sha only.
+- An ADR records "GitHub is an import source, not a tracker".
 
-1. `github` config block + validation; `gh` wrapper in `packages/cli/src/github.js` with an injectable runner for tests.
-2. Importer: issue → `.scratch/gh-<N>-<slug>/spec.md`, idempotent (state in `.pi/shiftwork-github.json`), filtered by label and author.
-3. `shiftwork watch` command (poll loop, STOP-aware, `--once`).
-4. Split shift: route `needs-triage` GitHub specs to a planning shift that writes tickets.
-5. Write-back: labels and comments on claim / resolve / needs-info; optional close.
-6. `run --dark-factory`: watch + run together.
-7. TUI GitHub tab and watcher toggle.
-8. ADR: GitHub as an import source, not a tracker.
+## Out of Scope
+
+- The Projects v2 board as a source (later ticket).
+- Pull requests per ticket (the runner keeps landing on `main`).

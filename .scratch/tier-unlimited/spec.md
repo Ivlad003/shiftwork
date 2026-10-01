@@ -23,10 +23,16 @@ A shift on that tier or model runs with the union of the top-level, tier and mod
 
 - Validation in `packages/core/src/config.js` uses `normalizeUnlimited` with the right path (`tiers.quick.unlimited`, `models.<ref>.unlimited`) and stores the normalized field list.
 - `buildRoute` in `packages/core/src/planner.js` lifts the union when computing the shift budget.
-- **Tier/model `unlimited` lifts shift limits only.** The ticket's own budget (`budgets.ticket` and the ticket's `**Budget:**` line, via `resolveTicketBudget`) still caps the shift; only the top-level `unlimited` (and `--no-budget`) lifts ticket budgets. A ticket's explicit `Budget:` is an operator's per-ticket decision and should not be silently dropped by a tier setting.
+- **Tier, model and backend `unlimited` lift every limit for that route, the ticket budget included** (operator decision 2026-10-01, ticket 02; ticket 01 first lifted shift limits only). Budgets stay global; the per-route lists are how chosen agents and models run without limits. A `backends.<name>.unlimited` key covers whole agents (`claude`, `codex`, …).
 - `run --dry-run` already prints `budget=-` when nothing is left; it shows the lifted budget per route with no extra work.
 - Types in `packages/core/src/index.d.ts`; docs in `docs/guide.md` + `docs/guide.uk.md` ("No limits"), `skills/shiftwork/references/config.md` (then `npm run sync-skills`), then `npm run llms`.
 
 ## Out of Scope
 
 - Per-tier CLI flags.
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | `unlimited` on tiers and model profiles | resolved | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->
