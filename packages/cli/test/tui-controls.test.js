@@ -272,8 +272,9 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 		kind: "feature",
 		feature: "demo",
 		collapsed: false,
-		resolved: 1,
-		ready: 1,
+		done: 1,
+		next: 1,
+		needsYou: 0,
 		total: 3,
 		workers: [{ number: "02", model: "fake/m1" }], // the feature row carries its tickets' live workers
 	});
@@ -284,11 +285,32 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 		title: "first",
 		status: "ready-for-agent",
 		blockedBy: [],
+		blockers: [],
 		frontier: true,
+		order: 1,
 		worker: null,
+		claim: null,
+		label: "● next #1", // on the frontier: first in the order the runner will take it
+		tone: "next",
 	});
-	assert.equal(rows[2].worker.model, "fake/m1"); // the agent working on the ticket (story 3)
+	assert.deepEqual(rows[2], {
+		kind: "ticket",
+		feature: "demo",
+		number: "02",
+		title: "blocked",
+		status: "ready-for-agent",
+		blockedBy: ["01"],
+		blockers: ["01"],
+		frontier: false,
+		order: null,
+		worker: { ticket: { feature: "demo", number: "02" }, model: "fake/m1" },
+		claim: null,
+		label: "▶ working fake/m1", // a live worker holds it (story 3)
+		tone: "working",
+	});
 	assert.equal(rows[3].status, "resolved");
+	assert.equal(rows[3].label, "✔ done");
+	assert.equal(rows[3].tone, "done");
 	assert.equal(rows[3].frontier, false);
 
 	// A feature filter narrows the queue to that feature's rows.
@@ -325,6 +347,76 @@ test("queueRows: a feature row carries its tickets' live workers, collapsed or n
 	assert.deepEqual(feature(queueRows(d, {})).workers, [{ number: "02", model: "fake/m1" }]);
 });
 
+test("ticketStatusColumn: every status's words — working (worker or claim), next numbered in frontier order, waits listing only unresolved blockers, and the rest by status", () => {
+	const tickets = [
+		{ feature: "f", number: "01", title: "first", status: "ready-for-agent", blockedBy: [] },
+		{ feature: "f", number: "02", title: "held", status: "claimed", blockedBy: [] },
+		{ feature: "f", number: "03", title: "held by claim", status: "claimed", blockedBy: [] },
+		{ feature: "f", number: "04", title: "blocked", status: "ready-for-agent", blockedBy: ["01", "05"] },
+		{ feature: "f", number: "05", title: "done", status: RESOLVED, blockedBy: [] },
+		{ feature: "f", number: "06", title: "ask", status: "needs-info", blockedBy: [] },
+		{ feature: "f", number: "07", title: "human", status: "ready-for-human", blockedBy: [] },
+		{ feature: "f", number: "08", title: "triage", status: "needs-triage", blockedBy: [] },
+		{ feature: "f", number: "09", title: "wont", status: "wontfix", blockedBy: [] },
+		{ feature: "f", number: "10", title: "unblocked", status: "ready-for-agent", blockedBy: ["05"] },
+	];
+	const d = {
+		run: { pid: 7, live: true, workers: [{ ticket: { feature: "f", number: "02" }, model: "opencode-go/glm-5.3" }] },
+		tickets,
+		frontier: [tickets[9], tickets[0]], // the runner takes 10 before 01: `#N` follows the frontier order, not the number
+		claims: [{ ticket: { feature: "f", number: "03" }, pid: 4242, at: "2026-10-01T11:59:00Z" }],
+	};
+	const row = (n) => queueRows(d, {}).find((r) => r.kind === "ticket" && r.number === n);
+
+	// A live worker holds it, with its model; a live claim without a worker entry, with its pid.
+	assert.equal(row("02").label, "▶ working opencode-go/glm-5.3");
+	assert.equal(row("02").tone, "working");
+	assert.equal(row("03").label, "▶ working pid 4242");
+	assert.equal(row("03").tone, "working");
+
+	// On the frontier: its place in the order the runner will take it.
+	assert.equal(row("10").label, "● next #1");
+	assert.equal(row("10").tone, "next");
+	assert.equal(row("10").order, 1);
+	assert.equal(row("01").label, "● next #2");
+
+	// Ready with unresolved blockers: only the unresolved ones are listed.
+	assert.equal(row("04").label, "⧗ waits 01");
+	assert.deepEqual(row("04").blockers, ["01"]); // 05 is resolved: not listed
+	assert.equal(row("04").tone, "waits");
+
+	// A ticket whose blockers are all resolved never shows waits: it is next up instead.
+	assert.doesNotMatch(row("10").label, /waits/);
+	assert.equal(row("10").blockers.length, 0);
+
+	// The statuses keep their own words.
+	assert.equal(row("05").label, "✔ done");
+	assert.equal(row("05").tone, "done");
+	assert.equal(row("06").label, "? needs you");
+	assert.equal(row("06").tone, "needs");
+	assert.equal(row("07").label, "✋ for human");
+	assert.equal(row("07").tone, null);
+	assert.equal(row("08").label, "○ triage");
+	assert.equal(row("08").tone, null);
+	assert.equal(row("09").label, "✖ wontfix");
+	assert.equal(row("09").tone, null);
+
+	// The feature row counts done, next (the frontier) and needs you.
+	assert.deepEqual(queueRows(d, {})[0], {
+		kind: "feature",
+		feature: "f",
+		collapsed: false,
+		done: 1,
+		next: 2,
+		needsYou: 1,
+		total: 10,
+		workers: [
+			{ number: "02", model: "opencode-go/glm-5.3" },
+			{ number: "03", model: null, pid: 4242 },
+		],
+	});
+});
+
 /** One frame plus a fully resolved feature: shipped (01, 02, both resolved). */
 const doneFrame = () => ({
 	...frame(),
@@ -344,7 +436,7 @@ test("queueRows skips fully resolved features; resolvedRows lists only them, sam
 
 	const resolved = resolvedRows(d, {});
 	assert.equal(resolved.some((r) => r.feature !== "shipped"), false);
-	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, resolved: 2, ready: 0, total: 2, workers: [] });
+	assert.deepEqual(resolved[0], { kind: "feature", feature: "shipped", collapsed: false, done: 2, next: 0, needsYou: 0, total: 2, workers: [] });
 	assert.deepEqual(resolved[1], {
 		kind: "ticket",
 		feature: "shipped",
@@ -352,8 +444,13 @@ test("queueRows skips fully resolved features; resolvedRows lists only them, sam
 		title: "old",
 		status: RESOLVED,
 		blockedBy: [],
+		blockers: [],
 		frontier: false,
+		order: null,
 		worker: null,
+		claim: null,
+		label: "✔ done",
+		tone: "done",
 	});
 
 	// Both honour collapsed and featureFilter like the Queue always has.
@@ -777,7 +874,7 @@ test("queueRows: a global query keeps matching tickets from several features and
 			["ticket", "other", "01"],
 		],
 	);
-	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, resolved: 1, ready: 1, total: 3, workers: [] });
+	assert.deepEqual(global[0], { kind: "feature", feature: "demo", collapsed: false, done: 1, next: 1, needsYou: 0, total: 3, workers: [] });
 
 	// A title matches, case-insensitively.
 	const byTitle = queueRows(d, { search: search({ query: "ELSEWHERE", editing: false }) });

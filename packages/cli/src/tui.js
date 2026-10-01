@@ -36,11 +36,27 @@ cursor, fold and enter → details as the Queue's (n there is refused: status
 resolved). The GitHub tab lists the issues run --dark-factory imported:
 number, title, feature, state (planning, working, needs-info, done, closed)
 and the time of the last sync.
+
+A Queue or Resolved ticket row reads \`<status column>  NN title\`: the column
+is fixed-width and comes before the number and title, so on a narrow terminal
+the words stay whole and the title is what gets clipped. Its legend:
+▶ working glm-5.3 (or pid N when another runner's live claim holds it) — a
+live worker or claim holds it · ● next #1 — its place in the order the runner
+will take the frontier · ⧗ waits 01, 03 — blocked by unresolved tickets, only
+the unresolved ones listed · ? needs you — needs-info; the details view shows
+the reason from the last shift report · ✋ for human — ready-for-human ·
+○ triage — needs-triage · ✔ done — resolved · ✖ wontfix · ⏸ paused — its feature
+is paused (once feature-pause lands; until then never shown). A feature row
+counts its tickets: \`2/6 done · 2 next · 1 needs you\`, zero parts omitted. The
+details view's first line carries the same label, plus the reason line for a
+needs-you ticket. --once and the plain-text fallback print the same words
+without colour.
+
 The interactive view is built on @earendil-works/pi-tui (TuiAltScreen), resolved
 from the user's pi install. It is in colour: the cursor row is highlighted
-across the width, statuses are coloured (resolved green, claimed cyan,
-needs-info yellow, blocked dim), live workers are cyan, cooldowns are red.
-Set NO_COLOR to turn colour off; --once and the plain-text fallback stay
+across the width, the status column is coloured (done green, working cyan,
+next bold, waits dim, needs you yellow), live workers are cyan, cooldowns are
+red. Set NO_COLOR to turn colour off; --once and the plain-text fallback stay
 colourless (and list every feature, resolved ones included, like --once).
 Without pi-tui a plain-text fallback prints a frame every second; the same
 keys work there where they make sense.`;

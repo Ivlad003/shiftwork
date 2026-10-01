@@ -3,7 +3,7 @@ import { existsSync, openSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openRunState, RESOLVED } from "shiftwork-core";
+import { openRunState, READY, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "./dry-run.js";
 
 /** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · / search · q quit. */
@@ -25,7 +25,11 @@ const ARROWS = { A: "up", B: "down", C: "right", D: "left" };
  * `feature` scope only within the feature the prompt captured. Each feature row also carries
  * its tickets' live workers (`workers: [{ number, model }]`, from `dashboard.run.workers` and
  * from live claims in `dashboard.claims`, so a ticket held by a second runner counts too — such
- * a claim, with no worker entry in the run state, gets `model: null` and its `pid` instead).
+ * a claim, with no worker entry in the run state, gets `model: null` and its `pid` instead) and
+ * counts its tickets (`done`, `next` on the frontier, `needsYou`, `total`). Each ticket row
+ * carries its status column (`label` + `tone`, from `ticketStatusColumn`) and its pieces: the
+ * unresolved `blockers`, the frontier `order` (`#N`, its place in the order the runner will take
+ * it, null off the frontier), the live `worker` and the live `claim` that holds it.
  * Pure, and shared with rendering.
  */
 export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
@@ -67,13 +71,15 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 			kind: "feature",
 			feature,
 			collapsed: collapsed.has(feature),
-			resolved: own.filter((t) => t.status === RESOLVED).length,
-			ready: own.filter((t) => frontier.has(`${t.feature}/${t.number}`)).length,
+			done: own.filter((t) => t.status === RESOLVED).length,
+			next: own.filter((t) => frontier.has(`${t.feature}/${t.number}`)).length,
+			needsYou: own.filter((t) => t.status === NEEDS_INFO).length,
 			total: own.length,
 			workers,
 		});
 		if (collapsed.has(feature)) continue;
 		for (const t of shown) {
+			const column = ticketStatusColumn(dashboard, t);
 			rows.push({
 				kind: "ticket",
 				feature: t.feature,
@@ -81,12 +87,68 @@ export function queueRows(dashboard, view, { resolved = "skip" } = {}) {
 				title: t.title,
 				status: t.status,
 				blockedBy: t.blockedBy ?? [],
-				frontier: frontier.has(`${t.feature}/${t.number}`),
-				worker: workerOf.get(`${t.feature}/${t.number}`) ?? null,
+				blockers: column.blockers,
+				frontier: column.order != null,
+				order: column.order,
+				worker: column.worker,
+				claim: column.claim,
+				label: column.label,
+				tone: column.tone,
 			});
 		}
 	}
 	return rows;
+}
+
+/** The statuses whose words the status column replaces (tui-polish/07); `ready-for-agent` and `claimed` are derived below instead. */
+const NEEDS_INFO = "needs-info";
+const STATUS_COLUMNS = {
+	[NEEDS_INFO]: { label: "? needs you", tone: "needs" },
+	"ready-for-human": { label: "✋ for human", tone: null },
+	"needs-triage": { label: "○ triage", tone: null },
+	wontfix: { label: "✖ wontfix", tone: null },
+	resolved: { label: "✔ done", tone: "done" },
+	// A claimed ticket with no visible worker or claim (a frame between the claim dying and the
+	// next frontier refresh): the words stay honest, the ref is the unknown part.
+	claimed: { label: "▶ working ?", tone: "working" },
+};
+
+/**
+ * One ticket's readable status column (tui-polish/07), derived from the live workers, the
+ * frontier, the blockers and the status — the same words in the Queue, the Resolved tab,
+ * the details view and the plain `--once` frame: a live worker or live claim holds it
+ * (`▶ working <model>`, `pid N` for another runner), else its place in the order the runner
+ * will take it (`● next #N`), else `⧗ waits 01, 03` for a ready ticket with unresolved blockers
+ * — only the unresolved ones listed — else the status's own words (`? needs you` for
+ * `needs-info`, `✋ for human`, `○ triage`, `✔ done`, `✖ wontfix`; an unknown status reads as
+ * untriaged). `⏸ paused` joins once feature-pause lands; until then no feature is paused.
+ * Returns `{ label, tone, blockers, order, worker, claim }`: the words, their colour tone
+ * (`working`/`next`/`waits`/`needs`/`done`, null for the rest), and the pieces they came from.
+ * Pure: `(dashboard, ticket) → column`.
+ */
+export function ticketStatusColumn(dashboard, ticket) {
+	const key = `${ticket.feature}/${ticket.number}`;
+	const same = (t) => t.feature === ticket.feature && t.number === ticket.number;
+	const worker = (dashboard?.run?.workers ?? []).find((w) => w.ticket && same(w.ticket)) ?? null;
+	const claim = worker ? null : (dashboard?.claims ?? []).find((c) => c.ticket && same(c.ticket)) ?? null;
+	const order = (dashboard?.frontier ?? []).findIndex(same) + 1;
+	const blockers = unresolvedBlockers(dashboard, ticket);
+	const pieces = { blockers, order: order > 0 ? order : null, worker, claim };
+	if (worker || claim) {
+		const who = worker ? worker.model ?? "?" : `pid ${claim.pid ?? "?"}`;
+		return { ...pieces, label: `▶ working ${who}`, tone: "working" };
+	}
+	if (order > 0) return { ...pieces, label: `● next #${order}`, tone: "next" };
+	if (ticket.status === READY) {
+		return { ...pieces, label: `⧗ waits ${blockers.join(", ")}`.trimEnd(), tone: "waits" };
+	}
+	return { ...pieces, ...(STATUS_COLUMNS[ticket.status] ?? STATUS_COLUMNS["needs-triage"]) };
+}
+
+/** The ticket numbers that block `ticket` and are not resolved themselves (a missing blocker counts as unresolved). */
+function unresolvedBlockers(dashboard, ticket) {
+	const statusOf = new Map((dashboard?.tickets ?? []).map((t) => [`${t.feature}/${t.number}`, t.status]));
+	return (ticket.blockedBy ?? []).filter((n) => statusOf.get(`${ticket.feature}/${n}`) !== RESOLVED);
 }
 
 /**

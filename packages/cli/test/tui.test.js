@@ -44,8 +44,8 @@ test("dashboard: idle runner, one ready ticket", () => {
 
 	assert.match(frame, /Runner: idle \(no run state\)/);
 	assert.match(frame, /Frontier: f\/01 \(1 ready of 1\)/);
-	assert.match(frame, /▾ f 0\/1 resolved · 1 ready/);
-	assert.match(frame, /01 First · ready-for-agent/);
+	assert.match(frame, /▾ f 0\/1 done · 1 next/);
+	assert.match(frame, /● next #1  01 First/);
 	assert.match(frame, /Cooldowns: none/);
 	assert.match(frame, /Log: no current shift log/);
 });
@@ -150,8 +150,8 @@ test("dashboard: a feature filter scopes the frontier and the ticket tables", ()
 
 	assert.match(frame, /filter: b/);
 	assert.match(frame, /Frontier: b\/01 \(1 ready of 1\)/);
-	assert.match(frame, /▾ b 0\/1 resolved · 1 ready/);
-	assert.match(frame, /01 Two · ready-for-agent/);
+	assert.match(frame, /▾ b 0\/1 done · 1 next/);
+	assert.match(frame, /● next #2  01 Two/); // its place in the frontier order, not the ticket list
 	assert.doesNotMatch(frame, /01 One/);
 	assert.doesNotMatch(frame, /▾ a /);
 });
@@ -181,7 +181,7 @@ test("dashboard: a ticket a worker holds shows the model ref, prefix included", 
 		},
 	}).join("\n");
 
-	assert.match(frame, /01 Held · claimed · ● claude:sonnet/);
+	assert.match(frame, /▶ working claude:sonnet  01 Held/);
 });
 
 test("dashboard: collapsed features use ▸ and hide their tickets", () => {
@@ -192,7 +192,7 @@ test("dashboard: collapsed features use ▸ and hide their tickets", () => {
 		collapsed: ["parallel"],
 	}).join("\n");
 
-	assert.match(frame, /▸ parallel 0\/2 resolved · 1 ready/);
+	assert.match(frame, /▸ parallel 0\/2 done · 1 next/);
 	assert.doesNotMatch(frame, /01 First/);
 	assert.doesNotMatch(frame, /▾ parallel/);
 });
@@ -206,8 +206,8 @@ test("dashboard: a feature row carries its live workers, collapsed or not; none 
 		run: { pid: 7, live: true, workers: [{ ticket: { feature: "tui-polish", number: "12" }, model: "glm-5.3", attempt: 1, shift: 1 }] },
 	}).join("\n");
 
-	assert.match(one, /▸ tui-polish 0\/1 resolved · 0 ready · ● 12 glm-5\.3/); // the marker shows on the collapsed feature row too
-	assert.match(one, /▾ empty 0\/1 resolved · 1 ready(?! · ●)/); // a feature with no workers shows no marker
+	assert.match(one, /▸ tui-polish 0\/1 done · ● 12 glm-5\.3/); // the marker shows on the collapsed feature row too, the zero next part is omitted
+	assert.match(one, /▾ empty 0\/1 done · 1 next(?! · ●)/); // a feature with no workers shows no marker
 
 	const two = renderDashboard({
 		...base,
@@ -223,7 +223,7 @@ test("dashboard: a feature row carries its live workers, collapsed or not; none 
 		},
 	}).join("\n");
 
-	assert.match(two, /▾ tui-polish 0\/2 resolved · 0 ready · ● 2 agents \(12 glm-5\.3, 03 grok-4\.7\)/);
+	assert.match(two, /▾ tui-polish 0\/2 done · ● 2 agents \(12 glm-5\.3, 03 grok-4\.7\)/);
 
 	// A live claim with no run-state worker (another runner) keeps its pid in place of a model.
 	const claimed = renderDashboard({
@@ -232,7 +232,7 @@ test("dashboard: a feature row carries its live workers, collapsed or not; none 
 		frontier: [],
 		claims: [{ ticket: { feature: "tui-polish", number: "12" }, pid: 4242, at: "2026-10-01T11:59:00Z" }],
 	}).join("\n");
-	assert.match(claimed, /▾ tui-polish 0\/1 resolved · 0 ready · ● 12 pid 4242/);
+	assert.match(claimed, /▾ tui-polish 0\/1 done · ● 12 pid 4242/);
 
 	// The marker is coloured like the ticket row's: cyan when colour is on.
 	const colored = renderDashboard(
@@ -270,7 +270,7 @@ test("dashboard: details render the ticket's fields, route and latest shift repo
 		},
 	}).join("\n");
 
-	assert.match(withShift, /f\/03 · Tabbed rendering · ready-for-agent/);
+	assert.match(withShift, /f\/03 · Tabbed rendering · ⧗ waits 02/);
 	assert.match(withShift, /Type: code/);
 	assert.match(withShift, /Model: anthropic\/claude-sonnet/);
 	assert.match(withShift, /Budget: \$2 · 50 turns/);
@@ -298,6 +298,75 @@ test("dashboard: details render the ticket's fields, route and latest shift repo
 	assert.doesNotMatch(without, /### Shift/);
 });
 
+test("dashboard: feature rows count done, next and needs you, omitting the zero parts", () => {
+	const tickets = [
+		ticket("f", "01", "One", "resolved"),
+		ticket("f", "02", "Two", "resolved"),
+		ticket("f", "03", "Ask", "needs-info"),
+		ticket("g", "01", "Next up"),
+		ticket("shipped", "01", "Old", "resolved"),
+		ticket("shipped", "02", "Older", "resolved"),
+	];
+	const state = { ...base, tickets, frontier: [tickets[3]] };
+	const frame = renderDashboard(state).join("\n");
+
+	assert.match(frame, /▾ f 2\/3 done · 1 needs you/); // the zero next part is omitted
+	assert.match(frame, /▾ g 0\/1 done · 1 next/); // the zero needs-you part is omitted
+	assert.match(frame, /▾ shipped 2\/2 done(?! ·)/); // only the fraction is left
+	assert.doesNotMatch(frame, /\/\d+ resolved|· \d+ ready/); // the old counts are gone
+});
+
+test("renderDashboard: at a narrow width the status column stays whole, the title is what gets clipped", () => {
+	const tickets = [
+		{ ...ticket("f", "01", "A very long title that cannot fit"), blockedBy: ["03"] }, // 03 is needs-info: an unresolved blocker
+		ticket("f", "02", "Done one", "resolved"),
+		ticket("f", "03", "Ask", "needs-info"),
+	];
+	const state = { ...base, tickets, frontier: [] };
+	const lines = renderDashboard({ ...state, tab: "queue" }, { width: 40, height: 14 });
+
+	for (const line of lines) assert.ok(line.length <= 40, line);
+	// Every status column is fully visible, padded to the widest one rendered.
+	assert.ok(lines.some((line) => line.slice(4).startsWith("⧗ waits 03")), lines.join("\n"));
+	assert.ok(lines.some((line) => line.slice(4).startsWith("? needs you")), lines.join("\n"));
+	assert.ok(lines.some((line) => line.slice(4).startsWith("✔ done")), lines.join("\n"));
+	// The long title is the clipped part, ellipsis and all.
+	const clipped = lines.find((line) => line.includes("A very long title"));
+	assert.ok(clipped, lines.join("\n"));
+	assert.equal(clipped.length, 40);
+	assert.match(clipped, /…$/);
+	assert.match(clipped, /01 A very long title/);
+});
+
+test("dashboard: details carry the status column's label, and a needs-info ticket its reason", () => {
+	const ask = { ...ticket("f", "04", "Ask", "needs-info"), type: "code" };
+	const frame = renderDashboard({
+		...base,
+		tickets: [ask, ticket("f", "05", "Done", "resolved")],
+		details: "f/04",
+		ticketDetails: {
+			key: "f/04",
+			ticket: ask,
+			what: "ask something",
+			shift: ["### Shift 2 — pi opencode-go/glm-5.3 (medium)", "- Outcome: needs-info: verify failed twice"],
+			reason: "verify failed twice",
+		},
+	}).join("\n");
+
+	assert.match(frame, /f\/04 · Ask · \? needs you/);
+	assert.match(frame, /Reason: verify failed twice/); // the reason from the last shift report
+	assert.doesNotMatch(frame, /f\/04 · Ask · needs-info/); // the machine word is gone
+
+	// Without a reason on record the line still shows, with a dash.
+	const bare = renderDashboard({
+		...base,
+		tickets: [ask],
+		details: "f/04",
+		ticketDetails: { key: "f/04", ticket: ask, what: "ask something", shift: [], reason: null },
+	}).join("\n");
+	assert.match(bare, /Reason: -/);
+});
+
 test("dashboard: the Resolved tab lists the fully resolved features; the header shows 5 Resolved", () => {
 	const tickets = [ticket("f", "01", "Open"), ticket("shipped", "01", "Old", "resolved"), ticket("shipped", "02", "Older", "resolved")];
 	const state = { ...base, tickets, frontier: [tickets[0]] };
@@ -305,20 +374,20 @@ test("dashboard: the Resolved tab lists the fully resolved features; the header 
 	const sized = renderDashboard({ ...state, tab: "resolved" }, { width: 120, height: 20 }).join("\n"); // 120: the six-tab header needs the room
 	assert.match(sized, /\[5 Resolved\]/);
 	assert.match(sized, /6 GitHub/);
-	assert.match(sized, /▾ shipped 2\/2 resolved · 0 ready/);
-	assert.match(sized, /01 Old · resolved/);
-	assert.match(sized, /02 Older · resolved/);
+	assert.match(sized, /▾ shipped 2\/2 done/); // zero next/needs-you parts are omitted
+	assert.match(sized, /✔ done  01 Old/);
+	assert.match(sized, /✔ done  02 Older/);
 	assert.doesNotMatch(sized, /▾ f /); // the open feature stays on the Queue
 
 	// The Queue tab no longer lists the fully resolved feature.
 	const queue = renderDashboard({ ...state, tab: "queue" }, { width: 120, height: 20 }).join("\n");
-	assert.match(queue, /▾ f 0\/1 resolved · 1 ready/);
+	assert.match(queue, /▾ f 0\/1 done · 1 next/);
 	assert.doesNotMatch(queue, /shipped/);
 
 	// The plain frame (--once, the fallback) lists every feature as it always has.
 	const plain = renderDashboard(state).join("\n");
-	assert.match(plain, /▾ shipped 2\/2 resolved · 0 ready/);
-	assert.match(plain, /▾ f 0\/1 resolved · 1 ready/);
+	assert.match(plain, /▾ shipped 2\/2 done/);
+	assert.match(plain, /▾ f 0\/1 done · 1 next/);
 
 	// An empty Resolved tab says so.
 	const empty = renderDashboard(
@@ -379,24 +448,25 @@ test("renderDashboard: each tab fits height and width; a 40-ticket queue keeps t
 
 	const queue = renderDashboard({ ...state, tab: "queue" }, { width, height });
 	assert.equal(queue.some((line) => line.includes(`${last.number} ${last.title}`)), true);
-	assert.match(queue.join("\n"), />   40 Ticket 40/);
+	assert.match(queue.join("\n"), /> {3}● next #40 {2,}40 Ticket 40/); // the column pads to the widest label (a working one here)
 	assert.equal(
 		renderDashboard({ ...state, tab: "queue" }, { width, height }).join("\n").includes("Ticket 01"),
 		false,
 	);
 });
 
-test("renderDashboard color: reverse-video cursor row, coloured statuses, markers, notice and cooldowns; off means no escapes", () => {
+test("renderDashboard color: reverse-video cursor row, the coloured status column, markers, notice and cooldowns; off means no escapes", () => {
 	const tickets = [
 		ticket("f", "01", "Done", "resolved"),
 		ticket("f", "02", "Held", "claimed"),
 		ticket("f", "03", "Ask", "needs-info"),
 		{ ...ticket("f", "04", "Wait"), blockedBy: ["03"] },
+		ticket("f", "05", "Next"),
 	];
 	const state = {
 		...base,
 		tickets,
-		frontier: [tickets[0]],
+		frontier: [tickets[4]],
 		notice: "runner started (pid 4242)",
 		cursor: { queue: 1, cooldowns: 0 },
 		run: {
@@ -417,12 +487,12 @@ test("renderDashboard color: reverse-video cursor row, coloured statuses, marker
 	assert.match(text, /\x1b\[33m» runner started/); // the notice is yellow
 	const cursorRow = lines.find((line) => line.includes("\x1b[7m"));
 	assert.match(cursorRow, /01 Done/); // the cursor row, reverse video
-	assert.match(cursorRow, /\x1b\[32mresolved/); // resolved green
+	assert.match(cursorRow, /\x1b\[32m✔ done/); // done green
 	assert.equal(stripSgr(cursorRow).length, 60); // reverse video across the visible width
-	assert.match(text, /\x1b\[36mclaimed/); // claimed cyan
-	assert.match(text, /\x1b\[33mneeds-info/); // needs-info yellow
-	assert.match(text, /\x1b\[2mblocked by 03/); // blocked dim
-	assert.match(text, /\x1b\[36m● claude:sonnet/); // the worker marker is cyan
+	assert.match(text, /\x1b\[36m▶ working claude:sonnet/); // working cyan
+	assert.match(text, /\x1b\[33m\? needs you/); // needs you yellow
+	assert.match(text, /\x1b\[2m⧗ waits 03/); // waits dim, blockers included
+	assert.match(text, /\x1b\[1m● next #1\x1b\[22m/); // next bold
 
 	const cooldowns = renderDashboard({ ...state, tab: "cooldowns" }, { width: 60, height: 24, color: true });
 	assert.match(cooldowns.find((line) => line.includes("xai (rate)")), /\x1b\[7m/); // the cursor row is still reverse video
@@ -441,9 +511,9 @@ test("renderDashboard: a list search filters the queue, the header shows the pro
 	const frame = renderDashboard(state, { width: 160, height: 20 }).join("\n"); // 160: the six-tab header plus the prompt needs the room
 
 	assert.match(frame, /\/ widget · global/); // the header shows the prompt while searching
-	assert.match(frame, /▾ f 0\/2 resolved · 2 ready/); // the matching tickets' feature rows stay, counts of the whole feature
-	assert.match(frame, /01 First widget/);
-	assert.match(frame, /01 Another widget/); // matches from several features
+	assert.match(frame, /▾ f 0\/2 done · 2 next/); // the matching tickets' feature rows stay, counts of the whole feature
+	assert.match(frame, /● next #1  01 First widget/);
+	assert.match(frame, /● next #3  01 Another widget/); // matches from several features
 	assert.doesNotMatch(frame, /02 Second thing/); // a non-matching ticket leaves the list
 	assert.match(frame, /letters add to the query · backspace delete/); // the footer swaps in the search keys
 	assert.match(frame, /q quits/); // the shared keys stay
@@ -508,7 +578,7 @@ test("dashboardLayout: each list row's y and each tab label's span match the ren
 		assert.equal(y, 2 + i); // header line, blank, then the body — one row per line
 		const row = rows[index];
 		const line = stripSgr(layout.lines[y]);
-		if (row.kind === "ticket") assert.ok(line.slice(4).startsWith(`${row.number} ${row.title}`), `y ${y} → row ${index}: ${line}`);
+		if (row.kind === "ticket") assert.ok(line.slice(4).startsWith(row.label), `y ${y} → row ${index}: ${line}`); // the status column, then the number and title
 		else assert.ok(line.slice(4).startsWith(`▾ ${row.feature} `), `y ${y} → row ${index}: ${line}`);
 		if (i) {
 			// consecutive rows of the window: y and index advance together
@@ -627,6 +697,23 @@ test("collectDashboardState: open details read the ticket body and the latest sh
 		join(root, ".scratch", "f", "issues", "02-no-comments.md"),
 		"# 02: No comments\n\n**What to build:** nothing extra\n\n**Status:** resolved\n",
 	);
+	// A needs-info ticket: the reason sits in its last shift report's outcome line.
+	await writeFile(
+		join(root, ".scratch", "f", "issues", "03-question.md"),
+		[
+			"# 03: Question",
+			"",
+			"**What to build:** ask something",
+			"",
+			"**Status:** needs-info",
+			"",
+			"## Comments",
+			"",
+			"### Shift 1 — pi fake/m1 (low)",
+			"- Outcome: needs-info: need the prod API key before anything else",
+			"",
+		].join("\n"),
+	);
 
 	const closed = await collectDashboardState(root, { now });
 	assert.equal(closed.ticketDetails, null);
@@ -652,6 +739,13 @@ test("collectDashboardState: open details read the ticket body and the latest sh
 	const bareFrame = renderDashboard({ ...bare, details: "f/02" }).join("\n");
 	assert.match(bareFrame, /What to build: nothing extra/);
 	assert.doesNotMatch(bareFrame, /Last shift report/);
+
+	// The needs-info ticket's reason comes from its last shift report's outcome line.
+	const ask = await collectDashboardState(root, { now, view: { details: "f/03" } });
+	assert.equal(ask.ticketDetails.reason, "need the prod API key before anything else");
+	const askFrame = renderDashboard({ ...ask, details: "f/03" }).join("\n");
+	assert.match(askFrame, /f\/03 · Question · \? needs you/);
+	assert.match(askFrame, /Reason: need the prod API key before anything else/);
 });
 
 test("collectDashboardState: the GitHub tab's rows come from .pi/shiftwork-github.json, the state from the tickets", async () => {
@@ -780,9 +874,9 @@ test("shiftwork tui --once prints one frame and exits", async () => {
 	assert.match(stdout, /Runner: working f\/01 · First \(pid \d+\)/);
 	assert.match(stdout, /f\/01 First · fake\/m1 · shift 1 · attempt 1/);
 	assert.match(stdout, /120 tokens · \$0\.25 · 1 turns · ctx 12%/);
-	assert.match(stdout, /01 First · claimed · ● fake\/m1/);
-	assert.match(stdout, /▾ shipped 1\/1 resolved · 0 ready/); // the plain frame keeps resolved features
-	assert.match(stdout, /01 Old · resolved/);
+	assert.match(stdout, /▶ working fake\/m1  01 First/);
+	assert.match(stdout, /▾ shipped 1\/1 done/); // the plain frame keeps resolved features
+	assert.match(stdout, /✔ done +01 Old/); // the plain frame's column pads across every feature's labels
 	assert.match(stdout, /Log: logs\/f\/01\/attempt-1\.jsonl/);
 	assert.match(stdout, /turn · 120 tokens/);
 });
@@ -834,6 +928,16 @@ test("shiftwork tui --help describes the tabs and keys", async () => {
 	assert.match(stdout, /n runs the selected ticket/);
 	assert.match(stdout, /\/ opens a search prompt/); // search: / filters the list or the details (GitHub #3)
 	assert.match(stdout, /letters — n, r, s, d, f, q and digits/);
+	assert.match(stdout, /▶ working glm-5\.3/); // the status column's legend (tui-polish/07)
+	assert.match(stdout, /● next #1 — its place in the order the runner/);
+	assert.match(stdout, /⧗ waits 01, 03/);
+	assert.match(stdout, /\? needs you/);
+	assert.match(stdout, /✋ for human/);
+	assert.match(stdout, /○ triage/);
+	assert.match(stdout, /✔ done/);
+	assert.match(stdout, /✖ wontfix/);
+	assert.match(stdout, /⏸ paused/);
+	assert.match(stdout, /2\/6 done · 2 next · 1 needs you/);
 	assert.match(stdout, /TuiAltScreen/);
 	assert.match(stdout, /colour/i);
 	assert.match(stdout, /NO_COLOR/);
@@ -1056,7 +1160,7 @@ test("interactive: a click event delivered to the layout root's handleMouse chan
 	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
 	await waitFor(() => stripSgr(text.text.split("\n")[rowY]).startsWith(">")); // the cursor row
 	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
-	await waitFor(() => /demo\/02 · Second · ready-for-agent/.test(stripSgr(text.text))); // the details view
+	await waitFor(() => /demo\/02 · Second · ● next #2/.test(stripSgr(text.text))); // the details view, its first line carrying the status column
 
 	// The wheel moves the cursor too: esc closes the details, then the wheel scrolls up.
 	terminal.send("\x1b");

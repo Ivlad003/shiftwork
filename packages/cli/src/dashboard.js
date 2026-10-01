@@ -4,7 +4,7 @@ import { CLAIMED, openCooldowns, openRepoTracker, openRunState, RESOLVED, VERSIO
 import { formatBudget } from "./dry-run.js";
 import { readIssueState } from "./github-import.js";
 import { parsePostKey } from "./github-post.js";
-import { githubRows, queueRows, TABS } from "./tui-controls.js";
+import { githubRows, queueRows, TABS, ticketStatusColumn } from "./tui-controls.js";
 
 // queueRows' `resolved` option: "skip" is the Queue tab's view, "only" the Resolved tab's, null the plain frame's.
 
@@ -36,6 +36,18 @@ const BOLD_OFF = "\x1b[22m";
 const REVERSE = "\x1b[7m";
 const REVERSE_OFF = "\x1b[27m";
 const STATUS_COLORS = { resolved: GREEN, claimed: CYAN, "needs-info": YELLOW };
+
+/*
+ * The status column's words (tui-polish/07), as a paint layer regex: `ticketStatusColumn` in
+ * tui-controls.js writes them; here they are found in a rendered line and coloured by their
+ * glyph — ▶ working cyan, ● next bold, ⧗ waits dim, ? needs you yellow, ✔ done green; the
+ * plain words (✋ ○ ✖ ⏸) stay plain. The blockers of `⧗ waits 01, 03` are numbers joined `, `;
+ * the two spaces after the padded column keep the title out of the match.
+ */
+const STATUS_COLUMN_RE =
+	/(▶ working (?:pid \d+|\S+)|● next #\d+|⧗ waits(?: \d+(?:, \d+)*)?|\? needs you|✋ for human|○ triage|✔ done|✖ wontfix|⏸ paused)/g;
+const TONE_ON = { "▶": CYAN, "●": BOLD, "⧗": DIM, "?": YELLOW, "✔": GREEN };
+const TONE_OFF = { "▶": FG_OFF, "●": BOLD_OFF, "⧗": DIM_OFF, "?": FG_OFF, "✔": FG_OFF };
 
 /** The keys of each tab, the footer's first line. */
 const TAB_KEYS = {
@@ -154,7 +166,22 @@ async function readTicketDetails(tickets, key) {
 	} catch {
 		return { key, ticket, what: null, shift: [] };
 	}
-	return { key, ticket, what: field(text, "What to build"), shift: latestShiftReport(text) };
+	const shift = latestShiftReport(text);
+	return { key, ticket, what: field(text, "What to build"), shift, reason: needsInfoReason(shift, text) };
+}
+
+/**
+ * Why a needs-info ticket waits for you: the last shift report's `- Outcome: needs-info: …` line
+ * — the runner writes the reason there — else a `<shiftwork:needs-info reason=…/>` marker in
+ * the body (the review verdict form). null without either.
+ */
+function needsInfoReason(shiftLines, markdown) {
+	for (const line of [...shiftLines].reverse()) {
+		const outcome = line.match(/^- Outcome: needs-info: (.+)$/);
+		if (outcome) return outcome[1].trim();
+	}
+	const marker = markdown.match(/<shiftwork:needs-info\s+reason="([^"]*)"\s*\/>/);
+	return marker ? marker[1] : null;
 }
 
 function field(text, name) {
@@ -219,11 +246,11 @@ function logDetail(event) {
  * printed one after the other, unbounded, then Cooldowns, Log and the dry-run panel.
  *
  * With `color: true` (the interactive view, unless `NO_COLOR` is set) SGR codes are
- * applied after clipping: the cursor row is reverse video across the width, ticket
- * statuses are coloured (resolved green, claimed cyan, needs-info yellow, blocked dim),
+ * applied after clipping: the cursor row is reverse video across the width, the status
+ * column is coloured (done green, working cyan, next bold, waits dim, needs you yellow),
  * the `● model` worker marker is cyan, cooldown rows are red, the active tab label is
  * bold and the `»` notice is yellow. `color` defaults to false, so `--once`, non-TTY
- * output and the plain-text fallback stay colourless.
+ * output and the plain-text fallback stay colourless — with the same status-column words.
  */
 export function renderDashboard(state, { width, height, color = false } = {}) {
 	return dashboardLayout(state, { width, height, color }).lines;
@@ -285,11 +312,14 @@ function visibleColumns(line) {
 	return line.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
-/** The colourable tokens of one line: the notice, ticket statuses, blockers, worker markers, the active tab label. */
+/** The colourable tokens of one line: the notice, the status column, status words, worker markers, the active tab label. */
 function paintTokens(line, isHeader) {
 	let out = line.startsWith("»") ? `${YELLOW}${line}${FG_OFF}` : line;
+	out = out.replace(STATUS_COLUMN_RE, (m) => {
+		const tone = TONE_ON[m[0]];
+		return tone ? `${tone}${m}${TONE_OFF[m[0]]}` : m;
+	});
 	out = out.replace(/ · (resolved|claimed|needs-info)(?=[ ·]|$)/g, (m, status) => ` · ${STATUS_COLORS[status]}${status}${FG_OFF}`);
-	out = out.replace(/ · blocked by [^·]*/g, (m) => ` · ${DIM}${m.slice(3)}${DIM_OFF}`);
 	out = out.replace(/ · ● [^·]*/g, (m) => ` · ${CYAN}${m.slice(3)}${FG_OFF}`);
 	if (isHeader) out = out.replace(/\[\d \w+\]/, (m) => `${BOLD}${m}${BOLD_OFF}`);
 	return out;
@@ -507,23 +537,28 @@ function renderQueueSection(state, now) {
 }
 
 /**
- * The queue's visible rows: `▾ feature 1/3 resolved · 1 ready` folders (▸ collapsed), their tickets
- * under, `> ` marks the cursor. A feature row also carries its tickets' live workers, collapsed
- * or not (GitHub #2's operator report): `● 12 glm-5.3` for one, `● 2 agents (12 glm-5.3, 03 grok-4.7)`
- * for several, a live claim without a run-state worker (another runner) as `● 12 pid 4242`.
+ * The queue's visible rows (tui-polish/07): `▾ feature 2/6 done · 2 next · 1 needs you` folders
+ * (▸ collapsed; zero `next`/`needs you` parts omitted), their tickets under — a fixed-width status
+ * column (`ticketStatusColumn`'s words, padded to the widest one rendered) before the `NN title`,
+ * so on a narrow terminal the column stays whole and the title is what gets clipped. A feature
+ * row also carries its tickets' live workers, collapsed or not (GitHub #2's operator report):
+ * `● 12 glm-5.3` for one, `● 2 agents (12 glm-5.3, 03 grok-4.7)` for several, a live claim without
+ * a run-state worker (another runner) as `● 12 pid 4242`.
  */
 function renderQueueRows(state, cursor, { resolved = "skip" } = {}) {
-	return queueRows(state, state, { resolved }).map((row, i) => {
+	const rows = queueRows(state, state, { resolved });
+	const column = Math.max(0, ...rows.filter((r) => r.kind === "ticket").map((r) => r.label.length));
+	return rows.map((row, i) => {
 		const mark = i === cursor ? ">" : " ";
 		if (row.kind === "feature") {
-			const parts = [`${row.collapsed ? "▸" : "▾"} ${row.feature} ${row.resolved}/${row.total} resolved · ${row.ready} ready`];
+			const counts = [`${row.done}/${row.total} done`];
+			if (row.next) counts.push(`${row.next} next`);
+			if (row.needsYou) counts.push(`${row.needsYou} needs you`);
+			const parts = [`${row.collapsed ? "▸" : "▾"} ${row.feature} ${counts.join(" · ")}`];
 			if (row.workers?.length) parts.push(workerMarker(row.workers));
 			return `${mark} ${parts.join(" · ")}`;
 		}
-		const parts = [`${row.number} ${row.title ?? ""}`.trim(), row.status];
-		if (row.blockedBy?.length) parts.push(`blocked by ${row.blockedBy.join(", ")}`);
-		if (row.worker) parts.push(`● ${row.worker.model ?? "?"}`);
-		return `${mark}   ${parts.join(" · ")}`;
+		return `${mark}   ${row.label.padEnd(column)}  ${row.number} ${row.title ?? ""}`.trimEnd();
 	});
 }
 
@@ -533,13 +568,19 @@ function workerMarker(workers) {
 	return workers.length === 1 ? `● ${label(workers[0])}` : `● ${workers.length} agents (${workers.map(label).join(", ")})`;
 }
 
-/** The details of the selected ticket: its fields, the dry-run route when known, the latest shift report. */
+/**
+ * The details of the selected ticket: its fields — the first line carrying the status column's
+ * words (tui-polish/07) and, for a needs-info ticket, the reason from its last shift report —
+ * the dry-run route when known, the latest shift report.
+ */
 function renderDetails(state) {
 	const key = state.details;
 	const data = state.ticketDetails?.key === key ? state.ticketDetails : null;
 	const ticket = data?.ticket ?? (state.tickets ?? []).find((t) => `${t.feature}/${t.number}` === key) ?? null;
 	if (!ticket) return [`${key} · ticket not found`];
-	const lines = [[key, ticket.title, ticket.status].filter(Boolean).join(" · ")];
+	const column = ticketStatusColumn(state, ticket);
+	const lines = [[key, ticket.title, column.label].filter(Boolean).join(" · ")];
+	if (ticket.status === NEEDS_INFO) lines.push(`Reason: ${data?.reason ?? "-"}`);
 	lines.push(`Type: ${ticket.type ?? "-"}`);
 	lines.push(`Model: ${ticket.model ?? "-"}`);
 	lines.push(`Budget: ${ticket.budget ?? "-"}`);

@@ -333,11 +333,11 @@ You only steer by hand when you want a different order: `run --feature <name>` (
 
 ### What the TUI does
 
-Six full-screen tabs (`1`–`6`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**, **Resolved**, **GitHub**. A header shows the tabs, the last notice and, while a dark-factory runner is live, `dark-factory`; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. It is in colour: the cursor row is highlighted across the full width, ticket statuses are coloured (resolved green, claimed cyan, needs-info yellow, blocked dim), the `● model` marker of a live worker is cyan, cooldown rows are red, the active tab label is bold and the notice is yellow. Set `NO_COLOR` to turn colour off; `tui --once` and the plain-text fallback stay colourless. The mouse works in the interactive view: click a tab label to switch tabs, click a row to move the cursor there — a click on the row already under the cursor opens it, like `enter` — and the wheel moves the cursor. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense (no mouse there).
+Six full-screen tabs (`1`–`6`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**, **Resolved**, **GitHub**. A header shows the tabs, the last notice and, while a dark-factory runner is live, `dark-factory`; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. It is in colour: the cursor row is highlighted across the full width, the status column is coloured (done green, working cyan, next bold, waits dim, needs you yellow), the `● model` marker of a live worker is cyan, cooldown rows are red, the active tab label is bold and the notice is yellow. Set `NO_COLOR` to turn colour off; `tui --once` and the plain-text fallback stay colourless — with the same status-column words. The mouse works in the interactive view: click a tab label to switch tabs, click a row to move the cursor there — a click on the row already under the cursor opens it, like `enter` — and the wheel moves the cursor. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense (no mouse there).
 
 | Tab | It shows | Keys |
 |---|---|---|
-| Queue | Features as folders (`▾ parallel 3/4`) with their tickets (number, title, status, blockers, `● model` when an agent holds one) — except the fully resolved ones, which move to the Resolved tab. A feature row also shows the feature's live workers, collapsed or not: `● 12 glm-5.3` for one, `● 2 agents (12 glm-5.3, 03 grok-4.7)` for several, `● 12 pid 4242` for a ticket held by another runner's live claim | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `n` run this ticket · `esc` back |
+| Queue | Features as folders (`▾ parallel 2/6 done · 2 next · 1 needs you`, zero parts omitted) with their tickets — a fixed-width status column, then the number and title — except the fully resolved ones, which move to the Resolved tab. A feature row also shows the feature's live workers, collapsed or not: `● 12 glm-5.3` for one, `● 2 agents (12 glm-5.3, 03 grok-4.7)` for several, `● 12 pid 4242` for a ticket held by another runner's live claim | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `n` run this ticket · `esc` back |
 | Agents | One row per running shift: ticket, model, tier, shift/attempt, tokens, cost, turns, context fill, budget, elapsed | `↑↓`/`j k` move · `enter` opens that agent's log |
 | Cooldowns | Active provider cooldowns and time left | `↑↓`/`j k` move |
 | Log | Tail of the selected agent's shift log (else the first live worker's) | `↑↓`/`j k` move |
@@ -345,6 +345,22 @@ Six full-screen tabs (`1`–`6`, or `tab` to cycle): **Queue**, **Agents**, **Co
 | GitHub | The issues `run --dark-factory` imported (`.pi/shiftwork-github.json`): `#<N> <title> · <feature> · <state>`, where the state — planning, working, needs-info, done, closed — comes from the feature's tickets, plus the time of the last sync | `↑↓`/`j k` move · `enter` opens the issue's feature in the Queue tab |
 
 Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `g` toggle dark-factory (starts `shiftwork run --dark-factory` detached when no runner is live, writes STOP when one is) · `/` search · `q` quit. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live. `tui --once` and the plain-text fallback keep listing every feature, resolved ones included, in the old all-in-one frame.
+
+**The status column** — every Queue and Resolved ticket row starts with a fixed-width status column before the number and title, so on a narrow terminal the words stay whole and the title is what gets clipped. Its legend:
+
+| Column | When |
+|---|---|
+| `▶ working glm-5.3` | a live worker or live claim holds it — the model, or `pid N` for another runner's claim |
+| `● next #1` | on the frontier; `#N` is its place in the order the runner will take it |
+| `⧗ waits 01, 03` | `ready-for-agent` with unresolved blockers — only the unresolved ones are listed |
+| `? needs you` | `needs-info`; the details view shows the reason from the last shift report |
+| `✋ for human` | `ready-for-human` |
+| `○ triage` | `needs-triage` |
+| `✔ done` | `resolved` |
+| `✖ wontfix` | `wontfix` |
+| `⏸ paused` | its feature is paused (once feature-pause lands; until then never shown) |
+
+The details view opens with the same label on its first line, plus a `Reason:` line for a needs-you ticket.
 
 `/` opens a **search prompt** (the header shows it as `/ <query> · <scope>`, and the footer swaps in the search keys). On the Queue or Resolved tab it filters the list to tickets whose number or title contains the query — case-insensitive — keeping their feature rows and clamping the cursor to what is left; `tab` toggles the scope between all features and the feature under the cursor when the prompt opened, `enter` stops typing and keeps the filter, `esc` clears it. With a ticket's details open, `/` searches inside the details instead: every match is highlighted (`[…]` brackets, reverse video in colour) and `enter` scrolls to the next one. While you type, letters — `n`, `r`, `s`, `d`, `f`, `q` and digits included — go into the query, not their usual commands; Ctrl-C still quits.
 
