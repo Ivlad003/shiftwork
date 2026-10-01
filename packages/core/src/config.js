@@ -334,14 +334,11 @@ function checkReview(value, path, tiers) {
 	return out;
 }
 
-/** The review budget over its default: `review.budget`'s fields win, a `null` field lifts its default. */
+/** The review budget over its default: `review.budget`'s fields win, a `null` field lifts its default.
+ * The lift stays `null` in the output (the meter skips a null limit), so re-validating an already
+ * validated config — `run` does, with CLI overrides — round-trips it instead of refilling the default. */
 function reviewBudget(budget) {
-	const out = { ...DEFAULT_REVIEW_BUDGET };
-	for (const [key, limit] of Object.entries(budget ?? {})) {
-		if (limit === undefined || limit === null) delete out[key];
-		else out[key] = limit;
-	}
-	return out;
+	return { ...DEFAULT_REVIEW_BUDGET, ...(budget ?? {}) };
 }
 
 const GITHUB_FIELDS = ["repo", "authors", "labels", "pollMin", "autoClose", "push", "planTier", "gh"];

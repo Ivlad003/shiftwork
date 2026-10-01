@@ -706,7 +706,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
  * A review that ends without a valid verdict (an unknown verdict word counts as none)
  * is retried once, in a fresh context, on the next model of the review tier's chain;
  * a second miss is no silent accept — the ticket goes to needs-info for a human.
- * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip", reason: string, warnings?: string[], followUp?: object }>}
+ * A review stopped by the runner stopping (a STOP file or a signal) is none of that:
+ * not a missing verdict, so no retry and no needs-info — the ticket stays as it is
+ * (resolved, the landed commit kept), recorded as not finished, for the next run.
+ * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip" | "stopped", reason: string, warnings?: string[], followUp?: object }>}
  */
 async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots }) {
 	const review = config.review;
@@ -741,7 +744,8 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 	let outcome = reviewVerdict(route, first.shift);
 	let finalShift = first.shift;
 	let retryRoute = undefined;
-	if (!outcome.verdict) {
+	// A stopped review is not a review without a verdict: no retry on the next model.
+	if (!outcome.verdict && !reviewStopped(first.shift)) {
 		// No verdict is not accept: once more, in a fresh context, on the next model of the chain.
 		warnings.push(outcome.why);
 		retryRoute = nextReviewRoute(route, config, review);
@@ -752,6 +756,19 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 			: reviewVerdict(retryRoute, second.shift);
 		if (!outcome.verdict) warnings.push(outcome.why);
 	}
+	// The runner stopped before the review gave a verdict (a STOP file, or a signal that wrote one):
+	// no silent accept either — but no retry and no needs-info. The ticket stays as it is,
+	// recorded as not finished, so the next run reviews it again.
+	if (!outcome.verdict && reviewStopped(finalShift)) {
+		const retried =
+			retryRoute && retryRoute.model !== route.model ? `, retried on ${retryRoute.backend} ${retryRoute.model} (${retryRoute.thinking})` : "";
+		await tracker.appendComment(
+			ticket,
+			[`### Review — ${route.backend} ${route.model} (${route.thinking})${retried}`, "- Review: not finished (stopped)", `- Time: ${formatDuration(finalShift.wallMin)}`].join("\n"),
+		);
+		return { verdict: "stopped", reason: "the runner stopped before the review gave a verdict" };
+	}
+
 	let verdict = outcome.verdict;
 	let reason = outcome.reason;
 	if (!verdict) {
@@ -804,6 +821,11 @@ async function runOneReviewShift({ root, ticket, backend, config, route, landed,
 	} finally {
 		releaseSlot?.();
 	}
+}
+
+/** A shift ended by the runner stopping (a STOP file, or a signal that wrote one): `stop` is its handoff kind. */
+function reviewStopped(shift) {
+	return shift?.handoff?.kind === "stop" || shift?.stopReason === "STOP file";
 }
 
 /** One review shift's verdict: the last marker in its text, or why there is none (an unknown verdict word counts as none). */

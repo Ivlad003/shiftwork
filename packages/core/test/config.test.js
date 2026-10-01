@@ -73,7 +73,11 @@ test("review is on by default on the strongest configured tier; filters are arra
 		tiers: { premium: { chain: ["a/1"] } },
 		review: { budget: { maxTurns: 40, maxWallMin: null } },
 	});
-	assert.deepEqual((await loadConfig(budgeted.root, budgeted.userDir)).review.budget, { maxTurns: 40 });
+	const lifted = await loadConfig(budgeted.root, budgeted.userDir);
+	assert.deepEqual(lifted.review.budget, { maxTurns: 40, maxWallMin: null });
+	// `run` re-validates the validated config (with CLI overrides): the null lift must survive
+	// that second pass, not silently come back as the 20-minute default.
+	assert.deepEqual(validateConfig(lifted).review.budget, { maxTurns: 40, maxWallMin: null });
 
 	// No premium: the strongest of what is configured.
 	const standard = await dirs({ model: "a/1", tiers: { quick: { chain: ["a/1"] }, standard: { chain: ["a/1"] } } });

@@ -1758,6 +1758,58 @@ test("at its soft limit a review shift gets the wrap-up prompt, never the worker
 	assert.ok(!steered.includes(SOFT_LIMIT_STEER));
 });
 
+test("a review stopped by the runner stopping is not a missing verdict: no retry, no needs-info", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const turn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		// The review shift itself stops the run: a STOP file lands mid-review, before any verdict.
+		{
+			files: { STOP: "stopped mid-review" },
+			events: [turn, { type: "text", text: "Still checking the diff." }, turn, turn],
+		},
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: retryReviewConfig() });
+
+	// The stop is not a missing verdict: the retry on the next model is not spent, and the ticket is not needs-info.
+	assert.equal(backend.shifts.length, 2, "one worker shift, one review shift, no retry");
+	assert.equal(summary.stoppedReason, "STOP file");
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(summary.resolved[0].review.verdict, "stopped");
+	assert.deepEqual(summary.needsInfo, []);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/, "the ticket stays as it was, so the next run reviews it again");
+	assert.match(text, /### Review — pi fake\/r1 \(high\)\n- Review: not finished \(stopped\)/);
+	assert.doesNotMatch(text, /- Verdict: none/);
+	assert.doesNotMatch(text, /<shiftwork:needs-info/);
+});
+
+test("a review stopped mid-retry is recorded as not finished on the retried model", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const turn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		// The first review gives no verdict; the STOP file lands before the retry can finish.
+		{ text: "Still investigating, no verdict yet." },
+		{
+			files: { STOP: "stopped mid-retry" },
+			events: [turn, { type: "text", text: "Halfway through the retry." }, turn, turn],
+		},
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: retryReviewConfig() });
+
+	assert.equal(backend.shifts.length, 3, "the retry was already running when the stop landed");
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(summary.resolved[0].review.verdict, "stopped");
+	assert.deepEqual(summary.needsInfo, []);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Review — pi fake\/r1 \(high\), retried on pi fake\/r2 \(high\)\n- Review: not finished \(stopped\)/);
+	assert.doesNotMatch(text, /- Verdict: none/);
+	assert.doesNotMatch(text, /<shiftwork:needs-info/);
+});
+
 test("the review route's budget is review.budget, independent of ticket, tier and model budgets", async () => {
 	const root = await makeRepo({
 		"f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Budget:** $5 · 500 turns\n**Verify:** `done.txt`" }),
