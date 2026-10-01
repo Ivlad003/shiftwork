@@ -710,7 +710,7 @@ test("tier unlimited lifts only that tier's shift limits", () => {
 	});
 });
 
-test("a model profile's unlimited: true lifts every shift limit for that model only", () => {
+test("a model profile's unlimited: true lifts every limit for that model only", () => {
 	const cfg = validateConfig({
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10, maxTokens: 1000 } } },
@@ -718,7 +718,7 @@ test("a model profile's unlimited: true lifts every shift limit for that model o
 		models: { "fake/m2": { budget: { maxContextPct: 70 }, unlimited: true } },
 	});
 	const lifted = planShift({ ticket: t({ type: "code", model: "fake/m2" }), config: cfg }).budget;
-	assert.deepEqual(lifted, { maxCostUsd: 8 }, "only the ticket budget is left");
+	assert.deepEqual(lifted, {}, "the ticket budget is lifted too");
 	const capped = planShift({ ticket: t({ type: "code" }), config: cfg }).budget;
 	assert.deepEqual(capped, { maxTurns: 10, maxTokens: 1000, maxWallMin: 45, stallTurns: 5, maxCostUsd: 8 });
 });
@@ -734,17 +734,29 @@ test("shift limits lifted are the union of the top-level, tier and profile lists
 	assert.deepEqual(planShift({ ticket: t({ type: "code" }), config: cfg }).budget, { maxTokens: 1000 });
 });
 
-test("tier unlimited does not lift the ticket's Budget line; top-level unlimited does", () => {
-	const tier = validateConfig({
-		routing: { code: { tier: "standard" } },
-		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10 }, unlimited: ["turns"] } },
+test("tier unlimited lifts the ticket's Budget line too; another tier keeps it", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "free" }, docs: { tier: "standard" } },
+		tiers: {
+			free: { chain: ["fake/m1"], budget: { maxTurns: 10 }, unlimited: ["turns"] },
+			standard: { chain: ["fake/m1"], budget: { maxTokens: 1000 } },
+		},
 	});
-	const ticket = t({ type: "code", budget: "50 turns" });
-	assert.equal(planShift({ ticket, config: tier }).budget.maxTurns, 50, "the ticket's own budget still caps");
-	const top = validateConfig({
+	const ticket = (type) => t({ type, budget: "50 turns" });
+	assert.equal(planShift({ ticket: ticket("code"), config: cfg }).budget.maxTurns, undefined, "lifted on the unlimited tier");
+	assert.equal(planShift({ ticket: ticket("docs"), config: cfg }).budget.maxTurns, 50, "the ticket's own budget still caps");
+});
+
+test("backends.claude.unlimited: true lifts every limit for claude models and for no pi model", () => {
+	const cfg = validateConfig({
 		routing: { code: { tier: "standard" } },
-		unlimited: ["turns"],
-		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10 } } },
+		tiers: { standard: { chain: ["fake/m1", "claude:sonnet"], budget: { maxTurns: 10, maxTokens: 1000 } } },
+		budgets: { default: { maxWallMin: 45 }, ticket: { maxCostUsd: 8 } },
+		backends: { claude: { unlimited: true } },
+		models: { "fake/m1": { budget: { maxContextPct: 70 } } },
 	});
-	assert.equal(planShift({ ticket, config: top }).budget.maxTurns, undefined);
+	const claude = planShift({ ticket: t({ type: "code", model: "claude:sonnet", budget: "50 turns" }), config: cfg }).budget;
+	assert.deepEqual(claude, {}, "the whole backend runs without limits, ticket budget included");
+	const pi = planShift({ ticket: t({ type: "code", budget: "50 turns" }), config: cfg }).budget;
+	assert.deepEqual(pi, { maxTurns: 10, maxTokens: 1000, maxWallMin: 45, maxCostUsd: 8, maxContextPct: 70 });
 });

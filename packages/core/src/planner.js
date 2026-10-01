@@ -6,7 +6,7 @@
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
  * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, the union of `unlimited` lists (top-level,
- * tier and model profile) is lifted, then the ticket budget (lifted only by the top-level list) caps the result.
+ * tier, model profile and backend) is lifted from the shift budget and from the ticket budget that caps the result.
  * Thinking: the ticket type's routing → the model profile → the tier → global. A profile's contextWindow is used for context fill.
  * A provider at its `concurrency` cap (`fullProviders`) is skipped like a cooling one, but no
  * cooldown is written and there is no end time: waiting re-plans after FULL_PROVIDER_RETRY_MS.
@@ -70,14 +70,12 @@ function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierNam
 		skillSources: config.skillSources ?? {},
 	});
 	const ticketBudget = resolveTicketBudget(ticket, config);
-	// Lift the top-level, tier and profile `unlimited` lists from the shift budget only:
-	// the ticket budget (itself lifted only by the top-level list) still caps the shift.
+	// Lift the union of the top-level, tier, profile and backend `unlimited` lists from the
+	// shift budget and from the ticket budget that caps it: that route runs without them.
+	const lifted = liftedFor({ model, tier }, config);
 	const budget = capBudget(
-		liftLimits(
-			mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget),
-			[...(config.unlimited ?? []), ...(config.tiers?.[tier]?.unlimited ?? []), ...(profile?.unlimited ?? [])],
-		),
-		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
+		liftLimits(mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget), lifted),
+		liftLimits(capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget, lifted),
 	);
 	return {
 		backend: ref.backend,
@@ -259,6 +257,19 @@ const AUTO_IN_PLACE_KINDS = new Set(["maxCostUsd", "maxTokens", "maxTurns"]);
  */
 const CLI_BACKENDS = ["claude", "codex", "opencode", "grok", "cursor"];
 
+/** Every backend a model reference can name, `pi` included: the keys of a `backends` config section. */
+export const BACKENDS = ["pi", ...CLI_BACKENDS];
+
+/** Short names for budget limits, as `unlimited` and `run --no-limit` take them. */
+export const LIMIT_SHORT_NAMES = {
+	tokens: "maxTokens",
+	cost: "maxCostUsd",
+	turns: "maxTurns",
+	time: "maxWallMin",
+	context: "maxContextPct",
+	stall: "stallTurns",
+};
+
 /**
  * Split a model reference into its backend and model id.
  * Prefixes `claude:`, `codex:`, `opencode:`, `grok:` and `cursor:` select a CLI backend.
@@ -334,8 +345,39 @@ function capBudgetRemaining(ticketBudget, usage) {
 export function resolveTicketBudget(ticket, config) {
 	const fromTicket = parseTicketBudget(ticket.budget);
 	const fromConfig = config.budgets?.ticket;
-	// Only the top-level `unlimited` (and `run --no-budget` / `--no-limit`) lifts ticket budgets.
+	// Only the top-level `unlimited` (and `run --no-budget` / `--no-limit`) lifts ticket budgets
+	// here: this is the no-route view. The tier, model and backend lists lift the ticket
+	// budget too, but only through the route — see `liftedFor` and `buildRoute`.
 	return liftLimits(mergeBudgets(fromConfig, fromTicket), config.unlimited ?? []);
+}
+
+/**
+ * The `unlimited` lists that apply to a route: the union of the top-level, tier, model-profile
+ * and backend lists (`backends.<backend>`, keyed by the names `parseModelRef` returns).
+ * Short names (`turns`) are normalized to budget fields (`maxTurns`) here, so it also works
+ * with raw, unvalidated configs (the runner does not `validateConfig` its input).
+ * A route with no model (a wait/stop plan) gets only the top-level list.
+ */
+export function liftedFor(route, config) {
+	const model = route?.ref ?? route?.model;
+	const lists = [config.unlimited];
+	if (model) {
+		const tier = route.tier ?? tierForModel(model, config);
+		lists.push(
+			config.tiers?.[tier]?.unlimited,
+			config.models?.[model]?.unlimited,
+			config.backends?.[parseModelRef(model).backend]?.unlimited,
+		);
+	}
+	const out = [];
+	for (const list of lists) {
+		const fields = list === true ? Object.values(LIMIT_SHORT_NAMES) : (list ?? []);
+		for (const name of fields) {
+			const field = LIMIT_SHORT_NAMES[name] ?? name;
+			if (!out.includes(field)) out.push(field);
+		}
+	}
+	return out;
 }
 
 /** Drop the given lifted limits (`unlimited` lists, `run --no-budget` / `--no-limit`). */

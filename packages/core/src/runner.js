@@ -5,7 +5,7 @@ import { orderFrontier } from "./index.js";
 import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
-import { chooseHandoffMode, cooldownKey, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
+import { chooseHandoffMode, cooldownKey, liftedFor, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
 import { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, REVIEW_WRAP_UP_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
 
@@ -675,8 +675,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				lastVerifyFailure = verifyResult.results.find((r) => r.code !== 0) ?? null;
 				attempt++;
 			}
-			// Before starting the next shift, make sure the ticket budget isn't exhausted.
-			const remainingTicket = remainingTicketBudget(ticket, config, ticketUsage);
+			// Before starting the next shift, make sure the ticket budget isn't exhausted —
+			// except on a limit the route about to run lifts (`liftedFor`).
+			const remainingTicket = remainingTicketBudget(ticket, config, ticketUsage, nextRoute);
 			if (remainingTicket.exhausted) {
 				await tracker.appendComment(ticket, `### Handoff blocked\n- Reason: ticket budget exhausted (${remainingTicket.reason})`);
 				await tracker.setStatus(ticket, NEEDS_INFO);
@@ -983,11 +984,12 @@ function rememberBlocked(blockedModels, route, kind) {
 	if (!blockedModels.includes(ref)) blockedModels.push(ref);
 }
 
-function remainingTicketBudget(ticket, config, usage) {
+function remainingTicketBudget(ticket, config, usage, route) {
 	const ticketBudget = resolveTicketBudget(ticket, config);
 	if (!ticketBudget) return { exhausted: false };
+	const lifted = new Set(liftedFor(route, config));
 	for (const [key, limit] of Object.entries(ticketBudget)) {
-		if (limit === undefined || limit === null) continue;
+		if (limit === undefined || limit === null || lifted.has(key)) continue;
 		const used = usage[key] ?? 0;
 		if (used >= limit) return { exhausted: true, reason: `${key} (${used} / ${limit})` };
 	}

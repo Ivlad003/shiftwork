@@ -139,6 +139,18 @@ export interface GitHub {
 }
 
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
+/** The backend names a model reference can name, `pi` included: the keys of a `backends` config section. */
+export declare const BACKENDS: readonly ["pi", "claude", "codex", "opencode", "grok", "cursor"];
+/**
+ * The `unlimited` lists that apply to a route: the union of the top-level, tier
+ * (`tiers.<tier>`), model profile (`models.<ref>`) and backend (`backends.<backend>`)
+ * lists, short names normalized to budget fields. A route with no model (a wait/stop
+ * plan, or none given) gets only the top-level list. Works with raw, unvalidated configs.
+ */
+export declare function liftedFor(
+	route: { ref?: string; model?: string; tier?: string } | undefined | null,
+	config: Record<string, unknown>,
+): Array<keyof Budget>;
 /** The validated `.pi/shiftwork.json`: the knobs typed where the runner reads them; the rest stays `Record<string, unknown>`. */
 export interface ShiftworkConfig extends Record<string, unknown> {
 	/** Rebase-and-reverify rounds a landing takes while a parallel landing keeps moving the target (default 5). */
@@ -157,7 +169,9 @@ export declare const GITHUB_LABELS_IN_REQUIRED: string;
 export type LimitName = "tokens" | "cost" | "turns" | "time" | "context" | "stall";
 /**
  * `unlimited`: lift every budget limit (`true`) or only these. Accepted at the top level,
- * on a tier (`tiers.<name>.unlimited`) and on a model profile (`models.<ref>.unlimited`).
+ * on a tier (`tiers.<name>.unlimited`), on a model profile (`models.<ref>.unlimited`) and
+ * on a backend (`backends.<name>.unlimited`). Tier, model and backend lists lift every
+ * limit for that route, the ticket budget included; the top-level list lifts them all.
  */
 export type Unlimited = boolean | Array<LimitName | keyof Budget>;
 /** `unlimited` (true or a list of limit names) → the budget fields it lifts. */

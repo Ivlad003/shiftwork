@@ -182,6 +182,32 @@ test("unlimited on a tier and a model profile normalizes to budget field names",
 	);
 });
 
+test("unlimited on a backend normalizes; unknown backends and limits fail with their path", () => {
+	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] } } };
+	const config = validateConfig({ ...base, backends: { claude: { unlimited: ["turns", "time"] }, codex: { unlimited: true } } });
+	assert.deepEqual(config.backends.claude.unlimited, ["maxTurns", "maxWallMin"]);
+	assert.deepEqual(config.backends.codex.unlimited, [
+		"maxTokens",
+		"maxCostUsd",
+		"maxTurns",
+		"maxWallMin",
+		"maxContextPct",
+		"stallTurns",
+	]);
+	assert.throws(
+		() => validateConfig({ ...base, backends: { nope: { unlimited: true } } }),
+		/backends\.nope: unknown backend "nope"; expected one of pi, claude, codex, opencode, grok, cursor/,
+	);
+	assert.throws(
+		() => validateConfig({ ...base, backends: { claude: { unlimited: ["speed"] } } }),
+		/backends\.claude\.unlimited: unknown limit "speed"/,
+	);
+	assert.throws(
+		() => validateConfig({ ...base, backends: { claude: { unlimited: true, extra: 1 } } }),
+		/backends\.claude\.extra: unknown field; expected unlimited/,
+	);
+});
+
 test("github is validated: defaults when absent, full block passes, bad values fail with their path", () => {
 	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] }, plan: { chain: ["a/2"] } } };
 	assert.equal(validateConfig({ ...base }).github, undefined, "no github block → no github config");

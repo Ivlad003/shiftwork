@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseCooldownDuration } from "./classify.js";
-import { TIER_ORDER } from "./planner.js";
+import { BACKENDS, LIMIT_SHORT_NAMES, TIER_ORDER } from "./planner.js";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -20,6 +20,7 @@ const DEFAULTS = {
 	skillGroups: {},
 	skillSources: {},
 	models: {},
+	backends: {},
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
@@ -74,6 +75,7 @@ export function validateConfig(input) {
 
 	checkBudgets(config.budgets, "budgets");
 	config.unlimited = normalizeUnlimited(config.unlimited, "unlimited");
+	config.backends = checkBackends({ ...DEFAULTS.backends, ...config.backends }, "backends");
 	checkModels(config.models, "models");
 	checkOnExceed(config.onExceed, "onExceed");
 	checkCrossTier(config.crossTier, "crossTier");
@@ -178,6 +180,25 @@ function checkModels(value, path) {
 	for (const [ref, profile] of Object.entries(value)) checkProfile(profile, `${path}.${ref}`);
 }
 
+/**
+ * `backends.<name>`: whole agents (CLI backends and `pi`) without limits. Keys are the
+ * backend names `parseModelRef` returns (`BACKENDS`); the only field is `unlimited`,
+ * normalized in place. Returns the value, normalized.
+ */
+function checkBackends(value, path) {
+	if (value === undefined) return undefined;
+	if (!isPlainObject(value)) fail(path, "must be an object of backend → { unlimited }");
+	for (const [name, backend] of Object.entries(value)) {
+		if (!BACKENDS.includes(name)) fail(`${path}.${name}`, `unknown backend "${name}"; expected one of ${BACKENDS.join(", ")}`);
+		if (!isPlainObject(backend)) fail(`${path}.${name}`, "must be an object with an `unlimited` field");
+		for (const key of Object.keys(backend)) {
+			if (key !== "unlimited") fail(`${path}.${name}.${key}`, "unknown field; expected unlimited");
+		}
+		if (backend.unlimited !== undefined) backend.unlimited = normalizeUnlimited(backend.unlimited, `${path}.${name}.unlimited`);
+	}
+	return value;
+}
+
 function checkProfile(value, path) {
 	if (!isPlainObject(value)) fail(path, "must be an object");
 	for (const key of Object.keys(value)) {
@@ -211,7 +232,7 @@ function checkBudgets(value, path) {
 const BUDGET_FIELDS = ["maxTokens", "maxCostUsd", "maxTurns", "maxWallMin", "maxContextPct", "stallTurns"];
 
 /** Short names for budget limits, as `unlimited` and `run --no-limit` take them. */
-export const LIMIT_NAMES = { tokens: "maxTokens", cost: "maxCostUsd", turns: "maxTurns", time: "maxWallMin", context: "maxContextPct", stall: "stallTurns" };
+export const LIMIT_NAMES = LIMIT_SHORT_NAMES;
 
 /**
  * `unlimited`: true (lift every budget limit) or a list of limits by short or full name.

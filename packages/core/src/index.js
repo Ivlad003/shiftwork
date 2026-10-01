@@ -144,6 +144,16 @@ export {
 	THINKING_LEVELS,
 	validateConfig,
 } from "./config.js";
-export { chooseHandoffMode, cooldownKey, parseModelRef, planShift, resolveTicketBudget, skillsForModel, TIER_ORDER } from "./planner.js";
+export {
+	BACKENDS,
+	chooseHandoffMode,
+	cooldownKey,
+	liftedFor,
+	parseModelRef,
+	planShift,
+	resolveTicketBudget,
+	skillsForModel,
+	TIER_ORDER,
+} from "./planner.js";
 export { applyProfileContext, createMeter } from "./meter.js";
 export { classifyError, cooldownMs, DEFAULT_COOLDOWN_MS } from "./classify.js";

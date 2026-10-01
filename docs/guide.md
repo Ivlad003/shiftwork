@@ -241,14 +241,15 @@ npx shiftwork run --no-limit tokens,time   # only these: tokens, cost, turns, ti
 
 Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.pi/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window. The review shift's own budget (`review.budget`, section 7) is never lifted by any of these — only `review.budget` itself does.
 
-Per tier and per model, `unlimited` takes the same values and lifts **shift limits only**:
+Per tier, per model and per backend, `unlimited` takes the same values and lifts **every limit for that route, the ticket's `Budget:` line included**:
 
 ```json
-"tiers":  { "local": { "chain": ["ollama/qwen3"], "unlimited": ["turns", "time"] } },
-"models": { "ollama/qwen3": { "unlimited": true } }
+"tiers":    { "local": { "chain": ["ollama/qwen3"], "unlimited": ["turns", "time"] } },
+"models":   { "ollama/qwen3": { "unlimited": true } },
+"backends": { "claude": { "unlimited": true }, "codex": { "unlimited": ["time"] } }
 ```
 
-A shift on that tier or model runs with the union of the top-level, tier and model lists lifted. The ticket's own budget still caps it — a `**Budget:**` line is a per-ticket decision only the top-level `unlimited` lifts — and only that tier or model is affected, so a free tier can run without turn/time limits while paid models stay capped.
+A shift on that tier, model or backend runs with the union of the top-level, tier, model and backend lists lifted, and the ticket's own budget no longer caps it: budgets stay global, and these per-route lists are how chosen agents and models run without limits. Only that tier, model or backend is affected, so a free tier can run without turn/time limits while paid models stay capped. Backend names are the model-reference prefixes `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor` — a `backends.<name>` block covers every model of that agent.
 
 ## 6. Other agents' settings
 

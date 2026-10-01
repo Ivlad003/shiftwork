@@ -623,6 +623,42 @@ test("the ticket budget ceiling ends in needs-info with the reason", async () =>
 	assert.match(text, /\*\*Status:\*\* needs-info/);
 });
 
+test("a ticket past its turns budget is not ended when the next route lifts it", async () => {
+	const liftConfig = {
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 3,
+		maxHandoffs: 3,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1", "fake/m2"], thinking: "low", budget: { maxTurns: 2 } } },
+		models: { "fake/m2": { unlimited: ["turns"] } },
+		onExceed: { maxTurns: { to: "next", mode: "new-process" } },
+		budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
+	};
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Budget:** 2 turns\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{
+			events: [
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 },
+				{ type: "end", stopReason: "stop" },
+			],
+		},
+		{ files: { "done.txt": "ok" } },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: liftConfig });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[0].request.route.model, "fake/m1");
+	assert.equal(backend.shifts[1].request.route.model, "fake/m2");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.doesNotMatch(text, /### Handoff blocked/);
+	assert.match(text, /### Shift 2 — pi fake\/m2/);
+});
+
 test("maxHandoffs is respected", async () => {
 	const budgetConfig = {
 		defaultType: "code",
