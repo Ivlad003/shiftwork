@@ -134,6 +134,8 @@ test("claimed → one started comment with the working label; resolved → one c
 
 	const state = await readIssueState(dir);
 	assert.deepEqual([...state.issues["8"].posted].sort(), ["resolved:02", "started:02", "working"].sort());
+	// Every sync, posted or not, records the time of the last sync (the TUI's GitHub tab).
+	assert.match(state.syncedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 	assertNoDeletes(calls);
 });
 

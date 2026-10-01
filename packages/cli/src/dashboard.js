@@ -1,17 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { openCooldowns, openRepoTracker, openRunState, VERSION } from "shiftwork-core";
+import { CLAIMED, openCooldowns, openRepoTracker, openRunState, RESOLVED, VERSION } from "shiftwork-core";
 import { formatBudget } from "./dry-run.js";
-import { queueRows, TABS } from "./tui-controls.js";
+import { readIssueState } from "./github-import.js";
+import { githubRows, queueRows, TABS } from "./tui-controls.js";
 
 /** One frame per second, per the spec. */
 export const REFRESH_MS = 1000;
 const LOG_TAIL = 8;
 
-const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", log: "Log" };
+const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", log: "Log", github: "GitHub" };
 
 /** The keys every tab shares, the footer's second line. */
-export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · q quits";
+export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · g dark-factory · q quits";
 
 // Plain SGR codes, applied after fit() clips a line, so escapes are never cut and width counts visible columns.
 const RED = "\x1b[31m";
@@ -33,15 +34,20 @@ const TAB_KEYS = {
 	agents: "↑↓ move · enter log",
 	cooldowns: "↑↓ move",
 	log: "↑↓ move",
+	github: "↑↓ move · enter open in queue",
 };
+
+/** The issue statuses the GitHub tab's state column shows, derived from the feature's tickets. */
+const NEEDS_INFO = "needs-info";
 
 /**
  * Collect everything one dashboard frame needs: the tracker's tickets, the frontier,
  * live claims, the run state (`.pi/shiftwork-run.json`), active cooldowns and a log
  * tail — the selected worker's when the view has one (`view.selectedWorker`, else the
  * first live worker's), plus, when details are open (`view.details`), that ticket's
- * body as `ticketDetails` (the What-to-build line and the latest shift report).
- * A missing run state or log yields null/empty, never a throw.
+ * body as `ticketDetails` (the What-to-build line and the latest shift report) —
+ * and the GitHub tab's rows (`github`, from `.pi/shiftwork-github.json` and the
+ * tickets). A missing run state, log or issue state yields null/empty, never a throw.
  */
 export async function collectDashboardState(root, { now = new Date(), logTail = LOG_TAIL, view = {} } = {}) {
 	const tracker = await openRepoTracker(root);
@@ -54,7 +60,46 @@ export async function collectDashboardState(root, { now = new Date(), logTail = 
 	]);
 	const log = await tailShiftLog(root, run, logTail, view.selectedWorker ?? null);
 	const ticketDetails = view.details ? await readTicketDetails(tickets, view.details) : null;
-	return { now, tickets, frontier, claims, run, cooldowns, log, ticketDetails };
+	const github = await readGithubIssues(root, tickets);
+	return { now, tickets, frontier, claims, run, cooldowns, log, ticketDetails, github };
+}
+
+/**
+ * The GitHub tab's rows (github-watch, ticket 06), from `.pi/shiftwork-github.json`:
+ * one `{ number, title, feature, state }` per imported issue, sorted by number, plus
+ * `syncedAt` (the time of the last sync, written by `syncIssues`). The state comes
+ * from the feature's tickets: `closed` when the issue was closed (`done` posted),
+ * `done` when every ticket is resolved, `needs-info` when one needs information,
+ * `working` when one is claimed or resolved, else `planning`. An unreadable state
+ * file yields empty rows, never a throw — the dashboard must not die for it.
+ */
+export async function readGithubIssues(root, tickets) {
+	let state;
+	try {
+		state = await readIssueState(root);
+	} catch {
+		return { issues: [], syncedAt: null };
+	}
+	const issues = Object.values(state.issues ?? {})
+		.map((entry) => ({
+			number: entry.number,
+			title: entry.title ?? null,
+			feature: entry.feature,
+			state: issueState(entry, tickets),
+		}))
+		.sort((a, b) => Number(a.number) - Number(b.number));
+	return { issues, syncedAt: state.syncedAt ?? null };
+}
+
+/** One imported issue's state, derived from its feature's tickets. */
+function issueState(entry, tickets) {
+	const own = (tickets ?? []).filter((t) => t.feature === entry.feature && t.number);
+	if (!own.length) return "planning";
+	if ((entry.posted ?? []).includes("done")) return "closed";
+	if (own.every((t) => t.status === RESOLVED)) return "done";
+	if (own.some((t) => t.status === NEEDS_INFO)) return "needs-info";
+	if (own.some((t) => t.status === CLAIMED || t.status === RESOLVED)) return "working";
+	return "planning";
 }
 
 /** The last `maxLines` events of the selected worker's log (else the first live worker's); null when none. */
@@ -226,7 +271,7 @@ function renderSized(state, height) {
  */
 function tabBody(state, tab, height, now) {
 	if (height <= 0) return { lines: [], cursor: -1, redRows: [] };
-	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, ...(state.cursor ?? {}) };
+	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0, ...(state.cursor ?? {}) };
 	const plain = (lines) => ({ lines: lines.slice(0, height), cursor: -1, redRows: [] });
 	/** A tab whose rows sit under a one-line head: the cursor row index shifts by one. */
 	const underHead = (head, window) => ({
@@ -268,6 +313,14 @@ function tabBody(state, tab, height, now) {
 			const rows = log.lines.map((line, i) => `${i === at ? ">" : " "} ${line}`);
 			return underHead([`Log: ${log.path}`], scrolled(rows, at, height - 1));
 		}
+		case "github": {
+			const head = [githubHead(state, now)];
+			const issues = githubRows(state);
+			if (!issues.length) return plain([...head, "no issues imported (.pi/shiftwork-github.json, written by run --dark-factory)"]);
+			const at = clampCursor(cursor.github, issues.length);
+			const rows = issues.map((issue, i) => `${i === at ? ">" : " "} #${issue.number} ${issue.title ?? ""} · ${issue.feature} · ${issue.state}`.trim());
+			return underHead(head, scrolled(rows, at, height - 1));
+		}
 		default:
 			return { lines: [], cursor: -1, redRows: [] };
 	}
@@ -296,15 +349,17 @@ function renderPlain(state) {
 	if (state.details) lines.push(...renderDetails(state), "");
 	lines.push(...renderQueueSection(state, now), "", ...renderAgentsSection(state, now), "");
 	lines.push(...renderCooldowns(state.cooldowns ?? [], now), "", ...renderLog(state.log));
+	lines.push("", ...renderGithubSection(state, now));
 	if (state.dryRun) lines.push("", ...renderDryRun(state.dryRun, state.featureFilter ?? null));
 	lines.push("", GLOBAL_KEYS);
 	return lines;
 }
 
-/** The header line: version, time, the four tabs (the open one bracketed) and the feature filter. */
+/** The header line: version, time, the five tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter. */
 function headerLine(state, now, tab) {
 	const tabs = TABS.map((t, i) => `${t === tab ? "[" : ""}${i + 1} ${TAB_LABELS[t]}${t === tab ? "]" : ""}`).join("  ");
-	const line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${tabs}`;
+	let line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${tabs}`;
+	if (state.run?.live && state.run?.mode === "dark-factory") line = `${line} · dark-factory`;
 	return state.featureFilter ? `${line} · filter: ${state.featureFilter}` : line;
 }
 
@@ -427,6 +482,25 @@ function renderLog(log) {
 	if (!log) return ["Log: no current shift log"];
 	if (!log.lines.length) return [`Log: ${log.path} (no events yet)`];
 	return [`Log: ${log.path}`, ...log.lines.map((line) => `  ${line}`)];
+}
+
+// --- The GitHub tab: the imported issues and the time of the last sync ---
+
+/** The GitHub tab's head line: how many issues are watched and when the last sync was. */
+function githubHead(state, now) {
+	const issues = githubRows(state);
+	const count = issues.length ? `${issues.length} issue${issues.length === 1 ? "" : "s"}` : "no issues";
+	const synced = state.github?.syncedAt ?? null;
+	const when = synced ? `last sync ${formatAge(now - new Date(synced))} ago` : "not synced yet";
+	return `GitHub: ${count} · ${when}`;
+}
+
+/** The GitHub section of the plain frame: the head line, then one row per issue. */
+function renderGithubSection(state, now) {
+	const issues = githubRows(state);
+	const lines = [githubHead(state, now)];
+	if (!issues.length) return lines;
+	return [...lines, ...issues.map((issue) => `  #${issue.number} ${issue.title ?? ""} · ${issue.feature} · ${issue.state}`.trimEnd())];
 }
 
 function renderDryRun(dryRun, filter) {

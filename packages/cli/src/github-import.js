@@ -7,8 +7,10 @@ import { join } from "node:path";
  * Each new issue becomes the feature `.scratch/gh-<N>-<slug>/`: a `spec.md`
  * (the issue itself, marked ready) and the planning ticket `issues/01-plan.md`
  * that splits it into implementation tickets. What has been imported lives in
- * `.pi/shiftwork-github.json` — `{ issues: { "<N>": { number, feature,
- * importedAt, lastCommentId, posted } } }` — so polling is idempotent.
+ * `.pi/shiftwork-github.json` — `{ syncedAt, issues: { "<N>": { number, feature,
+ * title, importedAt, lastCommentId, posted } } }` — so polling is idempotent.
+ * `syncedAt` is the time of the last sync (github-sync, ticket 04), shown by the
+ * TUI's GitHub tab; `title` is the issue title, captured at import.
  */
 
 const STATE_FILE = join(".pi", "shiftwork-github.json");
@@ -84,7 +86,7 @@ export async function importIssues({ root, github, config, now }) {
 		const feature = `gh-${issue.number}-${slugifyTitle(issue.title)}`;
 		await writeFeature(root, feature, issue);
 		const importedAt = new Date(typeof now === "function" ? now() : (now ?? new Date())).toISOString();
-		state.issues[String(issue.number)] = { number: issue.number, feature, importedAt, lastCommentId: null, posted: [] };
+		state.issues[String(issue.number)] = { number: issue.number, feature, title: issue.title, importedAt, lastCommentId: null, posted: [] };
 		imported.push({ number: issue.number, title: issue.title, url: issue.url, author: issue.author, feature });
 	}
 

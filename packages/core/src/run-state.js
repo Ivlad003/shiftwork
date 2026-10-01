@@ -87,6 +87,7 @@ export function openRunState(root) {
 				updatedAt: primary.updatedAt,
 				finishedAt: primary.finishedAt ?? null,
 				feature: primary.feature ?? null,
+				mode: primary.mode ?? null,
 				logFile: primary.logFile,
 				stoppedReason: primary.stoppedReason ?? null,
 				summary: sumSummary(runners),

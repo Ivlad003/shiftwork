@@ -85,6 +85,7 @@ test("a second run imports nothing: the state file makes it idempotent", async (
 	assert.deepEqual(state.issues["8"], {
 		number: 8,
 		feature: "gh-8-support-github-issues",
+		title: "Support GitHub issues",
 		importedAt: "2026-10-01T10:00:00.000Z",
 		lastCommentId: null,
 		posted: [],

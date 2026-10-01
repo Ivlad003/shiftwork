@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { openRunState } from "shiftwork-core";
 import { collectDryRunLines } from "../src/dry-run.js";
-import { createTuiControls, decodeKeys, queueRows, reduceKey, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
+import { createTuiControls, decodeKeys, githubRows, queueRows, reduceKey, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
 
 const stubRunner = fileURLToPath(new URL("./fixtures/stub-runner.js", import.meta.url));
 const argvRunner = fileURLToPath(new URL("./fixtures/argv-runner.js", import.meta.url));
@@ -290,14 +290,15 @@ test("queueRows: feature folders then their tickets, counts, the frontier and th
 	);
 });
 
-test("reducer: 1–4 switch tabs, tab cycles through all four and back", () => {
+test("reducer: 1–5 switch tabs, tab cycles through all five and back", () => {
 	const d = frame();
 	assert.equal(press(idle, "1", d).tab, "queue");
 	assert.equal(press(idle, "2", d).tab, "agents");
 	assert.equal(press(idle, "3", d).tab, "cooldowns");
 	assert.equal(press(idle, "4", d).tab, "log");
+	assert.equal(press(idle, "5", d).tab, "github");
 	let state = idle;
-	for (const tab of ["agents", "cooldowns", "log", "queue"]) {
+	for (const tab of ["agents", "cooldowns", "log", "github", "queue"]) {
 		state = press(state, "tab", d);
 		assert.equal(state.tab, tab);
 	}
@@ -321,7 +322,7 @@ test("reducer: up/down (k/j) move the cursor, clamped at both ends, each tab its
 	assert.equal(state.cursor.log, 1);
 	assert.equal(state.cursor.queue, 0); // the queue cursor is kept
 	// Empty rows: the cursor stays at 0.
-	assert.deepEqual(press(idle, "down", {}).cursor, { queue: 0, agents: 0, cooldowns: 0, log: 0 });
+	assert.deepEqual(press(idle, "down", {}).cursor, { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0 });
 });
 
 test("reducer: left collapses the feature under the cursor, right expands it; queueRows hides the tickets", () => {
@@ -452,7 +453,88 @@ test("reducer: n's start effect is wired through the controls like r's", async (
 	await controls.handleKey("n");
 	assert.deepEqual(started, [{ type: "start-runner", feature: null, ticket: "demo/07" }]);
 	assert.equal(controls.view.tab, "queue"); // the tabbed view state survives the round-trip
-	assert.deepEqual(controls.view.cursor, { queue: 1, agents: 0, cooldowns: 0, log: 0 });
+	assert.deepEqual(controls.view.cursor, { queue: 1, agents: 0, cooldowns: 0, log: 0, github: 0 });
+});
+
+// --- The GitHub tab and the dark-factory toggle (github-watch, ticket 06) ---
+
+/** One frame plus the GitHub tab's rows, as collectDashboardState builds them. */
+const ghFrame = () => ({
+	...frame(),
+	github: {
+		syncedAt: "2026-10-01T11:58:00Z",
+		issues: [
+			{ number: 9, title: "Ninth", feature: "other", state: "working" },
+			{ number: 8, title: "Eighth", feature: "demo", state: "planning" },
+		],
+	},
+});
+
+test("githubRows: one row per issue in the state file, sorted by number", () => {
+	const d = ghFrame();
+	assert.deepEqual(githubRows(d), [
+		{ number: 8, title: "Eighth", feature: "demo", state: "planning" },
+		{ number: 9, title: "Ninth", feature: "other", state: "working" },
+	]);
+	assert.deepEqual(githubRows({}), []); // no issue state: no rows, no crash
+});
+
+test("reducer: enter on a GitHub row opens the issue's feature in the Queue tab, cursor on its folder", () => {
+	const d = ghFrame();
+	let state = press({ ...idle, tab: "github" }, "down", d); // the cursor moves over the issues
+	assert.equal(state.cursor.github, 1); // #9 → the other feature
+	state = press(state, "enter", d);
+	assert.equal(state.tab, "queue");
+	assert.equal(state.cursor.queue, 4); // the other folder row: demo folder, 3 tickets, other folder
+
+	// A feature filter that hides the feature is cleared so it can be shown.
+	state = press({ ...idle, tab: "github", featureFilter: "other" }, "enter", d); // #8 → demo, hidden by the filter
+	assert.equal(state.tab, "queue");
+	assert.equal(state.featureFilter, null);
+	assert.equal(state.cursor.queue, 0); // the demo folder row
+});
+
+test("reducer: g toggles dark-factory — start-runner with darkFactory when idle, STOP when live", () => {
+	const start = reduceKey(idle, "g");
+	assert.deepEqual(start.effects, [{ type: "start-runner", feature: null, darkFactory: true }]);
+	assert.match(start.state.notice, /starting dark-factory…/);
+
+	const run = { pid: 42, live: true, running: true, mode: "dark-factory" };
+	const stop = reduceKey({ ...idle, run }, "g");
+	assert.deepEqual(stop.effects, [{ type: "stop-runner" }]);
+	assert.match(stop.state.notice, /STOP file written · runner pid 42 hands off and stops/);
+});
+
+test("g's start effect is wired through the controls with darkFactory, like n's", async () => {
+	const root = await repo({});
+	const started = [];
+	const controls = createTuiControls({
+		root,
+		start: (root_, effect) => (started.push(effect), { started: true, pid: 1, logFile: "logs/x.log" }),
+	});
+	controls.setDashboard({ run: null, tickets: [] });
+	await controls.handleKey("g");
+	assert.deepEqual(started, [{ type: "start-runner", feature: null, darkFactory: true }]);
+	assert.match(controls.view.notice, /runner started \(pid 1\)/);
+});
+
+test("startDetachedRunner passes --dark-factory through and records the mode in the run state", async () => {
+	const root = await repo({});
+	const res = await startDetachedRunner(root, { darkFactory: true, bin: argvRunner });
+	assert.equal(res.started, true);
+
+	const argv = await waitFor(async () => {
+		try {
+			return JSON.parse(await readFile(join(root, "argv.json"), "utf8"));
+		} catch {
+			return false;
+		}
+	});
+	assert.deepEqual(argv, ["run", "--dark-factory"]);
+
+	// The run state entry records the mode, so the header shows dark-factory while it is live.
+	const state = await openRunState(root).read();
+	assert.equal(state.mode, "dark-factory");
 });
 
 // --- decodeKeys: raw terminal input → key names ---

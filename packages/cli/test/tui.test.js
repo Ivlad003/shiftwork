@@ -136,7 +136,7 @@ test("dashboard: an empty state renders without crashing", () => {
 
 test("dashboard: the header lists the control keys", () => {
 	const frame = renderDashboard({ now }).join("\n");
-	assert.match(frame, /r run · s stop · d dry-run · f filter · q quits/);
+	assert.match(frame, /r run · s stop · d dry-run · f filter · g dark-factory · q quits/);
 });
 
 test("dashboard: a feature filter scopes the frontier and the ticket tables", () => {
@@ -458,6 +458,68 @@ test("collectDashboardState: open details read the ticket body and the latest sh
 	assert.doesNotMatch(bareFrame, /Last shift report/);
 });
 
+test("collectDashboardState: the GitHub tab's rows come from .pi/shiftwork-github.json, the state from the tickets", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-gh-"));
+	const body = (title, status) => `# ${title}\n\n**Blocked by:** None\n\n**Status:** ${status}\n\n**Type:** code\n`;
+	const feature = async (name, tickets) => {
+		await mkdir(join(root, ".scratch", name, "issues"), { recursive: true });
+		for (const [file, title, status] of tickets) await writeFile(join(root, ".scratch", name, "issues", file), body(title, status));
+	};
+	await feature("gh-8-plan", [["01-plan.md", "Plan", "ready-for-agent"]]);
+	await feature("gh-9-work", [["01-plan.md", "Plan", "resolved"], ["02-thing.md", "Thing", "claimed"]]);
+	await feature("gh-10-question", [["02-thing.md", "Thing", "needs-info"]]);
+	await feature("gh-11-done", [["02-thing.md", "Thing", "resolved"]]);
+	await feature("gh-12-closed", [["02-thing.md", "Thing", "resolved"]]);
+	await mkdir(join(root, ".pi"), { recursive: true });
+	const entry = (number, feature, title, posted) => ({ number, feature, title, importedAt: "2026-10-01T10:00:00Z", lastCommentId: null, posted });
+	await writeFile(
+		join(root, ".pi", "shiftwork-github.json"),
+		JSON.stringify({
+			syncedAt: "2026-10-01T11:55:00Z",
+			issues: {
+				"12": entry(12, "gh-12-closed", "Closed", ["working", "done"]),
+				"11": entry(11, "gh-11-done", "Done", ["working"]),
+				"10": entry(10, "gh-10-question", "Question", ["needs-info:02"]),
+				"9": entry(9, "gh-9-work", "Work", ["working"]),
+				"8": entry(8, "gh-8-plan", "Plan", []),
+			},
+		}),
+	);
+
+	const state = await collectDashboardState(root, { now });
+	assert.deepEqual(state.github.issues, [
+		{ number: 8, title: "Plan", feature: "gh-8-plan", state: "planning" },
+		{ number: 9, title: "Work", feature: "gh-9-work", state: "working" },
+		{ number: 10, title: "Question", feature: "gh-10-question", state: "needs-info" },
+		{ number: 11, title: "Done", feature: "gh-11-done", state: "done" },
+		{ number: 12, title: "Closed", feature: "gh-12-closed", state: "closed" },
+	]);
+	assert.equal(state.github.syncedAt, "2026-10-01T11:55:00Z");
+
+	// The GitHub tab lists the issues with their state and the time of the last sync.
+	const frame = renderDashboard({ ...state, tab: "github" }, { width: 120, height: 24 }).join("\n");
+	assert.match(frame, /GitHub: 5 issues · last sync 5m ago/);
+	assert.match(frame, /#8 Plan · gh-8-plan · planning/);
+	assert.match(frame, /#9 Work · gh-9-work · working/);
+	assert.match(frame, /#10 Question · gh-10-question · needs-info/);
+	assert.match(frame, /#11 Done · gh-11-done · done/);
+	assert.match(frame, /#12 Closed · gh-12-closed · closed/);
+	assert.match(renderDashboard({ ...state }).join("\n"), /GitHub: 5 issues · last sync 5m ago/); // the plain frame keeps the section
+
+	// An unreadable state file yields no rows, never a crash.
+	await writeFile(join(root, ".pi", "shiftwork-github.json"), "not json");
+	const broken = await collectDashboardState(root, { now });
+	assert.deepEqual(broken.github, { issues: [], syncedAt: null });
+});
+
+test("dashboard: the header shows dark-factory while a dark-factory runner is live", () => {
+	const run = { pid: 7, running: true, live: true, mode: "dark-factory", workers: [], summary: { resolved: 0, needsInfo: 0 } };
+	assert.match(renderDashboard({ ...base, run }).join("\n"), /5 GitHub · dark-factory/);
+	// A normal runner, or a finished one, shows no mode in the header.
+	assert.doesNotMatch(renderDashboard({ ...base, run: { ...run, mode: null } }).join("\n"), /GitHub · dark-factory/);
+	assert.doesNotMatch(renderDashboard({ ...base, run: { ...run, live: false } }).join("\n"), /GitHub · dark-factory/);
+});
+
 test("tailShiftLog: a missing log file gives an empty tail, not a crash", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-tui-nolog-"));
 	const log = await tailShiftLog(root, { workers: [{ ticket: { feature: "f", number: "01" }, attempt: 1 }] });
@@ -561,7 +623,9 @@ test("shiftwork tui --help describes the tabs and keys", async () => {
 	assert.match(stdout, /Agents/);
 	assert.match(stdout, /Cooldowns/);
 	assert.match(stdout, /Log/);
-	assert.match(stdout, /1–4/);
+	assert.match(stdout, /1–5/);
+	assert.match(stdout, /GitHub/);
+	assert.match(stdout, /g toggles dark-factory/);
 	assert.match(stdout, /n runs the selected ticket/);
 	assert.match(stdout, /TuiAltScreen/);
 	assert.match(stdout, /colour/i);

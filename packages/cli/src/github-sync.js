@@ -133,6 +133,11 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 		}
 	}
 
+	// The time of the last sync, for the TUI's GitHub tab: written on every
+	// sync, posted or not, so a quiet watcher still shows a fresh sync time.
+	state.syncedAt = new Date().toISOString();
+	await writeIssueState(root, state);
+
 	return { posted };
 }
 

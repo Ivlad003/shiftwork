@@ -314,7 +314,7 @@ Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`.
 
 ### What the TUI does
 
-Four full-screen tabs (`1`–`4`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**. A header shows the tabs and the last notice; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. It is in colour: the cursor row is highlighted across the full width, ticket statuses are coloured (resolved green, claimed cyan, needs-info yellow, blocked dim), the `● model` marker of a live worker is cyan, cooldown rows are red, the active tab label is bold and the notice is yellow. Set `NO_COLOR` to turn colour off; `tui --once` and the plain-text fallback stay colourless. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense.
+Five full-screen tabs (`1`–`5`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**, **GitHub**. A header shows the tabs, the last notice and, while a dark-factory runner is live, `dark-factory`; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. It is in colour: the cursor row is highlighted across the full width, ticket statuses are coloured (resolved green, claimed cyan, needs-info yellow, blocked dim), the `● model` marker of a live worker is cyan, cooldown rows are red, the active tab label is bold and the notice is yellow. Set `NO_COLOR` to turn colour off; `tui --once` and the plain-text fallback stay colourless. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense.
 
 | Tab | It shows | Keys |
 |---|---|---|
@@ -322,8 +322,9 @@ Four full-screen tabs (`1`–`4`, or `tab` to cycle): **Queue**, **Agents**, **C
 | Agents | One row per running shift: ticket, model, tier, shift/attempt, tokens, cost, turns, context fill, budget, elapsed | `↑↓`/`j k` move · `enter` opens that agent's log |
 | Cooldowns | Active provider cooldowns and time left | `↑↓`/`j k` move |
 | Log | Tail of the selected agent's shift log (else the first live worker's) | `↑↓`/`j k` move |
+| GitHub | The issues `run --dark-factory` imported (`.pi/shiftwork-github.json`): `#<N> <title> · <feature> · <state>`, where the state — planning, working, needs-info, done, closed — comes from the feature's tickets, plus the time of the last sync | `↑↓`/`j k` move · `enter` opens the issue's feature in the Queue tab |
 
-Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `q` quit. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live.
+Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `g` toggle dark-factory (starts `shiftwork run --dark-factory` detached when no runner is live, writes STOP when one is) · `q` quit. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live.
 
 The TUI only watches and starts or stops runs. Models, tiers, routing and budgets are edited in `.pi/shiftwork.json`; the next ticket picks up the changes.
 
@@ -478,6 +479,8 @@ Shiftwork does all GitHub work with the GitHub CLI and its login — no token in
 ## Dark-factory mode
 
 `npx shiftwork run --dark-factory` runs the whole loop unattended: every `github.pollMin` minutes (default 5) it polls the repo's issues, imports the new ones, reports back, works the frontier until it is empty, reports back again, and waits for the next poll. It stops like any runner: a STOP file or a signal ends it after the current shift. `npx shiftwork run --dark-factory --once` does one poll plus one frontier pass, then exits.
+
+The TUI has a hand on it: the **GitHub** tab (`5`) lists the imported issues and the time of the last sync, and `g` starts `run --dark-factory` detached when no runner is live (a second `g`, like `s`, writes STOP); the header shows `dark-factory` while it runs.
 
 How it treats the issues:
 

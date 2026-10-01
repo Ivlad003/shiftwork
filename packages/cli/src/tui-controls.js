@@ -6,11 +6,11 @@ import { fileURLToPath } from "node:url";
 import { openRunState, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "./dry-run.js";
 
-/** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · q quit. */
-export const TUI_KEYS = ["r", "s", "d", "f", "q", "\x03"];
+/** The keys the TUI handles: r run · s stop (with handoff) · d dry-run · f feature filter · g dark-factory · q quit. */
+export const TUI_KEYS = ["r", "s", "d", "f", "g", "q", "\x03"];
 
-/** The four tabs of the phase-5 spec, switched with `1`–`4` (and `tab`, which cycles). */
-export const TABS = ["queue", "agents", "cooldowns", "log"];
+/** The five tabs, switched with `1`–`5` (and `tab`, which cycles): the phase-5 spec's four plus GitHub (github-watch). */
+export const TABS = ["queue", "agents", "cooldowns", "log", "github"];
 
 const ARROWS = { A: "up", B: "down", C: "right", D: "left" };
 
@@ -57,7 +57,17 @@ export function queueRows(dashboard, view) {
 	return rows;
 }
 
-/** The rows one tab's cursor moves over: Queue's folders and tickets, the live shifts, the cooldowns, the log lines. */
+/**
+ * The rows the GitHub tab shows (github-watch, ticket 06): one per issue in
+ * `.pi/shiftwork-github.json` — `{ number, title, feature, state }` (state from
+ * the feature's tickets, derived by `readGithubIssues` in dashboard.js) — one
+ * row per watched issue, sorted by issue number. Pure, and shared with rendering.
+ */
+export function githubRows(dashboard) {
+	return [...(dashboard?.github?.issues ?? [])].sort((a, b) => Number(a.number) - Number(b.number));
+}
+
+/** The rows one tab's cursor moves over: Queue's folders and tickets, the live shifts, the cooldowns, the log lines, the GitHub issues. */
 function tabRows(tab, dashboard, view) {
 	switch (tab) {
 		case "queue":
@@ -68,6 +78,8 @@ function tabRows(tab, dashboard, view) {
 			return dashboard?.cooldowns ?? [];
 		case "log":
 			return dashboard?.log?.lines ?? [];
+		case "github":
+			return githubRows(dashboard);
 		default:
 			return [];
 	}
@@ -75,7 +87,7 @@ function tabRows(tab, dashboard, view) {
 
 /** The view state with every optional field filled in and each tab's cursor clamped to its rows. */
 function normalize(state, dashboard) {
-	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, ...state.cursor };
+	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0, ...state.cursor };
 	for (const tab of TABS) {
 		const rows = tabRows(tab, dashboard, state);
 		cursor[tab] = rows.length ? Math.max(0, Math.min(cursor[tab] ?? 0, rows.length - 1)) : 0;
@@ -92,13 +104,15 @@ function normalize(state, dashboard) {
 
 /**
  * The pure key reducer: (state, key, dashboard) → { state, effects }.
- * State: { tab, cursor: { queue, agents, cooldowns, log }, collapsed, details, selectedWorker,
+ * State: { tab, cursor: { queue, agents, cooldowns, log, github }, collapsed, details, selectedWorker,
  * run, features, featureFilter, notice, dryRun }. It is never mutated; `dashboard` (the latest
  * frame, shape `collectDashboardState`) bounds the cursors and decides whether `n` may start.
  * Effects are data for the executor: { type: "start-runner" | "stop-runner" | "dry-run", feature,
- * ticket } or { type: "quit" }. A second `r` while a runner is live is refused with a notice
+ * ticket, darkFactory } or { type: "quit" }. A second `r` while a runner is live is refused with a notice
  * (spec story 28); `n` is refused the same way, and when the selected row is not a ready
- * frontier ticket. An unrecognized key leaves the state untouched.
+ * frontier ticket. `g` toggles dark-factory: it starts `run --dark-factory` detached when no
+ * runner is live (github-watch, ticket 06) and writes STOP when one is. An unrecognized key
+ * leaves the state untouched.
  */
 export function reduceKey(state, key, dashboard = {}) {
 	switch (key) {
@@ -130,6 +144,19 @@ export function reduceKey(state, key, dashboard = {}) {
 				effects: [],
 			};
 		}
+		case "g": {
+			// The dark-factory toggle: start `run --dark-factory` detached when idle, STOP when live.
+			if (state.run?.live) {
+				return {
+					state: { ...normalize(state, dashboard), notice: `STOP file written · runner pid ${state.run.pid} hands off and stops` },
+					effects: [{ type: "stop-runner" }],
+				};
+			}
+			return {
+					state: { ...normalize(state, dashboard), notice: "starting dark-factory…" },
+					effects: [{ type: "start-runner", feature: null, darkFactory: true }],
+			};
+		}
 		case "q":
 		case "\x03":
 			return { state: normalize(state, dashboard), effects: [{ type: "quit" }] };
@@ -137,6 +164,7 @@ export function reduceKey(state, key, dashboard = {}) {
 		case "2":
 		case "3":
 		case "4":
+		case "5":
 			return { state: { ...normalize(state, dashboard), tab: TABS[Number(key) - 1] }, effects: [] };
 		case "tab": {
 			const current = TABS.includes(state.tab) ? state.tab : "queue";
@@ -188,7 +216,7 @@ function collapse(state, dashboard, fold) {
 	return { state: normalize({ ...norm, collapsed: [...collapsed] }, dashboard), effects: [] };
 }
 
-/** Enter: open the selected ticket's details (Queue), or select a worker and show its log (Agents). */
+/** Enter: open the selected ticket's details (Queue), select a worker's log (Agents), or jump to the issue's feature (GitHub). */
 function enterKey(state, dashboard) {
 	const norm = normalize(state, dashboard);
 	if (norm.tab === "queue") {
@@ -201,6 +229,20 @@ function enterKey(state, dashboard) {
 		if (!worker) return { state: norm, effects: [] };
 		const selectedWorker = worker.ticket?.feature && worker.ticket?.number ? `${worker.ticket.feature}/${worker.ticket.number}` : null;
 		return { state: { ...norm, tab: "log", selectedWorker }, effects: [] };
+	}
+	if (norm.tab === "github") {
+		const row = githubRows(dashboard)[norm.cursor.github];
+		if (!row?.feature) return { state: norm, effects: [] };
+		// Open the issue's feature in the Queue tab, the cursor on its folder row — clearing a
+		// feature filter that would hide it.
+		const findFolder = (view) => queueRows(dashboard, view).findIndex((r) => r.kind === "feature" && r.feature === row.feature);
+		let view = norm;
+		let at = findFolder(view);
+		if (at < 0 && norm.featureFilter) {
+			view = { ...norm, featureFilter: null };
+			at = findFolder(view);
+		}
+		return { state: { ...view, tab: "queue", cursor: { ...view.cursor, queue: at < 0 ? view.cursor.queue : at } }, effects: [] };
 	}
 	return { state: norm, effects: [] };
 }
@@ -342,14 +384,15 @@ function decodeCsiU(params) {
  */
 export function createTuiControls({ root, start, stop, plan, onChange, onQuit } = {}) {
 	const effects = {
-		"start-runner": start ?? ((root_, effect) => startDetachedRunner(root_, { feature: effect.feature, ticket: effect.ticket })),
+		"start-runner": start ??
+			((root_, effect) => startDetachedRunner(root_, { feature: effect.feature, ticket: effect.ticket, darkFactory: effect.darkFactory })),
 		"stop-runner": stop ?? writeStopFile,
 		"dry-run": plan ?? ((root_, effect) => collectDryRunLines(root_, { feature: effect.feature })),
 	};
 	let dashboard = { run: null, tickets: [] };
 	let view = {
 		tab: "queue",
-		cursor: { queue: 0, agents: 0, cooldowns: 0, log: 0 },
+		cursor: { queue: 0, agents: 0, cooldowns: 0, log: 0, github: 0 },
 		collapsed: [],
 		details: null,
 		selectedWorker: null,
@@ -427,8 +470,10 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
  * Start `shiftwork run` detached, like `/shift run`: output goes to logs/runner-<ts>.log,
  * a stale STOP file is removed first, and the run state is claimed at once so the
  * dashboard is live before the runner's own first write. Refused while a runner is live.
+ * `darkFactory: true` starts `run --dark-factory` instead, and the run state entry
+ * records `mode: "dark-factory"` — the header shows it while the runner is live.
  */
-export async function startDetachedRunner(root, { feature, ticket, bin } = {}) {
+export async function startDetachedRunner(root, { feature, ticket, darkFactory, bin } = {}) {
 	const runState = openRunState(root);
 	const current = await runState.read();
 	if (current?.live) {
@@ -444,7 +489,13 @@ export async function startDetachedRunner(root, { feature, ticket, bin } = {}) {
 	await mkdir(join(root, "logs"), { recursive: true });
 	const logFile = join(root, "logs", `runner-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
 	const log = openSync(logFile, "a");
-	const args = [cli, "run", ...(feature ? ["--feature", feature] : []), ...(ticket ? ["--ticket", ticket] : [])];
+	const args = [
+		cli,
+		"run",
+		...(darkFactory ? ["--dark-factory"] : []),
+		...(feature ? ["--feature", feature] : []),
+		...(ticket ? ["--ticket", ticket] : []),
+	];
 	const child = spawn(process.execPath, args, { cwd: root, detached: true, stdio: ["ignore", log, log] });
 	child.unref();
 	await runState.update({
@@ -453,6 +504,7 @@ export async function startDetachedRunner(root, { feature, ticket, bin } = {}) {
 		startedAt: new Date().toISOString(),
 		finishedAt: null,
 		stoppedReason: null,
+		mode: darkFactory ? "dark-factory" : null,
 		workers: [],
 		summary: { resolved: 0, needsInfo: 0 },
 		logFile,

@@ -10,13 +10,18 @@ import { createTuiControls, decodeKeys } from "./tui-controls.js";
 const HELP = `shiftwork tui — live dashboard
 
 Usage:
-  shiftwork tui [--dir <path>]  Full-screen tabs: Queue, Agents, Cooldowns, Log; refreshes every second
+  shiftwork tui [--dir <path>]  Full-screen tabs: Queue, Agents, Cooldowns, Log, GitHub; refreshes every second
   shiftwork tui --once          Print one frame and exit
 
-Keys: 1–4 and tab switch tabs · ↑↓/j k move · ←→ fold · enter opens details
-(or an agent's log) · n runs the selected ticket · r starts a detached runner
-(a second r while one is live is refused) · s writes STOP so the runner hands
-off and stops · d shows a dry-run · f cycles the feature filter · q quits.
+Keys: 1–5 and tab switch tabs · ↑↓/j k move · ←→ fold · enter opens details
+(an agent's log, or an issue's feature in the Queue) · n runs the selected ticket
+· r starts a detached runner (a second r while one is live is refused) · s writes
+STOP so the runner hands off and stops · d shows a dry-run · f cycles the feature
+filter · g toggles dark-factory (starts run --dark-factory detached when no
+runner is live, writes STOP when one is; the header shows dark-factory while it
+runs) · q quits. The GitHub tab lists the issues run --dark-factory imported:
+number, title, feature, state (planning, working, needs-info, done, closed)
+and the time of the last sync.
 The interactive view is built on @earendil-works/pi-tui (TuiAltScreen), resolved
 from the user's pi install. It is in colour: the cursor row is highlighted
 across the width, statuses are coloured (resolved green, claimed cyan,
@@ -151,7 +156,7 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 async function fallback(root, error) {
 	const reason = error?.message ? ` (${error.message})` : "";
 	process.stdout.write(
-		`shiftwork tui: pi's TUI library not found${reason}, plain-text mode (1–4 tabs · n run this · r run · s stop · d dry-run · f filter · q quit)\n`,
+		`shiftwork tui: pi's TUI library not found${reason}, plain-text mode (1–5 tabs · n run this · r run · s stop · d dry-run · f filter · g dark-factory · q quit)\n`,
 	);
 	let last = null;
 	const paint = () => {

@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { runFrontier } from "shiftwork-core";
+import { openRunState, runFrontier } from "shiftwork-core";
 
 import { createGitHub } from "./github.js";
 import { importIssues } from "./github-import.js";
@@ -88,6 +88,10 @@ export async function darkFactoryRun({
 	}
 	const pollMin = config.github.pollMin ?? 5;
 	log(`dark-factory: watching ${await githubApi.repo()} (a poll every ${pollMin} min; a STOP file or a signal ends it)`);
+
+	// The run state records the mode (the TUI's header shows dark-factory while it is
+	// live), whether it was started from the shell or with the TUI's `g`.
+	await openRunState(root).update({ pid: process.pid, running: true, mode: "dark-factory" });
 
 	const runGit = git ?? (async (args) => (await run("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout);
 	const gitHead = async () => {

@@ -259,6 +259,8 @@ export interface RunStateRunner extends RunStateWorker {
 	updatedAt?: string;
 	finishedAt?: string | null;
 	feature?: string | null;
+	/** The runner's mode: `"dark-factory"` for a `run --dark-factory` watcher, else null. */
+	mode?: string | null;
 	stoppedReason?: string | null;
 	/** Where a detached runner's output goes, when something started it that way. */
 	logFile?: string;
