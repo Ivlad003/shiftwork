@@ -128,6 +128,56 @@ test("parallel tickets touching one file land: a conflicting landing is redone o
 	assert.doesNotMatch(winner, /### Shift 2/);
 });
 
+test("run reviews every resolved ticket by default; run --no-review skips the review shift", { timeout: 240_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-e2e-review-"));
+	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
+	await mkdir(join(root, ".pi"));
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "01-hello.md"),
+		"# 01: Hello file\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n\n- [ ] hello.txt exists\n",
+	);
+	// No review block: reviews are on by default, on the strongest configured tier (premium).
+	await writeFile(
+		join(root, ".pi", "shiftwork.json"),
+		JSON.stringify({
+			model: "scripted/s1",
+			thinking: "off",
+			routing: { code: { tier: "standard" } },
+			tiers: { standard: { chain: ["scripted/s1"] }, premium: { chain: ["scripted/s2"] } },
+			pi: { args: ["--offline", "-ns", "-ne", "-e", fixture] },
+		}),
+	);
+	// One script, replayed by every shift: the implement shift ends with the marker text
+	// (harmless there), and the review shift replays it as its verdict.
+	const script = [
+		{ tool: { name: "write", args: { path: "hello.txt", content: "hi\n" } } },
+		{ text: 'Looks good. <shiftwork:review verdict="accept" reason="matches the ticket"/>' },
+	];
+	const env = async () => ({
+		...process.env,
+		PI_CODING_AGENT_DIR: await mkdtemp(join(tmpdir(), "sw-e2e-home-")),
+		SHIFTWORK_SCRIPT: JSON.stringify(script),
+	});
+
+	const off = await promisify(execFile)(process.execPath, [bin, "run", "--no-review", "--dir", root], { env: await env() });
+	assert.match(off.stdout, /shiftwork: review off \(--no-review\)/);
+	assert.match(off.stdout, /✔ demo\/01 resolved/);
+	assert.doesNotMatch(await readFile(join(root, ".scratch", "demo", "issues", "01-hello.md"), "utf8"), /### Review/);
+	assert.deepEqual(await readdir(join(root, "logs", "demo", "01")), ["attempt-1.jsonl"]);
+
+	// The run before the --no-review one resolved the ticket; file a fresh one for the default run.
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "02-hello.md"),
+		"# 02: Hello again\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n\n- [ ] hello.txt exists\n",
+	);
+	const on = await promisify(execFile)(process.execPath, [bin, "run", "--dir", root], { env: await env() });
+	assert.match(on.stdout, /shiftwork: review · premium for every ticket/);
+	assert.match(on.stdout, /✔ demo\/02 resolved/);
+	const ticket = await readFile(join(root, ".scratch", "demo", "issues", "02-hello.md"), "utf8");
+	assert.match(ticket, /### Review[\s\S]*- Verdict: accept — matches the ticket/);
+	assert.deepEqual(await readdir(join(root, "logs", "demo", "02")), ["attempt-1.jsonl", "attempt-review.jsonl"]);
+});
+
 test("run --ticket works exactly the chosen ticket end to end", { timeout: 120_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-e2e-ticket-"));
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });

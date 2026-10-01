@@ -332,18 +332,18 @@ TUI лише показує стан, запускає й зупиняє роб�
 
 ### Review після кожного тікета
 
-Можна увімкнути **review shift**: коли тікет злитий, свіжий агент на вибраному tier читає тікет, спеку і diff, запускає Verify і виносить вердикт.
+Review **увімкнені за замовчуванням**: коли тікет злитий, свіжий агент на review-tier читає тікет, спеку і diff, запускає Verify і виносить вердикт. Review-tier — найсильніший зі сконфігурованих: `premium`, якщо він є, інакше `standard`, інакше `quick`, інакше перший tier з `tiers` — тож кожен тікет коштує ще один шифт, зазвичай на найдорожчій моделі. Задайте `tier`, щоб ревʼювити дешевше, або звузьте review необов'язковими фільтрами `features` і `types`:
 
 ```json
-"review": { "enabled": true, "tier": "premium", "features": ["signup"], "types": ["code", "refactor"] }
+"review": { "tier": "standard", "features": ["signup"], "types": ["code", "refactor"] }
 ```
 
-`features` і `types` — необов'язкові фільтри. Вердикт записується в тікет як `### Review`:
+Вердикт записується в тікет як `### Review`:
 - **accept**: готово.
 - **reopen**: тікет повертається в `ready-for-agent`, і наступний `run` доробляє його поверх уже злитого коміту.
 - **follow-up**: у фічі створюється новий тікет з тим самим Verify.
 
-За замовчуванням review вимкнений. `--dry-run` показує, які тікети пройдуть review.
+Щоб вимкнути review: `"review": false` (або `{ "enabled": false }`) у конфігу, або `shiftwork run --no-review` на один запуск. Якщо tiers немає взагалі — ревʼювити ніде, тому review залишаються вимкненими, і `run` каже про це на старті. `run` друкує review-tier (або його фільтри) на старті; `--dry-run` показує, які тікети пройдуть review (`review=<tier>` або `review=no`).
 
 ## 8. Повний приклад конфігу
 
@@ -413,7 +413,7 @@ TUI лише показує стан, запускає й зупиняє роб�
   "skillSources": { "tdd": "/home/me/.agents/skills/tdd", "design": "./skills/design" },
   "skillGroups":  { "core": ["tdd"], "design": ["design"] },
 
-  "review": { "enabled": true, "tier": "premium", "types": ["code", "refactor"] },
+  "review": { "tier": "premium", "types": ["code", "refactor"] },
   "jev": { "enabled": true, "model": ["typesafe/jev-latest", "opencode/jev-1.13-free"] },
 
   "pi":       { "timeoutMs": 10800000 },
@@ -433,7 +433,7 @@ TUI лише показує стан, запускає й зупиняє роб�
 - **`thinking` tier `premium` (`high`)** дістанеться `openrouter/anthropic/claude-opus-5` (pi) і `grok:grok-4.7`. `grok:grok-4.7` отримає `--reasoning-effort high`, а `claude:opus` — ні (розділ 2).
 - **Паралельність.** Два тікети одночасно, кожен у своєму worktree. Але не більше однієї зміни на Ollama (одна GPU) і однієї на Claude Code (одна підписка).
 - **Гроші.** `openrouter` і `xai` платні. Якщо безкоштовна модель звільниться протягом 20 хвилин, Shiftwork почекає на неї. Коли весь tier охолоджується, моделі позичаються з tier вище (`crossTier: "up"`).
-- **Review** запускається на `premium` лише для тікетів `code` і `refactor`.
+- **Review** (за замовчуванням) запускається на `premium` лише для тікетів `code` і `refactor`.
 
 Перевір результат перед запуском:
 

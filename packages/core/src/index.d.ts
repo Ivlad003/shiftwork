@@ -86,9 +86,11 @@ export declare function chooseHandoffMode(options: {
 }): { mode: "same-process" | "new-process"; compact: boolean };
 export interface Review {
 	enabled: boolean;
-	/** Tier the review shift runs on; required when enabled. */
+	/** Tier the review shift runs on; the strongest configured tier by default. */
 	tier?: string;
 	when?: "resolve";
+	/** Why reviews are off despite being on by default: no tier to review on. */
+	reason?: string;
 	/** Feature names that get reviews; every feature when omitted. */
 	features?: string[];
 	/** Ticket types (the effective type) that get reviews; every type when omitted. */

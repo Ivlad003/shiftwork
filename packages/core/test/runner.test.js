@@ -1265,6 +1265,7 @@ test("a missing cli backend is skipped like a cooling provider and does not coun
 		maxAttempts: 1,
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["claude:sonnet", "fake/m1"], thinking: "low" } },
+		review: false,
 	});
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([{ error: "claude: command not found" }, { files: { "done.txt": "ok" } }]);
@@ -1289,6 +1290,7 @@ test("an ECONNREFUSED ollama shift marks the backend unavailable instead of cool
 		maxAttempts: 1,
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["ollama/llama3.2:latest", "fake/m1"], thinking: "low" } },
+		review: false,
 	});
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([
@@ -1318,6 +1320,7 @@ test("pi's real 'Connection error.' on an ollama model marks the backend unavail
 		maxAttempts: 1,
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["ollama/qwen2.5-coder:7b", "fake/m1"], thinking: "low" } },
+		review: false,
 	});
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([{ error: "Connection error." }, { files: { "done.txt": "ok" } }]);
@@ -1337,6 +1340,7 @@ test("a 'Connection error.' on a cloud model is an ordinary failed attempt, not 
 		maxAttempts: 2,
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["fake/m1"], thinking: "low" } },
+		review: false,
 	});
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([{ error: "Connection error." }, { files: { "done.txt": "ok" } }]);
@@ -1355,6 +1359,7 @@ test("an unavailable cursor-agent (missing or not logged in) is skipped like a c
 			maxAttempts: 1,
 			routing: { code: { tier: "standard" } },
 			tiers: { standard: { chain: ["cursor:auto", "fake/m1"], thinking: "low" } },
+			review: false,
 		});
 		const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 		const backend = fakeBackend([{ error }, { files: { "done.txt": "ok" } }]);
@@ -1407,7 +1412,12 @@ function reviewConfig(review = {}) {
 
 const reviewMarker = (verdict, reason) => `<shiftwork:review verdict="${verdict}" reason="${reason}"/>`;
 
-test("shouldReview is off by default and respects the when/features/types filters", () => {
+test("shouldReview is on by default on the strongest configured tier and respects the when/features/types filters", () => {
+	const on = validateConfig({ model: "fake/m1", tiers: { quick: { chain: ["fake/q"] }, premium: { chain: ["fake/r"] } } });
+	assert.equal(on.review.enabled, true);
+	assert.equal(on.review.tier, "premium");
+	assert.equal(shouldReview(on, { feature: "f", type: "code" }), true);
+	// No tiers at all: nothing to review on, so reviews stay off.
 	assert.equal(shouldReview(validateConfig({ model: "fake/m1" }), { feature: "f", type: "code" }), false);
 	const base = { review: { enabled: true, tier: "premium", when: "resolve" } };
 	assert.equal(shouldReview(base, { feature: "f", type: "code" }), true);
@@ -1526,7 +1536,7 @@ test("an unknown review verdict is treated as accept with a warning", async () =
 	assert.match(text, /- Warning: unknown review verdict "reject"; treated as accept/);
 });
 
-test("reviews are off by default", async () => {
+test("a config with no review block reviews every resolved ticket, on the strongest configured tier", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 	const config = validateConfig({
 		defaultType: "code",
@@ -1534,6 +1544,27 @@ test("reviews are off by default", async () => {
 		maxAttempts: 2,
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["fake/m1"], thinking: "low" }, premium: { chain: ["fake/r1"], thinking: "high" } },
+	});
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }, { text: reviewMarker("accept", "matches the spec") }]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[1].request.route.tier, "premium", "the default review tier is the strongest configured one");
+	assert.equal(backend.shifts[1].request.route.model, "fake/r1");
+	assert.match(await ticketText(root, "f", "01-a.md"), /### Review[\s\S]*- Verdict: accept — matches the spec/);
+});
+
+test("a config with `review: false` resolves without a review shift", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const config = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "low" }, premium: { chain: ["fake/r1"], thinking: "high" } },
+		review: false,
 	});
 	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
 
@@ -1615,6 +1646,7 @@ test("shift reports say how long the shift took, and the ticket total from the s
 		maxAttempts: 2,
 		routing: { code: { tier: "standard" } },
 		tiers: { standard: { chain: ["fake/m1"], thinking: "low" } },
+		review: false,
 	});
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([{ text: "not yet" }, { files: { "done.txt": "ok" } }]);
