@@ -307,7 +307,10 @@ npx shiftwork run --once               # один тікет
 npx shiftwork run --feature signup     # тільки ця фіча, поки є готові тікети
 npx shiftwork run --parallel 3         # до трьох тікетів одночасно
 npx shiftwork tui                      # живий дашборд
+npx shiftwork tickets check signup     # planning gate: чи робочі тікети цієї фічі
 ```
+
+`shiftwork tickets check <feature> [--min N] [--except NN]` — це Verify-гейт планувального тікета: вихід 0, коли щонайменше `N` (за замовчуванням 1) тікетів, крім винятків (за замовчуванням `01` — сам план), мають статус `ready-for-agent` чи пізніший, у кожного є чекбокс приймання та рядок `Verify`, і кожне число з `Blocked by:` існує у фічі. Інакше вихід 1, по одному рядку на проблему (`signup/03: no Verify line`).
 
 Кожен тікет працює у власному git worktree в `~/.cache/shiftwork/worktrees/`. Залежності туди ставляться так: `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. Якщо лендінг тікета конфліктує з тим, що влитий першим, гілка перебазовується на нову ціль і Verify проходить знову; якщо й rebase конфліктує, робота переробляється поверх неї у свіжому worktree, ще одним shiftом (`- Landing conflict with …; redone on top of …` у тікеті). Щоб акуратно зупинитися, створи в корені репозиторію файл `STOP` (або натисни `s` у TUI): поточна зміна напише handoff, і runner завершиться. `Ctrl-C`, `kill` (SIGTERM) і закритий термінал (SIGHUP) роблять те саме; повторний сигнал, або 60 с без завершення, зупиняє агентів і команди Verify одразу, тож жоден процес агента не переживе runner. Логи змін лежать у `logs/<feature>/<NN>/`.
 

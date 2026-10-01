@@ -27,6 +27,7 @@
 | `npx shiftwork run --dry-run` | which model, tier and thinking each ticket gets, and whether it gets a review |
 | `npx shiftwork run --once` | work one ticket |
 | `npx shiftwork run` | work the frontier until nothing is left |
+| `npx shiftwork tickets check <feature> [--min <n>] [--except NN]` | planning gate: at least n tickets besides the excepted ones (default `01`) are ready with checkboxes and a Verify line, and every Blocked-by number exists |
 | `npx shiftwork tui` | live dashboard: r run · s stop · d dry-run · f filter · q quit |
 
 In pi: `/shift` (frontier), `/shift run`, `/shift stop`.

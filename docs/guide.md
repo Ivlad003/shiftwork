@@ -305,7 +305,10 @@ npx shiftwork run --once               # one ticket
 npx shiftwork run --feature signup     # only this feature, until nothing is ready
 npx shiftwork run --parallel 3         # up to three tickets at once
 npx shiftwork tui                      # live dashboard
+npx shiftwork tickets check signup     # planning gate: are this feature's tickets workable?
 ```
+
+`shiftwork tickets check <feature> [--min N] [--except NN]` is the Verify gate for a planning ticket: it exits 0 when at least `N` (default 1) tickets besides the excepted ones (default `01`, the plan itself) are `ready-for-agent` or later, each with an acceptance checkbox and a `Verify` line, and every `Blocked by:` number exists in the feature. Otherwise it exits 1 with one line per problem (`signup/03: no Verify line`).
 
 Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. `Ctrl-C`, `kill` (SIGTERM) and a closed terminal (SIGHUP) do the same; a second signal, or 60 s without the runner finishing, stops the agents and Verify commands at once, so no agent process outlives the runner. Shift logs are in `logs/<feature>/<NN>/`.
 

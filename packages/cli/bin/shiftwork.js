@@ -19,6 +19,11 @@ Usage:
   shiftwork tui [--once] [--dir <path>]
                                 Full-screen dashboard (Queue, Agents, Cooldowns, Log);
                                 1–4 tabs, n runs the selected ticket, r runs, s stops, d dry-runs
+  shiftwork tickets check <feature> [--min <n>] [--except NN]
+                                Planning gate: exit 0 when at least n (default 1) tickets
+                                besides the excepted ones (default 01) are ready-for-agent
+                                or later, each with checkboxes and a Verify line, and every
+                                Blocked-by number exists in the feature
   shiftwork --version
 
 Run options:
@@ -50,6 +55,9 @@ try {
 	switch (command) {
 		case "status":
 			await status(rest);
+			break;
+		case "tickets":
+			process.exitCode = await tickets(rest);
 			break;
 		case "init": {
 			const { init } = await import("../src/init.js");
@@ -143,6 +151,47 @@ async function status(argv) {
 			console.log(`  ${c.provider} (${c.kind ?? "limit"})  ${remaining > 0 ? `${formatAge(remaining)} remaining` : "expiring"}`);
 		}
 	}
+}
+
+/** `tickets check <feature>`: the planning ticket's verify gate. */
+async function tickets(argv) {
+	const [subcommand, ...rest] = argv;
+	if (subcommand !== "check") {
+		console.log(HELP);
+		return 0;
+	}
+	const { positionals, values } = parseArgs({
+		args: rest,
+		allowPositionals: true,
+		options: {
+			min: { type: "string" },
+			except: { type: "string", multiple: true },
+			dir: { type: "string" },
+			help: { type: "boolean", short: "h" },
+		},
+	});
+	if (values.help) {
+		console.log(HELP);
+		return 0;
+	}
+	const feature = positionals[0];
+	if (!feature) throw new Error("usage: shiftwork tickets check <feature> [--min <n>] [--except NN] [--dir <path>]");
+	const min = values.min === undefined ? 1 : Number(values.min);
+	if (!Number.isInteger(min) || min < 1) throw new Error(`--min must be a positive integer, got "${values.min}"`);
+	const { checkFeatureTickets, parseExcept } = await import("../src/tickets-check.js");
+	const except = parseExcept(values.except ?? ["01"]);
+	const { ok, problems, ready } = await checkFeatureTickets({
+		root: values.dir ?? process.cwd(),
+		feature,
+		min,
+		except,
+	});
+	if (ok) {
+		console.log(`${feature}: ${ready} ready ticket${ready === 1 ? "" : "s"} besides ${except.join(", ")} (need ${min})`);
+		return 0;
+	}
+	for (const problem of problems) console.log(problem);
+	return 1;
 }
 
 function formatAge(ms) {
