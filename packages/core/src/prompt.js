@@ -65,7 +65,9 @@ export function buildShiftPrompt(ticket, { root, attempt, absolute = false }) {
 	const ticketPath = absolute ? ticket.path : relative(root, ticket.path);
 	const specPath = absolute ? spec : relative(root, spec);
 	const lines = [
-		`Work Shiftwork ticket ${ticket.feature}/${ticket.number}: ${ticket.title ?? ""}`.trim(),
+		`Implement Shiftwork ticket ${ticket.feature}/${ticket.number}: ${ticket.title ?? ""}`.trim(),
+		"",
+		"Make the code changes the ticket asks for by editing files in this repository, run its Verify gate, then end with a short summary. This is an implementation task, not a request for a plan.",
 		"",
 		`- Ticket: ${ticketPath}`,
 		`- Spec: ${specPath}`,

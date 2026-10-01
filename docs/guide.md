@@ -92,7 +92,7 @@ A ticket without a `Type` gets `defaultType`, unless Jev (a small classifier mod
 
 | Field | Meaning |
 |---|---|
-| `thinking` | Reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set globally, per tier, per route, or per model. Only pi models use it (see below). |
+| `thinking` | Reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set globally, per tier, per route, or per model. pi and `grok:` models use it (see below). |
 | `crossTier` | `"up"`: when a whole tier is cooling, borrow from the next tier up (`"down"` or `"none"` also work). |
 | `paidProviders` | Providers that cost money, e.g. `["openrouter"]`. `…:free` and `ollama/…` models never count as paid. |
 | `preferWaitMin` | If a free model will be back within this many minutes, wait for it instead of using a paid one. |
@@ -120,7 +120,7 @@ The `models` section sets options for one model, whichever tier it sits in. The 
 | `contextWindow` | Context window in tokens. `maxContextPct` is measured against it instead of the window the backend reports. Useful for a local model served with a smaller window. |
 | `budget` | Shift budget for this model (fields from section 5). Applied last. |
 
-**`thinking` only works for pi.** Shiftwork passes the reasoning level only to models without a prefix (`provider/model`). The `claude:`, `codex:`, `opencode:`, `grok:` and `cursor:` backends ignore it, even though `--dry-run` and the TUI show `thinking=…` for them too. Set a CLI agent's reasoning level its own way: in its config or with flags in `args` (section 6).
+**`thinking` works for pi and `grok:`.** Models without a prefix (`provider/model`) get the level as is. For `grok:` it becomes `--reasoning-effort`, fitted to the levels the model offers (in `~/.grok/models_cache.json`): `off`/`minimal` → the lowest, `max` → the highest; an unknown model keeps its default. The `claude:`, `codex:`, `opencode:` and `cursor:` backends ignore it, even though `--dry-run` and the TUI show `thinking=…` for them too. Set a CLI agent's reasoning level its own way: in its config or with flags in `args` (section 6).
 
 ## 3. Local models (Ollama)
 
@@ -267,7 +267,7 @@ Agents read your repo's instruction files themselves. Checked live on 2026-09-30
 | Codex (`codex:`) | yes | no |
 | OpenCode (`opencode:`) | yes | only when there's no `AGENTS.md` |
 | Cursor (`cursor:`) | yes | yes |
-| Grok CLI (`grok:`) | no, so Shiftwork puts it into the prompt | same: `CLAUDE.md` when there's no `AGENTS.md` |
+| Grok CLI (`grok:`) | no, so Shiftwork adds it to grok's system prompt (`--rules`) | same: `CLAUDE.md` when there's no `AGENTS.md` |
 
 So keep the rules in `AGENTS.md` and make `CLAUDE.md` a single line, `@AGENTS.md`: every agent then sees the same rules. `xai/…` models run through pi and do get them.
 
@@ -399,7 +399,7 @@ What it does:
 - **Four tiers on different agents.** `local`: Ollama only. `quick`: OpenCode → a free OpenRouter model through pi → Cursor. `standard`: Claude Code → Codex → Grok through pi. `premium`: Claude Code with Opus → Grok Build → Opus through OpenRouter.
 - **Routes.** Docs go to the local model, and `infra` always goes to `claude:opus`, whatever the tiers say.
 - **Model profiles.** Ollama's context fill is measured against 32k. `xai/grok-4.6` reasons at `high` although tier `standard` says `medium`. `claude:opus` gets its own budget.
-- **Tier `premium`'s `thinking` (`high`)** only reaches `openrouter/anthropic/claude-opus-5`, the one pi model in that tier. `claude:opus` and `grok:grok-4.7` don't get it (section 2).
+- **Tier `premium`'s `thinking` (`high`)** reaches `openrouter/anthropic/claude-opus-5` (pi) and `grok:grok-4.7` (as `--reasoning-effort high`); `claude:opus` doesn't get it (section 2).
 - **Parallelism.** Two tickets at once, each in its own worktree, but at most one shift on Ollama (one GPU) and one on Claude Code (one subscription).
 - **Money.** `openrouter` and `xai` are paid. If a free model is back within 20 minutes, Shiftwork waits for it. When a whole tier is cooling, it borrows from the tier above (`crossTier: "up"`).
 - **Reviews** run on `premium`, for `code` and `refactor` tickets only.

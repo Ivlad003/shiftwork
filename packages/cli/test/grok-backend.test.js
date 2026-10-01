@@ -94,54 +94,54 @@ test("a missing grok binary returns an error shift that ends immediately", { tim
 	assert.ok(shift.warnings.some((w) => /not available/.test(w)));
 });
 
-/** Runs a shift against a fake grok that records its `-p` argument, and returns the prompt. */
-async function recordedPrompt({ cwd, skills = { paths: [], preload: [], restricted: false }, systemPrompt = "Worker prompt.", prompt = "Do the ticket." }) {
+/** Runs a shift against a fake grok that records its arguments; returns the `-p` prompt, the `--rules` text and all args. */
+async function recordedRun({ cwd, skills = { paths: [], preload: [], restricted: false }, systemPrompt = "Worker prompt.", prompt = "Do the ticket.", thinking, model = "grok-4.7", modelsCache }) {
 	const binDir = await mkdtemp(join(tmpdir(), "sw-grok-bin-"));
 	const grokPath = join(binDir, "grok");
 	await writeFile(
 		grokPath,
 		`#!/usr/bin/env node
-const args = process.argv.slice(2);
-const prompt = args[args.indexOf("-p") + 1];
-require("fs").writeFileSync(process.env.SHIFTWORK_RECORD_PROMPT ?? "missing", prompt);
+require("fs").writeFileSync(process.env.SHIFTWORK_RECORD_ARGS ?? "missing", JSON.stringify(process.argv.slice(2)));
 console.log(JSON.stringify({ type: "usage", usage: { input_tokens: 1, output_tokens: 1 } }));
 `,
 	);
 	await chmod(grokPath, 0o755);
 
-	const record = join(cwd, "shiftwork-prompt.txt");
-	const backend = createGrokBackend({ command: "grok", env: { PATH: `${binDir}:${process.env.PATH}`, SHIFTWORK_RECORD_PROMPT: record } });
-	const shift = await backend.startShift({ cwd, route: { model: "grok-4.7", skills }, systemPrompt, prompt });
+	const record = join(cwd, "shiftwork-args.json");
+	const backend = createGrokBackend({ command: "grok", modelsCache, env: { PATH: `${binDir}:${process.env.PATH}`, SHIFTWORK_RECORD_ARGS: record } });
+	const shift = await backend.startShift({ cwd, route: { model, skills, thinking }, systemPrompt, prompt });
 	for await (const event of shift.events) {
 		if (event.type === "end") break;
 	}
 	await shift.close?.();
 	await rm(binDir, { recursive: true, force: true });
-	return readFile(record, "utf8");
+	const args = JSON.parse(await readFile(record, "utf8"));
+	const after = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+	return { args, prompt: after("-p"), rules: after("--rules") };
 }
 
-test("preloaded skills are prepended to the prompt passed to grok", { timeout: 30_000 }, async () => {
+test("the worker prompt and preloaded skills go to grok's system prompt (--rules); -p is only the ticket", { timeout: 30_000 }, async () => {
 	const skill = await mkdtemp(join(tmpdir(), "sw-grok-skill-"));
 	await mkdir(skill, { recursive: true });
 	await writeFile(join(skill, "SKILL.md"), "---\nname: alpha\n---\nAlpha preloaded body.");
 
 	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-preload-"));
-	const prompt = await recordedPrompt({ cwd, skills: { paths: [skill], preload: [skill], restricted: true } });
-	assert.match(prompt, /Worker prompt\./);
-	assert.match(prompt, /Alpha preloaded body\./);
-	assert.match(prompt, /Do the ticket\./);
+	const { prompt, rules } = await recordedRun({ cwd, skills: { paths: [skill], preload: [skill], restricted: true } });
+	assert.match(rules, /Worker prompt\./);
+	assert.match(rules, /Alpha preloaded body\./);
+	assert.equal(prompt, "Do the ticket.");
 });
 
-test("AGENTS.md in the cwd lands in the prompt between the worker prompt and the ticket prompt", { timeout: 30_000 }, async () => {
+test("AGENTS.md in the cwd lands in --rules after the worker prompt", { timeout: 30_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-agents-"));
 	await writeFile(join(cwd, "AGENTS.md"), "The project codeword is PELICAN.");
 
-	const prompt = await recordedPrompt({ cwd });
-	const worker = prompt.indexOf("Worker prompt.");
-	const instructions = prompt.indexOf("# Project instructions (AGENTS.md)");
-	const codeword = prompt.indexOf("The project codeword is PELICAN.");
-	const ticket = prompt.indexOf("Do the ticket.");
-	assert.ok(worker >= 0 && instructions > worker && codeword > instructions && ticket > codeword, prompt);
+	const { rules, prompt } = await recordedRun({ cwd });
+	const worker = rules.indexOf("Worker prompt.");
+	const instructions = rules.indexOf("# Project instructions (AGENTS.md)");
+	const codeword = rules.indexOf("The project codeword is PELICAN.");
+	assert.ok(worker >= 0 && instructions > worker && codeword > instructions, rules);
+	assert.ok(!prompt.includes("PELICAN"), prompt);
 });
 
 test("CLAUDE.md is used when AGENTS.md is absent, and a line that is exactly @<path> expands one level deep", { timeout: 30_000 }, async () => {
@@ -149,20 +149,38 @@ test("CLAUDE.md is used when AGENTS.md is absent, and a line that is exactly @<p
 	await writeFile(join(cwd, "CLAUDE.md"), "@NOTES.md");
 	await writeFile(join(cwd, "NOTES.md"), "Nested instructions.");
 
-	const prompt = await recordedPrompt({ cwd });
-	assert.match(prompt, /# Project instructions \(CLAUDE\.md\)/);
-	assert.match(prompt, /Nested instructions\./);
-	assert.ok(!prompt.includes("@NOTES.md"), prompt);
+	const { rules } = await recordedRun({ cwd });
+	assert.match(rules, /# Project instructions \(CLAUDE\.md\)/);
+	assert.match(rules, /Nested instructions\./);
+	assert.ok(!rules.includes("@NOTES.md"), rules);
 });
 
-test("a CLAUDE.md @import that is missing is kept as a line, and no instruction files leaves the prompt unchanged", { timeout: 30_000 }, async () => {
+test("a CLAUDE.md @import that is missing is kept as a line, and no instruction files leaves only the worker prompt", { timeout: 30_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-none-"));
-	const bare = await recordedPrompt({ cwd });
-	assert.equal(bare, "Worker prompt.\n\nDo the ticket.");
+	const bare = await recordedRun({ cwd });
+	assert.equal(bare.rules, "Worker prompt.");
 
 	await writeFile(join(cwd, "CLAUDE.md"), "@AGENTS.md");
-	const dangling = await recordedPrompt({ cwd });
-	assert.match(dangling, /# Project instructions \(CLAUDE\.md\)\n\n@AGENTS\.md/);
+	const dangling = await recordedRun({ cwd });
+	assert.match(dangling.rules, /# Project instructions \(CLAUDE\.md\)\n\n@AGENTS\.md/);
+});
+
+test("thinking becomes --reasoning-effort, clamped to the levels the model offers", { timeout: 30_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-grok-effort-"));
+	const modelsCache = join(cwd, "models_cache.json");
+	const menu = (ids) => ({ info: { supports_reasoning_effort: true, reasoning_efforts: ids.map((id) => ({ id, value: id })) } });
+	await writeFile(modelsCache, JSON.stringify({ models: { "grok-4.7": menu(["xhigh", "high", "medium", "low"]), "grok-4.5": menu(["high", "medium", "low"]) } }));
+	const effort = async (thinking, model = "grok-4.7") => {
+		const { args } = await recordedRun({ cwd, thinking, model, modelsCache });
+		return args.includes("--reasoning-effort") ? args[args.indexOf("--reasoning-effort") + 1] : undefined;
+	};
+	assert.equal(await effort("medium"), "medium");
+	assert.equal(await effort("minimal"), "low");
+	assert.equal(await effort("off"), "low");
+	assert.equal(await effort("max"), "xhigh");
+	assert.equal(await effort("xhigh", "grok-4.5"), "high");
+	assert.equal(await effort("medium", "grok-unknown"), undefined, "a model not in the cache gets grok's default");
+	assert.equal(await effort(undefined), undefined);
 });
 
 test("restricted skills are delivered as symlinks in .agents/skills and excluded from git", { timeout: 30_000 }, async () => {

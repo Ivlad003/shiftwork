@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { classifyError } from "shiftwork-core";
 
@@ -11,8 +12,11 @@ import { classifyError } from "shiftwork-core";
  * and Cursor both install an `agent` symlink, and which one runs depends on PATH order.
  * Skills are delivered as symlinks in `.agents/skills/` inside the worktree, excluded from git.
  * The worker prompt, preloaded skills and the project instructions (`AGENTS.md`, else
- * `CLAUDE.md`, with one level of `@<path>` imports) are prepended to the prompt.
- * Options: { command?: "grok", args?: string[], env?: object, timeoutMs?: number }
+ * `CLAUDE.md`, with one level of `@<path>` imports) go to grok's system prompt with `--rules`,
+ * so `-p` is only the ticket: grok's own prompt implements action requests but answers
+ * planning-looking requests without edits. `thinking` becomes `--reasoning-effort`, clamped
+ * to the levels the model offers in `~/.grok/models_cache.json` (grok rejects other levels).
+ * Options: { command?: "grok", args?: string[], env?: object, timeoutMs?: number, modelsCache?: string }
  */
 const SAFETY_TIMEOUT_MS = 3 * 60 * 60_000;
 
@@ -56,7 +60,8 @@ export function createGrokBackend(options = {}) {
 
 			const preload = await loadPreload(route.skills?.preload ?? []);
 			const projectInstructions = await loadProjectInstructions(cwd);
-			const fullPrompt = [systemPrompt, preload.text, projectInstructions, prompt].filter(Boolean).join("\n\n");
+			const rules = [systemPrompt, preload.text, projectInstructions].filter(Boolean).join("\n\n");
+			const effort = grokEffort(route.thinking, route.model, options.modelsCache);
 
 			const skillPaths = route.skills?.restricted ? route.skills.paths ?? [] : [];
 			const skillsDir = join(cwd, ".agents", "skills");
@@ -73,8 +78,10 @@ export function createGrokBackend(options = {}) {
 			}
 
 			const args = ["-m", route.model, "--output-format", "streaming-json", "--always-approve"];
+			if (effort) args.push("--reasoning-effort", effort);
+			if (rules) args.push("--rules", rules);
 			args.push(...(options.args ?? []));
-			args.push("-p", fullPrompt);
+			args.push("-p", prompt);
 
 			const queue = eventQueue();
 			let stderr = "";
@@ -321,4 +328,32 @@ function eventQueue() {
 		},
 	};
 	return q;
+}
+
+const EFFORT_LADDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Shiftwork's thinking level as one of the model's reasoning efforts: the same level when
+ * offered, else the nearest offered one (off/minimal → the lowest, max → the highest).
+ * Undefined when the model or its menu is unknown, so grok keeps its own default.
+ */
+export function grokEffort(thinking, model, cachePath = join(homedir(), ".grok", "models_cache.json")) {
+	if (!thinking || !model) return undefined;
+	let offered;
+	try {
+		const info = JSON.parse(readFileSync(cachePath, "utf8")).models?.[model]?.info;
+		if (!info?.supports_reasoning_effort) return undefined;
+		offered = (info.reasoning_efforts ?? []).map((e) => e.value ?? e.id).filter((v) => EFFORT_LADDER.includes(v));
+	} catch {
+		return undefined;
+	}
+	if (!offered.length) return undefined;
+	const want = EFFORT_LADDER.indexOf(thinking);
+	if (want < 0) return undefined;
+	let best;
+	for (const level of offered) {
+		const distance = Math.abs(EFFORT_LADDER.indexOf(level) - want);
+		if (best === undefined || distance < best.distance) best = { level, distance };
+	}
+	return best.level;
 }
