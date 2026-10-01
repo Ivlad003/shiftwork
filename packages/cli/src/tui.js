@@ -27,7 +27,8 @@ keeps the filter, esc clears it; with a ticket's details open it highlights the
 matches inside the details ([…] brackets, reverse video in colour) and enter
 scrolls to the next one. While you type, letters — n, r, s, d, f, q and digits
 included — go to the query, not their commands (Ctrl-C still quits); the header
-shows the prompt (/ query · scope) and the footer swaps in the search keys ·
+shows the prompt on its own line (/ query · scope) and the footer swaps in the
+search keys while you type · 
 q quits. The mouse works in the interactive view: click a tab label to
 switch tabs, click a row to move the cursor there (click it again to open it,
 like enter), the wheel moves the cursor. The Resolved tab (5) lists the

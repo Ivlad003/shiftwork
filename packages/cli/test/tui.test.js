@@ -505,25 +505,34 @@ test("renderDashboard color: reverse-video cursor row, the coloured status colum
 	}
 });
 
-test("renderDashboard: a list search filters the queue, the header shows the prompt, the footer the search keys", () => {
+test("renderDashboard: a list search filters the queue, the header shows the prompt on its own line, the footer the search keys while editing", () => {
 	const tickets = [ticket("f", "01", "First widget"), ticket("f", "02", "Second thing"), ticket("g", "01", "Another widget")];
 	const state = { ...base, tickets, frontier: tickets, search: { query: "widget", scope: "global", feature: "f", editing: true, match: 0 } };
-	const frame = renderDashboard(state, { width: 160, height: 20 }).join("\n"); // 160: the six-tab header plus the prompt needs the room
+	const lines = renderDashboard(state, { width: 80, height: 20 }); // 80: the prompt's own line keeps it whole at any width (tui-polish/08)
+	const frame = lines.join("\n");
 
-	assert.match(frame, /\/ widget · global/); // the header shows the prompt while searching
+	assert.match(lines[1], /^\/ widget · global$/); // the header shows the prompt on its own line, not clipped off the tab labels
+	assert.doesNotMatch(lines[0], /widget/); // the tab-labels line stays as it was
 	assert.match(frame, /▾ f 0\/2 done · 2 next/); // the matching tickets' feature rows stay, counts of the whole feature
 	assert.match(frame, /● next #1  01 First widget/);
 	assert.match(frame, /● next #3  01 Another widget/); // matches from several features
 	assert.doesNotMatch(frame, /02 Second thing/); // a non-matching ticket leaves the list
-	assert.match(frame, /letters add to the query · backspace delete/); // the footer swaps in the search keys
+	assert.match(frame, /letters add to the query · backspace delete/); // the footer swaps in the search keys while editing
 	assert.match(frame, /q quits/); // the shared keys stay
+
+	// A kept search (enter stopped editing) keeps the prompt line but brings the tab's keys back: `q` quits again.
+	const kept = renderDashboard({ ...state, search: { ...state.search, editing: false } }, { width: 80, height: 20 }).join("\n");
+	assert.match(kept, /^\/ widget · global$/m);
+	assert.match(kept, /↑↓ move · ←→ fold · enter open/);
+	assert.doesNotMatch(kept, /letters add to the query/);
+	assert.doesNotMatch(kept, /·\/ widget · global/); // the prompt is its own line, not appended to the header
 
 	// A feature scope narrows to the feature captured when the prompt opened.
 	const scoped = renderDashboard(
 		{ ...state, search: { ...state.search, scope: "feature", feature: "f" } },
-		{ width: 160, height: 20 },
+		{ width: 80, height: 20 },
 	).join("\n");
-	assert.match(scoped, /\/ widget · feature f/);
+	assert.match(scoped, /^\/ widget · feature f$/m);
 	assert.match(scoped, /01 First widget/);
 	assert.doesNotMatch(scoped, /Another widget/);
 });
@@ -541,16 +550,21 @@ test("renderDashboard: a ticket-scoped search highlights the details' matches, a
 			what: "render the tab of the spec",
 			shift: ["### Shift 1 — pi opencode-go/glm-5.3 (medium)", "- Outcome: done rendering"],
 		},
-		search: { query: "render", scope: "ticket", feature: null, editing: false, match: 0 },
+		search: { query: "render", scope: "ticket", feature: null, editing: true, match: 0 },
 	};
-	const lines = renderDashboard(state, { width: 160, height: 24 }); // 160: the six-tab header plus the prompt needs the room
+	const lines = renderDashboard(state, { width: 80, height: 24 }); // 80: the prompt's own line keeps it whole at any width (tui-polish/08)
 	const text = lines.join("\n");
 
-	assert.match(text, /\/ render · ticket/); // the header shows the prompt
+	assert.match(lines[1], /^\/ render · ticket$/); // the header shows the prompt on its own line
 	assert.match(text, /Type: code/); // the first match ("Tabbed [render]ing") is at the top, all lines shown
 	assert.match(text, /What to build: \[render\] the tab of the spec/);
 	assert.match(text, /done \[render\]ing/); // every match in the details is bracketed
-	assert.match(lines.at(-2), /enter next match/); // the footer's details-search keys
+	assert.match(lines.at(-2), /enter next match/); // the footer's details-search keys while editing
+
+	// A kept search (enter stopped editing) brings the tab's keys back, the prompt line stays.
+	const kept = renderDashboard({ ...state, search: { ...state.search, editing: false } }, { width: 80, height: 24 }).join("\n");
+	assert.match(kept, /^\/ render · ticket$/m);
+	assert.doesNotMatch(kept, /enter next match/);
 
 	// enter's next match scrolls the details so that match's line is at the top.
 	const next = renderDashboard({ ...state, search: { ...state.search, match: 1 } }, { width: 160, height: 24 }).join("\n");

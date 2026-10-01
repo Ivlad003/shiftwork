@@ -331,6 +331,7 @@ function renderSized(state, height) {
 	const now = state.now ?? new Date();
 	const tab = TABS.includes(state.tab) ? state.tab : "queue";
 	const header = [headerLine(state, now, tab)];
+	if (state.search) header.push(searchLine(state));
 	if (state.notice) header.push(`» ${state.notice}`);
 	const footer = [footerKeys(state, tab), GLOBAL_KEYS];
 	const room = height - header.length - footer.length;
@@ -353,9 +354,9 @@ function renderSized(state, height) {
 	};
 }
 
-/** The footer's first line: the search prompt's keys while one is open, else the tab's. */
+/** The footer's first line: the search prompt's keys while its query is being edited (`search.editing`), else the tab's — a kept search keeps the tab's keys, so `q` quits again (tui-polish/08). */
 function footerKeys(state, tab) {
-	if (state.search) return state.search.scope === "ticket" ? SEARCH_KEYS.ticket : SEARCH_KEYS.list;
+	if (state.search?.editing) return state.search.scope === "ticket" ? SEARCH_KEYS.ticket : SEARCH_KEYS.list;
 	return TAB_KEYS[tab];
 }
 
@@ -468,6 +469,7 @@ function renderPlain(state) {
 	const now = state.now ?? new Date();
 	const tab = TABS.includes(state.tab) ? state.tab : "queue";
 	const lines = [headerLine(state, now, tab)];
+	if (state.search) lines.push(searchLine(state));
 	if (state.notice) lines.push(`» ${state.notice}`);
 	lines.push("");
 	if (state.details) lines.push(...renderDetails(state), "");
@@ -479,13 +481,17 @@ function renderPlain(state) {
 	return lines;
 }
 
-/** The header line: version, time, the six tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter, the search prompt while one is open (GitHub #3). */
+/** The header line: version, time, the six tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter. The search prompt, when one is open, gets its own line (GitHub #3, tui-polish/08). */
 function headerLine(state, now, tab) {
 	let line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${headerTabs(tab).text}`;
 	if (state.run?.live && state.run?.mode === "dark-factory") line = `${line} · dark-factory`;
 	if (state.featureFilter) line = `${line} · filter: ${state.featureFilter}`;
-	if (state.search) line = `${line} · / ${state.search.query ?? ""} · ${searchScopeLabel(state.search)}`;
 	return line;
+}
+
+/** The search prompt on its own header line (tui-polish/08): the tab labels' line is long already, so the query and scope must not be clipped off it. */
+function searchLine(state) {
+	return `/ ${state.search.query ?? ""} · ${searchScopeLabel(state.search)}`;
 }
 
 /** The search prompt's scope as the header shows it. */
