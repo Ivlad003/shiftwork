@@ -22,6 +22,9 @@ Usage:
 
 Run options:
   --once                 Work exactly one ticket
+  --ticket <feature>/<NN>
+                        Work exactly that ticket (implies --once; refused with the reason
+                        when it is not on the frontier; not with --feature or --parallel)
   --dry-run              Print the route of each frontier ticket; spend nothing
   --feature <slug>       Only tickets of this feature
   --model <provider/id>  Default model (else "model" in .pi/shiftwork.json)
@@ -156,6 +159,7 @@ async function run(argv) {
 		args: argv,
 		options: {
 			once: { type: "boolean" },
+			ticket: { type: "string" },
 			"dry-run": { type: "boolean" },
 			feature: { type: "string" },
 			model: { type: "string" },
@@ -170,6 +174,9 @@ async function run(argv) {
 	if (values.help) {
 		console.log(HELP);
 		return 0;
+	}
+	if (values.ticket && (values.feature || values.parallel !== undefined)) {
+		throw new Error("--ticket cannot be combined with --feature or --parallel: it works exactly one chosen ticket");
 	}
 	const root = values.dir ?? process.cwd();
 	const loaded = await loadConfig(root, process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
@@ -211,7 +218,7 @@ async function run(argv) {
 		workspace,
 		classifyTicket,
 		log: shiftLogger(root),
-		options: { once: values.once, feature: values.feature },
+		options: { once: values.once, feature: values.feature, ticket: values.ticket },
 	});
 
 	for (const t of summary.resolved) {

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,6 +18,15 @@ async function run(root, backend, options = {}) {
 
 async function ticketText(root, feature, file) {
 	return readFile(`${root}/.scratch/${feature}/issues/${file}`, "utf8");
+}
+
+/** A refused --ticket wrote nothing: the ticket file is unchanged, no claim, no run state. */
+async function assertNothingWritten(root, feature, file) {
+	const text = await ticketText(root, feature, file);
+	assert.doesNotMatch(text, /## Comments/);
+	assert.doesNotMatch(text, /### Shift/);
+	assert.equal(existsSync(join(root, ".scratch", ".claims")), false);
+	assert.equal(existsSync(join(root, ".pi", "shiftwork-run.json")), false);
 }
 
 test("a shift that makes the verify gate pass resolves the ticket with a report", async () => {
@@ -103,6 +114,68 @@ test("--once works exactly one ticket; the ticket's own Model overrides the defa
 	assert.equal(backend.shifts.length, 1);
 	assert.equal(backend.shifts[0].request.route.model, "other/m9");
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+});
+
+test("--ticket works exactly the chosen ticket, not the frontier order", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = fakeBackend([{ files: { "b.txt": "" } }]);
+
+	const summary = await run(root, backend, { ticket: "f/02" });
+
+	assert.equal(backend.shifts.length, 1);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["02"]);
+	assert.match(await ticketText(root, "f", "02-b.md"), /\*\*Status:\*\* resolved/);
+	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* ready-for-agent/);
+});
+
+test("--ticket refuses a blocked ticket with its reason, and nothing is claimed or written", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { blockedBy: "01", extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = fakeBackend([]);
+
+	await assert.rejects(run(root, backend, { ticket: "f/02" }), /--ticket f\/02 is not on the frontier: blocked by 01/);
+	assert.equal(backend.shifts.length, 0);
+	assertNothingWritten(root, "f", "02-b.md");
+});
+
+test("--ticket refuses a resolved ticket with its reason, and nothing is claimed or written", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { status: "resolved" }),
+	});
+	const backend = fakeBackend([]);
+
+	await assert.rejects(run(root, backend, { ticket: "f/01" }), /--ticket f\/01 is not on the frontier: status resolved/);
+	assert.equal(backend.shifts.length, 0);
+	assertNothingWritten(root, "f", "01-a.md");
+});
+
+test("--ticket refuses a ticket claimed by a live runner with its reason", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+	});
+	const backend = fakeBackend([]);
+	const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+	try {
+		const tracker = openTracker(root);
+		const t01 = (await tracker.list()).find((t) => t.number === "01");
+		await tracker.claim(t01, { pid: holder.pid });
+
+		await assert.rejects(
+			run(root, backend, { ticket: "f/01" }),
+			new RegExp(`--ticket f/01 is not on the frontier: claimed by pid ${holder.pid}`),
+		);
+	} finally {
+		holder.kill();
+	}
+	assert.equal(backend.shifts.length, 0);
+	// The refused run appended no shift report and wrote no run state; the claim stays as it was.
+	assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /### Shift/);
+	assert.equal(existsSync(join(root, ".pi", "shiftwork-run.json")), false);
 });
 
 test("nothing to do exits 0 and the claim is always released", async () => {

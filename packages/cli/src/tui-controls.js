@@ -58,7 +58,7 @@ export function reduceKey(state, key) {
  */
 export function createTuiControls({ root, start, stop, plan, onChange, onQuit } = {}) {
 	const effects = {
-		"start-runner": start ?? ((root_, effect) => startDetachedRunner(root_, { feature: effect.feature })),
+		"start-runner": start ?? ((root_, effect) => startDetachedRunner(root_, { feature: effect.feature, ticket: effect.ticket })),
 		"stop-runner": stop ?? writeStopFile,
 		"dry-run": plan ?? ((root_, effect) => collectDryRunLines(root_, { feature: effect.feature })),
 	};
@@ -126,7 +126,7 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
  * a stale STOP file is removed first, and the run state is claimed at once so the
  * dashboard is live before the runner's own first write. Refused while a runner is live.
  */
-export async function startDetachedRunner(root, { feature, bin } = {}) {
+export async function startDetachedRunner(root, { feature, ticket, bin } = {}) {
 	const runState = openRunState(root);
 	const current = await runState.read();
 	if (current?.live) {
@@ -142,7 +142,7 @@ export async function startDetachedRunner(root, { feature, bin } = {}) {
 	await mkdir(join(root, "logs"), { recursive: true });
 	const logFile = join(root, "logs", `runner-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
 	const log = openSync(logFile, "a");
-	const args = [cli, "run", ...(feature ? ["--feature", feature] : [])];
+	const args = [cli, "run", ...(feature ? ["--feature", feature] : []), ...(ticket ? ["--ticket", ticket] : [])];
 	const child = spawn(process.execPath, args, { cwd: root, detached: true, stdio: ["ignore", log, log] });
 	child.unref();
 	await runState.update({

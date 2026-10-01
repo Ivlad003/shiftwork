@@ -11,6 +11,7 @@ import { noRunState, openRunState } from "./run-state.js";
 const NEEDS_INFO = "needs-info";
 const RESOLVED = "resolved";
 const READY = "ready-for-agent";
+const CLAIMED = "claimed";
 const STOP_FILE = "STOP";
 const WAIT_STEP_MS = 60_000;
 /** Only the runner's own shift reports: "### Shift N — <backend> <model> (<thinking>)". */
@@ -48,6 +49,37 @@ export function shouldReview(config, ticket) {
 }
 
 /**
+ * Parse the `--ticket` value `<feature>/<NN>` into its feature and padded number.
+ * Pure; throws on any other shape.
+ */
+export function parseTicketSpec(spec) {
+	const match = /^(.+)\/(\d+)$/.exec(String(spec ?? ""));
+	if (!match) throw new Error(`ticket spec ${JSON.stringify(spec)} is not <feature>/<NN>`);
+	return { feature: match[1], number: String(Number(match[2])).padStart(2, "0") };
+}
+
+/**
+ * The frontier ticket named by `options.ticket` (`<feature>/<NN>`), or a throw with the
+ * reason it is refused (`blocked by 02`, `status resolved`, `claimed by pid 123`): a ticket
+ * that is not on the frontier is refused before anything is claimed or written.
+ * A ticket whose claim is stale is on the frontier: the tracker reopens it.
+ */
+async function chosenTicket(tracker, spec) {
+	const { feature, number } = parseTicketSpec(spec);
+	const tickets = await tracker.list();
+	const ticket = tickets.find((t) => t.feature === feature && t.number === number);
+	if (!ticket) throw new Error(`--ticket ${spec} is not on the frontier: no such ticket`);
+	const claim = (await tracker.activeClaims()).find((c) => c.ticket.feature === feature && c.ticket.number === number);
+	if (claim) throw new Error(`--ticket ${spec} is not on the frontier: claimed by pid ${claim.pid}`);
+	if (ticket.status !== READY && ticket.status !== CLAIMED) {
+		throw new Error(`--ticket ${spec} is not on the frontier: status ${ticket.status}`);
+	}
+	const blockers = ticket.blockedBy.filter((n) => tickets.find((t) => t.feature === feature && t.number === n)?.status !== RESOLVED);
+	if (blockers.length) throw new Error(`--ticket ${spec} is not on the frontier: blocked by ${blockers.join(", ")}`);
+	return ticket;
+}
+
+/**
  * Work the frontier until nothing is left (or one ticket with `once`).
  * Every dependency is injected: tracker, backend, verify, log, classify, classifyTicket, clock, cooldowns.
  */
@@ -72,6 +104,9 @@ export async function runFrontier({
 	// A tracker ticket is identified by feature + number: the OpenSpec tracker shares
 	// one .shiftwork.md path between all tasks of a change.
 	const seenKey = (t) => (t.number === undefined ? t.path : `${t.feature}/${t.number}`);
+	// A chosen ticket (`options.ticket`, `<feature>/<NN>`) is checked before anything is claimed
+	// or written: one that is not on the frontier is refused with its reason (spec story 5).
+	const chosen = options.ticket ? await chosenTicket(tracker, options.ticket) : null;
 	const time = clock ?? {
 		now: () => new Date(),
 		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -113,7 +148,9 @@ export async function runFrontier({
 		}
 	};
 	const frontierPage = async () =>
-		(await tracker.frontier()).filter((t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature));
+		(await tracker.frontier())
+			.filter((t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature))
+			.filter((t) => !chosen || (t.feature === chosen.feature && t.number === chosen.number));
 
 	await state.update({
 		pid: process.pid,
@@ -125,11 +162,11 @@ export async function runFrontier({
 		summary: { resolved: 0, needsInfo: 0, reopened: 0 },
 	});
 
-	// `once` is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
+	// `once` (and a chosen `ticket`) is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
 	// One worker failing is not the end of the run's bookkeeping: the pool lets the
 	// others settle, the run state is finished, and only then the error propagates.
 	let failure = null;
-	if (parallel > 1 && !options.once) failure = await runInPool();
+	if (parallel > 1 && !options.once && !chosen) failure = await runInPool();
 	else
 		for (;;) {
 			if (checkStop(root)) {
@@ -155,7 +192,8 @@ export async function runFrontier({
 			}
 			recordOutcome(ticket, outcome);
 			await state.update({ summary: counts() });
-			if (options.once) break;
+			// A chosen ticket is worked once however the run ends: the loop stops after it.
+			if (options.once || chosen) break;
 		}
 
 	if (!summary.stoppedReason && checkStop(root)) {

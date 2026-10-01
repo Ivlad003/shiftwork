@@ -127,3 +127,50 @@ test("parallel tickets touching one file land: a conflicting landing is redone o
 	assert.doesNotMatch(winner, /Landing conflict/);
 	assert.doesNotMatch(winner, /### Shift 2/);
 });
+
+test("run --ticket works exactly the chosen ticket end to end", { timeout: 120_000 }, async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-e2e-ticket-"));
+	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
+	await mkdir(join(root, ".pi"));
+	for (const [number, file] of [
+		["01", "01-first.md"],
+		["02", "02-second.md"],
+	]) {
+		await writeFile(
+			join(root, ".scratch", "demo", "issues", file),
+			`# ${number}: Ticket ${number}\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** \`test -f ${number}.txt\`\n`,
+		);
+	}
+	await writeFile(
+		join(root, ".pi", "shiftwork.json"),
+		JSON.stringify({ model: "scripted/s1", thinking: "off", pi: { args: ["--offline", "-ns", "-ne", "-e", fixture] } }),
+	);
+	const script = [{ tool: { name: "write", args: { path: "02.txt", content: "hi\n" } } }, { text: "Wrote 02.txt." }];
+
+	const { stdout } = await promisify(execFile)(process.execPath, [bin, "run", "--ticket", "demo/02", "--dir", root], {
+		env: { ...process.env, PI_CODING_AGENT_DIR: await mkdtemp(join(tmpdir(), "sw-e2e-home-")), SHIFTWORK_SCRIPT: JSON.stringify(script) },
+	});
+
+	assert.match(stdout, /✔ demo\/02 resolved/);
+	assert.doesNotMatch(stdout, /demo\/01/);
+	const second = await readFile(join(root, ".scratch", "demo", "issues", "02-second.md"), "utf8");
+	assert.match(second, /\*\*Status:\*\* resolved/);
+	const first = await readFile(join(root, ".scratch", "demo", "issues", "01-first.md"), "utf8");
+	assert.match(first, /\*\*Status:\*\* ready-for-agent/);
+	assert.doesNotMatch(first, /### Shift/);
+});
+
+test("run --ticket refuses --feature and --parallel as usage errors; --help lists --ticket", async () => {
+	const help = await promisify(execFile)(process.execPath, [bin, "run", "--help"]);
+	assert.match(help.stdout, /--ticket <feature>\/<NN>/);
+
+	const root = await mkdtemp(join(tmpdir(), "sw-e2e-usage-"));
+	for (const extra of [["--feature", "demo"], ["--parallel", "2"]]) {
+		const error = await promisify(execFile)(process.execPath, [bin, "run", "--ticket", "demo/01", ...extra, "--dir", root]).then(
+			() => null,
+			(e) => e,
+		);
+		assert.equal(error?.code, 1);
+		assert.match(error?.stderr, /--ticket cannot be combined with/);
+	}
+});

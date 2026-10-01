@@ -10,6 +10,7 @@ import { collectDryRunLines } from "../src/dry-run.js";
 import { createTuiControls, reduceKey, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
 
 const stubRunner = fileURLToPath(new URL("./fixtures/stub-runner.js", import.meta.url));
+const argvRunner = fileURLToPath(new URL("./fixtures/argv-runner.js", import.meta.url));
 
 async function waitFor(check, timeoutMs = 15_000) {
 	const deadline = Date.now() + timeoutMs;
@@ -201,6 +202,21 @@ test("d scopes the dry-run to the feature filter", async () => {
 	await controls.handleKey("d");
 	assert.match(controls.view.dryRun.lines.join("\n"), /other\/01 {2}type=docs/);
 	assert.doesNotMatch(controls.view.dryRun.lines.join("\n"), /demo\/07/);
+});
+
+test("startDetachedRunner passes --ticket through to the spawned runner", async () => {
+	const root = await repo({ "demo/07-widget.md": ticketBody });
+	const res = await startDetachedRunner(root, { ticket: "demo/07", bin: argvRunner });
+	assert.equal(res.started, true);
+
+	const argv = await waitFor(async () => {
+		try {
+			return JSON.parse(await readFile(join(root, "argv.json"), "utf8"));
+		} catch {
+			return false;
+		}
+	});
+	assert.deepEqual(argv, ["run", "--ticket", "demo/07"]);
 });
 
 test("q fires onQuit; a failing effect becomes a notice, not a crash", async () => {
