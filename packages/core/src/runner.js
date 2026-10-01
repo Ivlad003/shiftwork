@@ -562,9 +562,25 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		let redoNext = false;
 		if (workspace && decision.action === "resolve") {
 			let landed = await workspace.land(ticket);
-			if (!landed.ok && landed.rebase) {
+			// A parallel landing can move the target again while the gate re-runs on the rebased
+			// branch: keep rebasing, re-verifying and landing while it moves, up to `landRetries`
+			// rounds (default 5). In a parallel run every `land` here goes through the queue in
+			// withLandingQueue, so the rounds stay one-landing-at-a-time like any other landing.
+			let rebases = 0;
+			while (!landed.ok && landed.rebase) {
+				if (rebases >= (config.landRetries ?? 5)) {
+					// The target moved once per round of the whole budget: the branch is kept, a human lands it.
+					const branch = (await workspace.keep(ticket)).branch;
+					decision = {
+						action: NEEDS_INFO,
+						reason: `the target kept moving (${rebases} rebases); branch ${branch} kept — land it with shiftwork run --ticket ${ticket.feature}/${ticket.number} or merge it by hand`,
+					};
+					landed = null;
+					break;
+				}
 				// A parallel landing moved the target: the branch is rebased onto it in its worktree,
 				// and the gate must pass on that integrated state before the branch lands (story 4).
+				rebases++;
 				const integrated = await verify(ticket.verify, cwd);
 				const failed = integrated.ok ? null : integrated.results.find((r) => r.code !== 0);
 				notes.push(
@@ -572,11 +588,12 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 						integrated.ok ? "passed" : `failed at \`${failed?.cmd}\` (${failed?.code})`
 					}`,
 				);
-				if (integrated.ok) landed = await workspace.land(ticket);
-				else {
+				if (!integrated.ok) {
 					decision = { action: NEEDS_INFO, reason: `verify gate failed on the branch rebased onto ${landed.rebase} (\`${failed?.cmd}\`)` };
 					landed = null;
+					break;
 				}
+				landed = await workspace.land(ticket);
 			}
 			if (landed) {
 				notes.push(`- Landed: ${landed.message}`);

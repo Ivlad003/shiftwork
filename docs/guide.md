@@ -99,6 +99,7 @@ A ticket without a `Type` gets `defaultType`, unless Jev (a small classifier mod
 | `cooldown` | How long a provider rests after a limit when it gives no reset time: `{ "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" }`. |
 | `maxAttempts` | Failed Verify runs before a ticket becomes `needs-info` (default 3). |
 | `verifyTimeoutMin` | Minutes one Verify command may run before it is killed, with everything it started, and the gate fails (default 10). E.g. `"verifyTimeoutMin": 20` for slow test suites. |
+| `landRetries` | While a parallel landing keeps moving the target, the runner rebases onto it, re-runs Verify and lands again, this many rounds (default 5). Past it the ticket goes to `needs-info`, the branch kept. |
 | `parallel` | How many frontier tickets the runner works at once (default 1). Above 1 needs `"worktree": { "enabled": true }`: every parallel ticket gets its own worktree. |
 | `concurrency` | Caps the shifts running at once per provider, e.g. `{ "ollama": 1 }` for a single GPU. A full provider is skipped like a cooling one. The keys are the cooldown keys: `ollama`, `claude`, `opencode:opencode-go`. |
 

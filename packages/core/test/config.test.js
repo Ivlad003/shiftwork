@@ -274,3 +274,13 @@ test("verifyTimeoutMin must be a positive number of minutes", () => {
 	assert.throws(() => validateConfig({ ...base, verifyTimeoutMin: 0 }), /verifyTimeoutMin/);
 	assert.throws(() => validateConfig({ ...base, verifyTimeoutMin: "20m" }), /verifyTimeoutMin/);
 });
+
+test("landRetries defaults to 5; negative or non-integer fails", () => {
+	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] } } };
+	assert.equal(validateConfig(base).landRetries, 5);
+	assert.equal(validateConfig({ ...base, landRetries: 0 }).landRetries, 0);
+	assert.equal(validateConfig({ ...base, landRetries: 9 }).landRetries, 9);
+	assert.throws(() => validateConfig({ ...base, landRetries: -1 }), /landRetries: must be a non-negative integer/);
+	assert.throws(() => validateConfig({ ...base, landRetries: 2.5 }), /landRetries: must be a non-negative integer/);
+	assert.throws(() => validateConfig({ ...base, landRetries: "5" }), /landRetries: must be a non-negative integer/);
+});

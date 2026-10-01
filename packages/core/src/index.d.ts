@@ -133,8 +133,13 @@ export interface GitHub {
 }
 
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
-export declare function loadConfig(root: string, userDir?: string): Promise<Record<string, unknown>>;
-export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
+/** The validated `.pi/shiftwork.json`: the knobs typed where the runner reads them; the rest stays `Record<string, unknown>`. */
+export interface ShiftworkConfig extends Record<string, unknown> {
+	/** Rebase-and-reverify rounds a landing takes while a parallel landing keeps moving the target (default 5). */
+	landRetries: number;
+}
+export declare function loadConfig(root: string, userDir?: string): Promise<ShiftworkConfig>;
+export declare function validateConfig(input: Record<string, unknown>): ShiftworkConfig;
 export declare const THINKING_LEVELS: readonly string[];
 /** Short budget-limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`) → budget fields. */
 export declare const LIMIT_NAMES: Readonly<Record<string, keyof Budget>>;

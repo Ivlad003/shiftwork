@@ -10,6 +10,7 @@ const DEFAULTS = {
 	thinking: "medium",
 	maxAttempts: 3,
 	maxHandoffs: 3,
+	landRetries: 5,
 	verifyTimeoutMin: 10,
 	softLimitPct: 80,
 	crossTier: "none",
@@ -66,6 +67,7 @@ export function validateConfig(input) {
 		fail("verifyTimeoutMin", "must be a number of minutes > 0");
 	}
 	if (!Number.isInteger(config.maxHandoffs) || config.maxHandoffs < 0) fail("maxHandoffs", "must be a non-negative integer");
+	if (!Number.isInteger(config.landRetries) || config.landRetries < 0) fail("landRetries", "must be a non-negative integer");
 	if (typeof config.softLimitPct !== "number" || config.softLimitPct < 0 || config.softLimitPct > 100) {
 		fail("softLimitPct", "must be a number between 0 and 100");
 	}

@@ -306,6 +306,104 @@ test("a landing whose target moved fails needs-info when the gate fails on the r
 	assert.match(text, /\*\*Status:\*\* needs-info/);
 });
 
+test("a target that keeps moving is re-verified and landed again until it stands still", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	const lands = [
+		{ ok: false, rebase: "1111111", message: "the target moved to 1111111: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: false, rebase: "2222222", message: "the target moved to 2222222: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: true, message: "merged shiftwork/f-01 into main" },
+	];
+	let gates = 0;
+	const verify = async (cmds, cwd) => {
+		gates++;
+		return fileVerify()(cmds, cwd);
+	};
+	const workspace = fakeWorkspace({ land: () => lands.shift() });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(gates, 3, "the gate re-runs on every rebased worktree");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Target moved to 1111111: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Target moved to 2222222: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Landed: merged shiftwork\/f-01 into main/);
+});
+
+test("a gate that fails on a later rebase still gives the rebased-branch reason", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "v1" } }]);
+	// The gate passes on the branch and on the first rebased state, then fails on the second.
+	const lands = [
+		{ ok: false, rebase: "1111111", message: "the target moved to 1111111: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: false, rebase: "2222222", message: "the target moved to 2222222: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+	];
+	let gates = 0;
+	const verify = async (cmds) =>
+		++gates === 3 ? { ok: false, results: [{ cmd: cmds[0], code: 1, outputTail: "" }] } : { ok: true, results: [{ cmd: cmds[0], code: 0 }] };
+	const workspace = fakeWorkspace({ land: () => lands.shift() });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
+
+	assert.equal(gates, 3);
+	assert.equal(summary.needsInfo[0].reason, "verify gate failed on the branch rebased onto 2222222 (`done.txt`)");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Target moved to 1111111: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Target moved to 2222222: branch rebased onto it, verify gate re-run: failed at `done\.txt` \(1\)/);
+});
+
+test("a target that never stops moving gives up after landRetries rounds and keeps the branch", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	let lands = 0;
+	const moved = () => ({ ok: false, rebase: "abc1234", message: "the target moved to abc1234: branch shiftwork/f-01 rebased onto it; re-verify and land again" });
+	const workspace = fakeWorkspace({ land: () => (lands++, moved()) });
+	let gates = 0;
+	const verify = async (cmds, cwd) => {
+		gates++;
+		return fileVerify()(cmds, cwd);
+	};
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
+
+	assert.equal(lands, 6, "the first landing plus one more per round");
+	assert.equal(gates, 6, "the initial gate plus one re-run per round");
+	assert.equal(
+		summary.needsInfo[0].reason,
+		"the target kept moving (5 rebases); branch shiftwork/f-01 kept — land it with shiftwork run --ticket f/01 or merge it by hand",
+	);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.equal((text.match(/- Target moved to abc1234/g) ?? []).length, 5, "one note per round");
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+});
+
+test("landRetries: 0 stops at the first move of the target without re-verifying", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }]);
+	let lands = 0;
+	let gates = 0;
+	const verify = async (cmds, cwd) => {
+		gates++;
+		return fileVerify()(cmds, cwd);
+	};
+	const workspace = fakeWorkspace({
+		land: () => (lands++, { ok: false, rebase: "abc1234", message: "the target moved to abc1234: branch shiftwork/f-01 rebased onto it; re-verify and land again" }),
+	});
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config: { ...config, landRetries: 0 }, workspace });
+
+	assert.equal(lands, 1, "a single try: the first landing is the only one");
+	assert.equal(gates, 1, "the gate never re-runs");
+	assert.equal(
+		summary.needsInfo[0].reason,
+		"the target kept moving (0 rebases); branch shiftwork/f-01 kept — land it with shiftwork run --ticket f/01 or merge it by hand",
+	);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.doesNotMatch(text, /- Target moved/);
+	assert.match(text, /- Branch kept: shiftwork\/f-01/);
+});
+
 test("a conflicting landing gets one fix-forward shift from the new target", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
 	const backend = fakeBackend([{ files: { "done.txt": "v1" } }, { files: { "done.txt": "v2" } }]);
@@ -1962,6 +2060,39 @@ test("parallel landings go through one queue: one landing at a time", async () =
 	// Parallel tickets finish in their own time: the pool records them as they settle.
 	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
 	assert.equal(maxInLanding, 1, "only one landing runs at a time");
+});
+
+test("a parallel run keeps re-verifying and landing while the target keeps moving", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"f/02-b.md": ticket("02", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	// Either ticket's shift may start first: both entries satisfy both tickets' gates.
+	const backend = fakeBackend([{ files: { "a.txt": "", "b.txt": "" } }, { files: { "a.txt": "", "b.txt": "" } }]);
+	// Ticket 01's landing keeps finding the target moved (02 lands through the same queue);
+	// the runner rebases, re-verifies and lands again until the target stands still.
+	const lands = [
+		{ ok: false, rebase: "1111111", message: "the target moved to 1111111: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: false, rebase: "2222222", message: "the target moved to 2222222: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: true, message: "merged shiftwork/f-01 into main" },
+	];
+	const workspace = fakeWorkspace({ land: (t) => (t.number === "01" ? lands.shift() : { ok: true, message: "merged" }) });
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config,
+		workspace,
+		options: { parallel: 2 },
+	});
+
+	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "02"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Target moved to 1111111: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Target moved to 2222222: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Landed: merged shiftwork\/f-01 into main/);
 });
 
 test("parallel: 2 lists both workers in the run state while they run", async () => {

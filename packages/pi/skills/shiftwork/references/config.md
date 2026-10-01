@@ -9,6 +9,7 @@
 - `budgets` — `default`, `tiers.<name>`, `models.<provider/model>` and `ticket` (written by a `**Budget:**` line): token, cost, turn and context limits. Past a limit, Shiftwork hands the shift to another model.
 - `unlimited` — `true` or a list of limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`), lifts every limit or only those. Also accepted on `tiers.<name>` and `models.<provider/model>`, where it lifts shift limits only: a shift there runs with the union of the top-level, tier and model lists lifted, while the ticket's own `Budget:` line still caps it (only the top-level `unlimited` lifts ticket budgets).
 - `maxAttempts`, `maxHandoffs`, `softLimitPct`, `crossTier`, `allowInPlace`: how hard the runner tries before giving up on a ticket and whether handoffs stay in-process.
+- `landRetries` (default 5): while a parallel landing keeps moving the target, the runner rebases onto it, re-runs Verify and lands again, this many rounds; past it the ticket goes to `needs-info` with the branch kept.
 - `cooldown`: `rate`/`usage`/`quota`/`server` durations. All workers share one provider's cooldown; a missing CLI or a stopped Ollama server makes a backend unavailable instead.
 - `skillGroups` / `skillSources`: named groups of skill paths. A tier's `skills` narrows the skills advertised to its models; `preload` forces some of them into context.
 - `jev`: `{ enabled, model }` — the ticket classifier for tickets without `**Type:**`.
