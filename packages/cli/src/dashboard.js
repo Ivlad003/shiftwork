@@ -220,10 +220,39 @@ function logDetail(event) {
  * output and the plain-text fallback stay colourless.
  */
 export function renderDashboard(state, { width, height, color = false } = {}) {
-	const frame = height == null ? { lines: renderPlain(state), cursor: -1, redRows: [] } : renderSized(state, height);
+	return dashboardLayout(state, { width, height, color }).lines;
+}
+
+/**
+ * One dashboard frame plus its hit map (GitHub #5): `{ lines, rows, tabs }`. `lines` is
+ * exactly what `renderDashboard` returns. `rows` maps each visible list row of the current
+ * tab to the screen line it sits on (`{ y, index }`, `index` the row's index in the tab's
+ * rows, so the mouse layer can turn a click at `y` into `{ type: "click", row: index }`);
+ * `tabs` is the column span of each tab label on line 0 (`{ tab, x0, x1 }`, visible columns,
+ * colour codes aside). Both are clipped like the lines (a row past the height, a label past
+ * the width is not a hit), and a scrolled list's `index` counts from the top of the tab's
+ * rows, not the window. A plain frame (no `height`: `--once`, the fallback) has no hit map.
+ */
+export function dashboardLayout(state, { width, height, color = false } = {}) {
+	if (height == null) {
+		const lines = fitLines(renderPlain(state), width);
+		return { lines: color ? paint(lines, { cursor: -1, redRows: [] }, width) : lines, rows: [], tabs: [] };
+	}
+	const frame = renderSized(state, height);
+	const lines = fitLines(frame.lines, width);
 	const max = width ?? Infinity;
-	const lines = max === Infinity ? frame.lines : frame.lines.map((line) => fit(line, max));
-	return color ? paint(lines, frame, max) : lines;
+	const tabs = max === Infinity ? frame.tabs : frame.tabs.filter((t) => t.x0 < max).map((t) => ({ ...t, x1: Math.min(t.x1, max) }));
+	return {
+		lines: color ? paint(lines, frame, max) : lines,
+		rows: frame.rows.filter((row) => row.y < lines.length),
+		tabs,
+	};
+}
+
+/** Clip every line to `width` columns; no `width` leaves the frame as it is. */
+function fitLines(lines, width) {
+	const max = width ?? Infinity;
+	return max === Infinity ? lines : lines.map((line) => fit(line, max));
 }
 
 /** Sprinkle SGR codes over an already-clipped frame: inline tokens, red cooldown rows, then reverse video over the cursor row, padded across the width. */
@@ -268,10 +297,13 @@ function renderSized(state, height) {
 	const lines = [...header, ...(blank ? [""] : []), ...body.lines, ...footer];
 	const cut = lines.length <= height ? lines : lines.slice(0, Math.max(0, height));
 	const offset = header.length + blank;
+	const visible = (i) => offset + i < cut.length; // a row past the cut height is not a hit
 	return {
 		lines: cut,
-		cursor: body.cursor >= 0 && offset + body.cursor < cut.length ? offset + body.cursor : -1,
-		redRows: body.redRows.filter((i) => offset + i < cut.length).map((i) => offset + i),
+		cursor: body.cursor >= 0 && visible(body.cursor) ? offset + body.cursor : -1,
+		redRows: body.redRows.filter(visible).map((i) => offset + i),
+		rows: body.rows.filter((row) => visible(row.i)).map((row) => ({ y: offset + row.i, index: row.index })),
+		tabs: tabSpans(now, tab),
 	};
 }
 
@@ -283,12 +315,15 @@ function renderSized(state, height) {
 function tabBody(state, tab, height, now) {
 	if (height <= 0) return { lines: [], cursor: -1, redRows: [] };
 	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0, ...(state.cursor ?? {}) };
-	const plain = (lines) => ({ lines: lines.slice(0, height), cursor: -1, redRows: [] });
+	const plain = (lines) => ({ lines: lines.slice(0, height), cursor: -1, redRows: [], rows: [] });
+	/** The hit rows of a list window: each of its lines is one row of the tab's rows, from `start`. */
+	const hitRows = (window, shift = 0) => window.lines.map((_, j) => ({ i: shift + j, index: window.start + j }));
 	/** A tab whose rows sit under a one-line head: the cursor row index shifts by one. */
 	const underHead = (head, window) => ({
 		lines: [...head, ...window.lines].slice(0, height),
 		cursor: window.cursor >= 0 ? window.cursor + 1 : -1,
 		redRows: [],
+		rows: hitRows(window, head.length),
 	});
 	switch (tab) {
 		case "queue": {
@@ -297,7 +332,7 @@ function tabBody(state, tab, height, now) {
 			if (!rows.length) return plain(["Tickets: none (.scratch/<feature>/issues/*.md)"]);
 			const at = clampCursor(cursor.queue, rows.length);
 			const window = scrolled(renderQueueRows(state, at), at, height);
-			return { lines: window.lines, cursor: window.cursor, redRows: [] };
+			return { lines: window.lines, cursor: window.cursor, redRows: [], rows: hitRows(window) };
 		}
 		case "resolved": {
 			// The Queue's fully resolved features (GitHub #2), same rows, same cursor and fold.
@@ -306,7 +341,7 @@ function tabBody(state, tab, height, now) {
 			if (!rows.length) return plain(["Resolved: none"]);
 			const at = clampCursor(cursor.resolved, rows.length);
 			const window = scrolled(renderQueueRows(state, at, { resolved: "only" }), at, height);
-			return { lines: window.lines, cursor: window.cursor, redRows: [] };
+			return { lines: window.lines, cursor: window.cursor, redRows: [], rows: hitRows(window) };
 		}
 		case "agents": {
 			const workers = state.run?.workers ?? [];
@@ -323,7 +358,7 @@ function tabBody(state, tab, height, now) {
 			const rows = cooldowns.map((c, i) => `${i === at ? ">" : " "} ${c.provider} (${c.kind ?? "limit"})  ${formatAge(leftMs(c, now))} left`);
 			const window = scrolled(rows, at, height - 1);
 			const lines = ["Cooldowns:", ...window.lines].slice(0, height);
-			return { lines, cursor: window.cursor >= 0 ? window.cursor + 1 : -1, redRows: lines.slice(1).map((_, i) => i + 1) };
+			return { lines, cursor: window.cursor >= 0 ? window.cursor + 1 : -1, redRows: lines.slice(1).map((_, i) => i + 1), rows: hitRows(window, 1) };
 		}
 		case "log": {
 			const log = state.log;
@@ -352,10 +387,10 @@ function clampCursor(cursor, length) {
 
 /** The window of `rows` that keeps row `at` (the cursor) visible, plus the cursor's index in that window. */
 function scrolled(rows, at, max) {
-	if (max <= 0) return { lines: [], cursor: -1 };
-	if (rows.length <= max) return { lines: rows, cursor: at };
+	if (max <= 0) return { lines: [], cursor: -1, start: 0 };
+	if (rows.length <= max) return { lines: rows, cursor: at, start: 0 };
 	const start = Math.min(Math.max(0, at - max + 1), rows.length - max);
-	return { lines: rows.slice(start, start + max), cursor: at - start };
+	return { lines: rows.slice(start, start + max), cursor: at - start, start };
 }
 
 // --- The plain frame: every tab's section, unbounded (--once, the fallback) ---
@@ -377,10 +412,33 @@ function renderPlain(state) {
 
 /** The header line: version, time, the six tabs (the open one bracketed), `dark-factory` while such a runner is live, the feature filter. */
 function headerLine(state, now, tab) {
-	const tabs = TABS.map((t, i) => `${t === tab ? "[" : ""}${i + 1} ${TAB_LABELS[t]}${t === tab ? "]" : ""}`).join("  ");
-	let line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${tabs}`;
+	let line = `shiftwork tui ${VERSION} · ${stamp(now)} · ${headerTabs(tab).text}`;
 	if (state.run?.live && state.run?.mode === "dark-factory") line = `${line} · dark-factory`;
 	return state.featureFilter ? `${line} · filter: ${state.featureFilter}` : line;
+}
+
+/** The header's tab labels joined for display: `1 Queue  2 Agents  …`, the open one bracketed. */
+function headerTabs(tab) {
+	const labels = TABS.map((t, i) => `${t === tab ? "[" : ""}${i + 1} ${TAB_LABELS[t]}${t === tab ? "]" : ""}`);
+	const parts = [];
+	const spans = [];
+	let x = 0;
+	labels.forEach((label, i) => {
+		if (i) {
+			parts.push("  ");
+			x += 2;
+		}
+		spans.push({ tab: TABS[i], x0: x, x1: x + label.length });
+		parts.push(label);
+		x += label.length;
+	});
+	return { text: parts.join(""), spans };
+}
+
+/** Where each tab label sits on the header line (line 0): its span shifted past the version/time prefix. */
+function tabSpans(now, tab) {
+	const prefix = `shiftwork tui ${VERSION} · ${stamp(now)} · `.length;
+	return headerTabs(tab).spans.map((span) => ({ tab: span.tab, x0: prefix + span.x0, x1: prefix + span.x1 }));
 }
 
 // --- The Queue tab: feature folders and their tickets, the cursor row marked ---

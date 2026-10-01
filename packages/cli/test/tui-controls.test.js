@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { openRunState, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "../src/dry-run.js";
-import { createTuiControls, decodeKeys, githubRows, queueRows, reduceKey, resolvedRows, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
+import { createTuiControls, decodeKeys, githubRows, mouseAction, queueRows, reduceKey, reduceMouse, resolvedRows, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
 
 const stubRunner = fileURLToPath(new URL("./fixtures/stub-runner.js", import.meta.url));
 const argvRunner = fileURLToPath(new URL("./fixtures/argv-runner.js", import.meta.url));
@@ -524,6 +524,77 @@ test("reducer: n's start effect is wired through the controls like r's", async (
 	assert.deepEqual(started, [{ type: "start-runner", feature: null, ticket: "demo/07" }]);
 	assert.equal(controls.view.tab, "queue"); // the tabbed view state survives the round-trip
 	assert.deepEqual(controls.view.cursor, { queue: 1, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0 });
+});
+
+// --- The mouse: clicks and the wheel (GitHub #5) ---
+
+test("reducer: a mouse click on a tab label switches tabs; on a row it moves the cursor, a second click on the cursor row opens details", () => {
+	const d = frame(); // queue: 6 rows — demo folder, demo/01–03, other folder, other/01
+	assert.equal(reduceMouse(idle, { type: "click", tab: "log" }, d).state.tab, "log");
+	assert.equal(reduceMouse(idle, { type: "click", tab: "nope" }, d).state.tab, undefined); // an unknown tab is ignored
+
+	let state = reduceMouse(idle, { type: "click", row: 2 }, d).state; // demo/02
+	assert.equal(state.cursor.queue, 2);
+	assert.equal(state.details, null);
+	state = reduceMouse(state, { type: "click", row: 2 }, d).state; // the row already under the cursor acts as enter
+	assert.equal(state.details, "demo/02");
+	state = reduceMouse(state, { type: "click", row: 0 }, d).state; // a click on another row just moves the cursor
+	assert.equal(state.cursor.queue, 0);
+	assert.equal(state.details, "demo/02");
+
+	const off = reduceMouse(idle, { type: "click", row: 99 }, d); // a row off the list is ignored
+	assert.deepEqual(off.effects, []);
+	assert.equal(off.state.cursor.queue, 0);
+	assert.equal(off.state.details, null);
+});
+
+test("reducer: the wheel moves the cursor by delta rows, clamped at both ends", () => {
+	const d = frame(); // 6 queue rows
+	let state = reduceMouse(idle, { type: "wheel", delta: 3 }, d).state;
+	assert.equal(state.cursor.queue, 3);
+	state = reduceMouse(state, { type: "wheel", delta: -2 }, d).state;
+	assert.equal(state.cursor.queue, 1);
+	state = reduceMouse(state, { type: "wheel", delta: -99 }, d).state;
+	assert.equal(state.cursor.queue, 0); // clamped at the first row
+	state = reduceMouse(state, { type: "wheel", delta: 99 }, d).state;
+	assert.equal(state.cursor.queue, 5); // clamped at the last row
+	assert.equal(reduceMouse(idle, { type: "wheel", delta: 3 }, {}).state.cursor.queue, 0); // an empty tab has no rows
+});
+
+test("mouseAction: a click on a tab label or a list row, the wheel; everything else maps to null", () => {
+	const layout = {
+		tabs: [
+			{ tab: "queue", x0: 30, x1: 38 },
+			{ tab: "agents", x0: 40, x1: 49 },
+		],
+		rows: [
+			{ y: 2, index: 0 },
+			{ y: 3, index: 5 },
+		],
+	};
+	assert.deepEqual(mouseAction({ type: "click", x: 31, y: 0 }, layout), { type: "click", tab: "queue" });
+	assert.deepEqual(mouseAction({ type: "click", x: 48, y: 0 }, layout), { type: "click", tab: "agents" });
+	assert.equal(mouseAction({ type: "click", x: 39, y: 0 }, layout), null); // between two labels
+	assert.equal(mouseAction({ type: "click", x: 5, y: 1 }, layout), null); // no row on that line
+	assert.deepEqual(mouseAction({ type: "click", x: 5, y: 2 }, layout), { type: "click", row: 0 });
+	assert.deepEqual(mouseAction({ type: "click", x: 5, y: 3 }, layout), { type: "click", row: 5 });
+	assert.deepEqual(mouseAction({ type: "wheel", wheelDelta: 3 }, layout), { type: "wheel", delta: 3 });
+	assert.deepEqual(mouseAction({ type: "wheel", wheelDelta: -2 }, layout), { type: "wheel", delta: -2 });
+	assert.equal(mouseAction({ type: "wheel", wheelDelta: 0 }, layout), null);
+	assert.equal(mouseAction({ type: "press", x: 31, y: 0 }, layout), null); // presses, moves and drags are not clicks
+	assert.equal(mouseAction({ type: "click", x: 31, y: 0 }, null), null); // no layout yet
+});
+
+test("mouse actions drive the controls: a click moves the cursor, a second opens the details", async () => {
+	const root = await repo({});
+	const controls = createTuiControls({ root });
+	controls.setDashboard(frame());
+
+	assert.deepEqual(await controls.handleMouse({ type: "click", row: 1 }), []);
+	assert.equal(controls.view.cursor.queue, 1);
+	assert.equal(controls.view.details, null);
+	await controls.handleMouse({ type: "click", row: 1 });
+	assert.equal(controls.view.details, "demo/01");
 });
 
 // --- The GitHub tab and the dark-factory toggle (github-watch, ticket 06) ---

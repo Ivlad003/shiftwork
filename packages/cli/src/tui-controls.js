@@ -211,6 +211,66 @@ export function reduceKey(state, key, dashboard = {}) {
 	}
 }
 
+/**
+ * The pure mouse-action reducer (GitHub #5): (state, action, dashboard) → { state, effects },
+ * the same shape as `reduceKey`. Actions, as built by `mouseAction` from a TuiMouseEvent and
+ * the layout's hit map: `{ type: "click", tab }` switches tabs; `{ type: "click", row }` moves
+ * the current tab's cursor to that row of its rows, and a click on the row already under the
+ * cursor acts as `enter`; `{ type: "wheel", delta }` moves the cursor by `delta` rows (negative
+ * scrolls up), clamped. An action the view can't take — a row off the list, an unknown tab —
+ * leaves the state untouched. Pure: no I/O, testable without a terminal.
+ */
+export function reduceMouse(state, action, dashboard = {}) {
+	switch (action?.type) {
+		case "click": {
+			if (TABS.includes(action.tab) && action.tab !== state.tab) {
+				return { state: { ...normalize(state, dashboard), tab: action.tab }, effects: [] };
+			}
+			if (Number.isInteger(action.row)) {
+				const norm = normalize(state, dashboard);
+				const rows = tabRows(norm.tab, dashboard, norm);
+				if (action.row < 0 || action.row >= rows.length) return { state: norm, effects: [] };
+				if (norm.cursor[norm.tab] === action.row) return enterKey(norm, dashboard); // a second click opens it, like enter
+				return { state: { ...norm, cursor: { ...norm.cursor, [norm.tab]: action.row } }, effects: [] };
+			}
+			return { state, effects: [] };
+		}
+		case "wheel": {
+			const norm = normalize(state, dashboard);
+			const rows = tabRows(norm.tab, dashboard, norm);
+			if (!rows.length) return { state: norm, effects: [] };
+			const delta = Number(action.delta) || 0;
+			const next = Math.max(0, Math.min(norm.cursor[norm.tab] + delta, rows.length - 1));
+			return { state: { ...norm, cursor: { ...norm.cursor, [norm.tab]: next } }, effects: [] };
+		}
+		default:
+			return { state, effects: [] };
+	}
+}
+
+/**
+ * Map one normalized TuiMouseEvent (pi-tui's shape: type click/wheel, zero-based `x`/`y`,
+ * `wheelDelta`) to a reducer mouse action, through the layout's hit map (`dashboardLayout`'s
+ * `rows` and `tabs`): a click on line 0 within a tab label's span switches tabs, a click on
+ * a list row's line moves the cursor there, the wheel moves it. null when the event hits
+ * nothing the view reacts to — another event type, a click off every label and row, or no
+ * layout yet.
+ */
+export function mouseAction(event, layout) {
+	if (!event || !layout) return null;
+	if (event.type === "wheel") {
+		const delta = Number(event.wheelDelta) || 0;
+		return delta ? { type: "wheel", delta } : null;
+	}
+	if (event.type !== "click") return null;
+	if (event.y === 0) {
+		const span = (layout.tabs ?? []).find((t) => event.x >= t.x0 && event.x < t.x1);
+		return span ? { type: "click", tab: span.tab } : null;
+	}
+	const row = (layout.rows ?? []).find((r) => r.y === event.y);
+	return row ? { type: "click", row: row.index } : null;
+}
+
 /** Move the current tab's cursor one row, clamped at both ends of its rows. */
 function moveCursor(state, dashboard, step) {
 	const norm = normalize(state, dashboard);
@@ -467,6 +527,20 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
 		}
 	}
 
+	/** Merge a reducer's next state over the view; every action goes through this. */
+	const apply = (state) => {
+		setView({
+			tab: state.tab ?? view.tab,
+			cursor: state.cursor ?? view.cursor,
+			collapsed: state.collapsed ?? view.collapsed,
+			details: state.details ?? null,
+			selectedWorker: state.selectedWorker ?? null,
+			featureFilter: state.featureFilter ?? null,
+			notice: state.notice ?? null,
+			dryRun: state.dryRun ?? null,
+		});
+	};
+
 	return {
 		get view() {
 			return view;
@@ -481,16 +555,15 @@ export function createTuiControls({ root, start, stop, plan, onChange, onQuit } 
 		async handleKey(key) {
 			const features = [...new Set((dashboard.tickets ?? []).map((t) => t.feature))].sort();
 			const { state, effects: list } = reduceKey({ ...view, run: dashboard.run, features }, key, dashboard);
-			setView({
-				tab: state.tab ?? view.tab,
-				cursor: state.cursor ?? view.cursor,
-				collapsed: state.collapsed ?? view.collapsed,
-				details: state.details ?? null,
-				selectedWorker: state.selectedWorker ?? null,
-				featureFilter: state.featureFilter ?? null,
-				notice: state.notice ?? null,
-				dryRun: state.dryRun ?? null,
-			});
+			apply(state);
+			for (const effect of list) await execute(effect);
+			return list;
+		},
+		/** Feed one mouse action (`mouseAction`'s shape) through the reducer and run its effects. */
+		async handleMouse(action) {
+			const features = [...new Set((dashboard.tickets ?? []).map((t) => t.feature))].sort();
+			const { state, effects: list } = reduceMouse({ ...view, run: dashboard.run, features }, action, dashboard);
+			apply(state);
 			for (const effect of list) await execute(effect);
 			return list;
 		},

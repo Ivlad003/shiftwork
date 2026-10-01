@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadConfig } from "shiftwork-core";
-import { collectDashboardState, REFRESH_MS, renderDashboard } from "./dashboard.js";
-import { createTuiControls, decodeKeys } from "./tui-controls.js";
+import { collectDashboardState, dashboardLayout, REFRESH_MS, renderDashboard } from "./dashboard.js";
+import { createTuiControls, decodeKeys, mouseAction } from "./tui-controls.js";
 
 const HELP = `shiftwork tui — live dashboard
 
@@ -20,11 +20,14 @@ if the feature is done) · n runs the selected ticket
 STOP so the runner hands off and stops · d shows a dry-run · f cycles the feature
 filter · g toggles dark-factory (starts run --dark-factory detached when no
 runner is live, writes STOP when one is; the header shows dark-factory while it
-runs) · q quits. The Resolved tab (5) lists the features whose tickets are all
-resolved, off the Queue, with the same rows, cursor, fold and enter → details as
-the Queue's (n there is refused: status resolved). The GitHub tab lists the
-issues run --dark-factory imported: number, title, feature, state (planning,
-working, needs-info, done, closed) and the time of the last sync.
+runs) · q quits. The mouse works in the interactive view: click a tab label to
+switch tabs, click a row to move the cursor there (click it again to open it,
+like enter), the wheel moves the cursor. The Resolved tab (5) lists the
+features whose tickets are all resolved, off the Queue, with the same rows,
+cursor, fold and enter → details as the Queue's (n there is refused: status
+resolved). The GitHub tab lists the issues run --dark-factory imported:
+number, title, feature, state (planning, working, needs-info, done, closed)
+and the time of the last sync.
 The interactive view is built on @earendil-works/pi-tui (TuiAltScreen), resolved
 from the user's pi install. It is in colour: the cursor row is highlighted
 across the width, statuses are coloured (resolved green, claimed cyan,
@@ -107,22 +110,37 @@ function onTerminalResize(terminal, handler) {
 
 /**
  * Full-screen dashboard on pi-tui's alternate screen: sized to the terminal,
- * re-rendered on resize, keys decoded then reduced. `options.terminal` and
- * `options.onKey` are for the stub-terminal tests.
+ * re-rendered on resize, keys decoded then reduced, mouse events mapped through
+ * the last layout's hit map to reducer actions (GitHub #5). `options.terminal`
+ * and `options.onKey` are for the stub-terminal tests.
  */
 export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text }, options = {}) {
 	const terminal = options.terminal ?? new ProcessTerminal();
 	const ui = new TuiAltScreen(terminal, false);
 	const text = new Text("", 0, 0);
-	if (typeof ui.setLayoutRoot === "function") ui.setLayoutRoot(text);
-	else ui.addChild(text);
-	let last = null;
+	let last = null; // the last dashboard state
+	let layout = null; // the last frame's hit map (rows, tabs) for the mouse layer
+	let chain = Promise.resolve(); // keys and mouse run one at a time, in order
 	const color = !process.env.NO_COLOR;
 	const paint = () => {
 		if (!last) return;
-		text.setText(renderDashboard({ ...last, ...controls.view }, { ...terminalSize(terminal), color }).join("\n"));
+		layout = dashboardLayout({ ...last, ...controls.view }, { ...terminalSize(terminal), color });
+		text.setText(layout.lines.join("\n"));
 		ui.requestRender();
 	};
+	// The layout root: the Text wrapped so it can take mouse events — each one is
+	// mapped through the last layout to a reducer action and fed to the controls.
+	const layoutRoot = {
+		render: (width) => text.render(width),
+		handleMouse: (event) => {
+			const action = mouseAction(event, layout);
+			if (!action) return undefined;
+			chain = chain.then(async () => controls.handleMouse(action)).catch(() => {});
+			return { handled: true };
+		},
+	};
+	if (typeof ui.setLayoutRoot === "function") ui.setLayoutRoot(layoutRoot);
+	else ui.addChild(layoutRoot);
 	const controls = createTuiControls({ root, onChange: paint });
 	onTerminalResize(terminal, paint);
 	const refresh = async () => {
@@ -133,7 +151,6 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 	const quit = new Promise((resolve) => {
 		controls.onQuit(resolve);
 	});
-	let chain = Promise.resolve();
 	ui.addInputListener((data) => {
 		const keys = decodeKeys(data);
 		if (!keys.length) return;

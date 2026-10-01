@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openRunState } from "shiftwork-core";
-import { collectDashboardState, formatLogLine, renderDashboard, tailShiftLog } from "../src/dashboard.js";
+import { collectDashboardState, dashboardLayout, formatLogLine, renderDashboard, tailShiftLog } from "../src/dashboard.js";
+import { queueRows } from "../src/tui-controls.js";
 import { interactive, loadPiTui } from "../src/tui.js";
 
 const parallelRunState = fileURLToPath(new URL("./fixtures/parallel-run-state.json", import.meta.url));
@@ -381,6 +382,62 @@ test("renderDashboard color: reverse-video cursor row, coloured statuses, marker
 			assert.equal(line.includes("\x1b["), false, `${tab}: ${line}`); // colour off: no escapes
 		}
 	}
+});
+
+test("dashboardLayout: each list row's y and each tab label's span match the rendered lines, a scrolled list included", () => {
+	const tickets = Array.from({ length: 40 }, (_, i) => ticket("big", String(i + 1).padStart(2, "0"), `Ticket ${i + 1}`));
+	const state = { ...base, tickets, frontier: tickets, cursor: { queue: 39 } }; // the cursor on the last row: the list is scrolled
+	const rows = queueRows(state, state); // the Queue tab's rows, as the hit map indexes them
+
+	const layout = dashboardLayout(state, { width: 80, height: 12 });
+	assert.deepEqual(renderDashboard(state, { width: 80, height: 12 }), layout.lines); // renderDashboard keeps its return type
+
+	// The body is a window of 8 rows under the header line and a blank, scrolled to the cursor.
+	assert.equal(layout.rows.length, 8);
+	assert.ok(layout.rows[0].index > 0, "the list is scrolled");
+	for (const [i, { y, index }] of layout.rows.entries()) {
+		assert.equal(y, 2 + i); // header line, blank, then the body — one row per line
+		const row = rows[index];
+		const line = stripSgr(layout.lines[y]);
+		if (row.kind === "ticket") assert.ok(line.slice(4).startsWith(`${row.number} ${row.title}`), `y ${y} → row ${index}: ${line}`);
+		else assert.ok(line.slice(4).startsWith(`▾ ${row.feature} `), `y ${y} → row ${index}: ${line}`);
+		if (i) {
+			// consecutive rows of the window: y and index advance together
+			assert.equal(y, layout.rows[i - 1].y + 1);
+			assert.equal(index, layout.rows[i - 1].index + 1);
+		}
+	}
+	assert.equal(layout.rows.at(-1).index, 39); // the cursor row, scrolled into view
+
+	// The tab labels' spans point at the labels on line 0, colour or not.
+	const TABS = ["queue", "agents", "cooldowns", "log", "resolved", "github"];
+	const LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", log: "Log", resolved: "Resolved", github: "GitHub" };
+	const labelOf = (tab) => `${TABS.indexOf(tab) + 1} ${LABELS[tab]}`;
+	for (const color of [false, true]) {
+		const frame = dashboardLayout(state, { width: 120, height: 12, color }); // 120: the six-tab header needs the room
+		const header = stripSgr(frame.lines[0]);
+		assert.deepEqual(frame.tabs.map((t) => t.tab), TABS);
+		for (const span of frame.tabs) {
+			const label = labelOf(span.tab);
+			assert.equal(header.slice(span.x0, span.x1), span.tab === "queue" ? `[${label}]` : label); // queue is the open tab
+		}
+	}
+
+	// A narrower frame clips the labels like the lines: a label past the width is not a hit.
+	const narrow = dashboardLayout(state, { width: 60, height: 12 });
+	const narrowHeader = stripSgr(narrow.lines[0]);
+	assert.ok(narrow.tabs.length > 0 && narrow.tabs.length < TABS.length);
+	for (const span of narrow.tabs) {
+		assert.ok(span.x0 < 60 && span.x1 <= 60, `${span.tab}: ${span.x0}–${span.x1}`);
+		const visible = narrowHeader.slice(span.x0, span.x1).replace(/…$/, ""); // a clipped label ends with fit's ellipsis
+		const label = span.tab === "queue" ? `[${labelOf(span.tab)}]` : labelOf(span.tab);
+		assert.ok(label.startsWith(visible), `${span.tab}: ${visible}`);
+	}
+
+	// A plain frame (--once, the fallback) has no hit map.
+	const plain = dashboardLayout(state, { width: 80 });
+	assert.deepEqual(plain.rows, []);
+	assert.deepEqual(plain.tabs, []);
 });
 
 test("collectDashboardState: an empty repo has no run, no log and no tickets", async () => {
@@ -836,6 +893,68 @@ test("interactive: stub terminal size, one resize, a key chunk reaching handleKe
 	terminal.send("q");
 	assert.equal(await done, 0);
 	assert.equal(terminal.stopped, true);
+});
+
+test("interactive: a click event delivered to the layout root's handleMouse changes the view", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-mouse-"));
+	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "01-first.md"),
+		"# 01: First\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n\n**Type:** docs\n",
+	);
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "02-second.md"),
+		"# 02: Second\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n\n**Type:** docs\n",
+	);
+
+	const terminal = new StubTerminal({ columns: 80, rows: 24 });
+	let text;
+	let ui;
+	const kit = {
+		ProcessTerminal: class {},
+		TuiAltScreen: class extends StubTuiAltScreen {
+			constructor(t) {
+				super(t);
+				ui = this;
+			}
+		},
+		Text: class extends StubText {
+			constructor(initial) {
+				super(initial);
+				text = this;
+			}
+		},
+	};
+	const done = interactive(root, kit, { terminal });
+	const first = await waitFor(() => (text?.frames.length ? text.text : false));
+	const header = () => stripSgr(text.text.split("\n")[0]);
+
+	// A click on a tab label (line 0) switches tabs.
+	const agentsX = header().indexOf("2 Agents");
+	assert.ok(agentsX >= 0, header());
+	assert.deepEqual(ui.layoutRoot.handleMouse({ type: "click", button: "left", x: agentsX + 1, y: 0 }), { handled: true });
+	await waitFor(() => header().includes("[2 Agents]"));
+
+	// And a click on the Queue label switches back.
+	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: header().indexOf("1 Queue") + 1, y: 0 });
+	await waitFor(() => header().includes("[1 Queue]"));
+
+	// A click on a list row moves the cursor there; a second click on it opens the details.
+	const rowY = text.text.split("\n").findIndex((line) => /02 Second/.test(stripSgr(line)));
+	assert.ok(rowY > 0, text.text);
+	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
+	await waitFor(() => stripSgr(text.text.split("\n")[rowY]).startsWith(">")); // the cursor row
+	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
+	await waitFor(() => /demo\/02 · Second · ready-for-agent/.test(stripSgr(text.text))); // the details view
+
+	// The wheel moves the cursor too: esc closes the details, then the wheel scrolls up.
+	terminal.send("\x1b");
+	await waitFor(() => !/demo\/02 · Second/.test(stripSgr(text.text)));
+	ui.layoutRoot.handleMouse({ type: "wheel", button: "none", x: 10, y: rowY, wheelDelta: -1 });
+	await waitFor(() => stripSgr(text.text.split("\n")[rowY - 1]).startsWith(">"));
+
+	terminal.send("q");
+	assert.equal(await done, 0);
 });
 
 test("interactive: NO_COLOR disables colour in the interactive view", async () => {
