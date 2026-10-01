@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createPiBackend, mapPiEvent } from "../src/pi-backend.js";
+import { createPiBackend, locatePi, mapPiEvent } from "../src/pi-backend.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/scripted-provider.ts", import.meta.url));
 
@@ -202,4 +202,48 @@ test("probe reports a model that answers as available and a limit error as unava
 
 	assert.equal(await backendWith([{ text: "OK" }]).probe("scripted/s1"), true);
 	assert.equal(await backendWith([{ error: '429: {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}' }]).probe("scripted/s1"), false);
+});
+
+/** A pi managed install like the official installer's: <agentDir>/bin/pi is a shell launcher into install/releases/<v>. */
+async function fakeManagedInstall(version = "9.9.9") {
+	const home = await mkdtemp(join(tmpdir(), "sw-pi-managed-"));
+	const agentDir = join(home, ".pi", "agent");
+	const pkg = join(agentDir, "install", "releases", version, "node_modules", "@earendil-works", "pi-coding-agent");
+	await mkdir(join(pkg, "dist", "bundle"), { recursive: true });
+	await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version, bin: { pi: "dist/bundle/cli.js" } }));
+	await writeFile(join(agentDir, "install", "current-version"), `${version}\n`);
+	await mkdir(join(agentDir, "bin"), { recursive: true });
+	const launcher = join(agentDir, "bin", "pi");
+	await writeFile(launcher, "#!/bin/sh\nexec true\n");
+	await chmod(launcher, 0o755);
+	await mkdir(join(home, ".local", "bin"), { recursive: true });
+	const onPath = join(home, ".local", "bin", "pi");
+	await symlink(launcher, onPath);
+	return { home, agentDir, pkg, onPath, version };
+}
+
+const noPackage = () => {
+	throw new Error("not resolvable");
+};
+
+test("locatePi follows a managed-install shell launcher on PATH to its current release", async () => {
+	const m = await fakeManagedInstall();
+	const pi = locatePi({ resolvePackage: noPackage, which: () => m.onPath, env: {} });
+	assert.equal(pi.root, m.pkg);
+	assert.equal(pi.cli, join(m.pkg, "dist", "bundle", "cli.js"));
+	assert.equal(pi.version, m.version);
+});
+
+test("locatePi finds a managed install in the pi agent dir when pi is not on PATH", async () => {
+	const m = await fakeManagedInstall();
+	assert.equal(locatePi({ resolvePackage: noPackage, which: () => "", env: { PI_CODING_AGENT_DIR: m.agentDir } }).root, m.pkg);
+	assert.equal(locatePi({ resolvePackage: noPackage, which: () => "", env: { PI_MANAGED_INSTALL_ROOT: join(m.agentDir, "install") } }).root, m.pkg);
+	assert.equal(locatePi({ resolvePackage: noPackage, which: () => "", env: {}, home: m.home }).root, m.pkg);
+});
+
+test("locatePi takes an explicit root first and names pi.root when nothing is found", async () => {
+	const m = await fakeManagedInstall();
+	assert.equal(locatePi({ root: m.pkg, resolvePackage: noPackage, which: () => "", env: {} }).root, m.pkg);
+	const empty = await mkdtemp(join(tmpdir(), "sw-pi-none-"));
+	assert.throws(() => locatePi({ resolvePackage: noPackage, which: () => "", env: {}, home: empty }), /pi\.root/);
 });

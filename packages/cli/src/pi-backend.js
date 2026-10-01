@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyError } from "shiftwork-core";
@@ -9,19 +9,34 @@ import { classifyError } from "shiftwork-core";
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 
 /**
- * Find the pi installation to drive: an explicit root, the package resolvable from here,
- * or the `pi` on PATH. Returns { root, cli, index }.
+ * Find the pi installation to drive: an explicit root (`pi.root`), the package resolvable
+ * from here, the `pi` on PATH (an npm bin, or the managed installer's shell launcher), or
+ * a managed install in the pi agent dir. Returns { root, cli, index, version }.
+ * `resolvePackage`, `which`, `env` and `home` are injectable for tests.
  */
-export function locatePi({ root } = {}) {
+export function locatePi({
+	root,
+	env = process.env,
+	home = homedir(),
+	resolvePackage = () => fileURLToPath(import.meta.resolve(PI_PACKAGE)),
+	which = () => execFileSync("sh", ["-c", "command -v pi"], { encoding: "utf8" }).trim(),
+} = {}) {
 	const candidates = [];
 	if (root) candidates.push(root);
 	try {
-		candidates.push(packageRootOf(fileURLToPath(import.meta.resolve(PI_PACKAGE))));
+		candidates.push(packageRootOf(resolvePackage()));
 	} catch {}
 	try {
-		const bin = execFileSync("sh", ["-c", "command -v pi"], { encoding: "utf8" }).trim();
-		if (bin) candidates.push(packageRootOf(realpathSync(bin)));
+		const bin = which();
+		if (bin) {
+			const real = realpathSync(bin);
+			// A managed install puts a shell launcher at <agentDir>/bin/pi.
+			candidates.push(packageRootOf(real) ?? managedPiRoot(join(dirname(dirname(real)), "install")));
+		}
 	} catch {}
+	const agentDir = env.PI_CODING_AGENT_DIR ?? join(home, ".pi", "agent");
+	if (env.PI_MANAGED_INSTALL_ROOT) candidates.push(managedPiRoot(env.PI_MANAGED_INSTALL_ROOT));
+	candidates.push(managedPiRoot(join(agentDir, "install")));
 	for (const candidate of candidates.filter(Boolean)) {
 		const pkg = join(candidate, "package.json");
 		if (!existsSync(pkg)) continue;
@@ -30,7 +45,18 @@ export function locatePi({ root } = {}) {
 		const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.pi;
 		return { root: candidate, cli: join(candidate, bin), index: join(candidate, "dist", "index.js"), version: manifest.version };
 	}
-	throw new Error(`pi not found: install it with "npm i -g ${PI_PACKAGE}" or set pi.root in .pi/shiftwork.json`);
+	throw new Error(`pi not found: install it (https://pi.dev or "npm i -g ${PI_PACKAGE}") or set pi.root in .pi/shiftwork.json`);
+}
+
+/** The pi package of a managed install's current release: <install>/releases/<current-version>/node_modules/<pi>. */
+function managedPiRoot(installRoot) {
+	try {
+		const version = readFileSync(join(installRoot, "current-version"), "utf8").trim();
+		if (!version || version.includes("/") || version.startsWith(".")) return undefined;
+		return join(installRoot, "releases", version, "node_modules", ...PI_PACKAGE.split("/"));
+	} catch {
+		return undefined;
+	}
 }
 
 function packageRootOf(file) {

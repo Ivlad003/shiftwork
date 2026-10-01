@@ -50,7 +50,7 @@ export function createJevClassifier(options = {}) {
 }
 
 async function createRuntime(options) {
-	const pi = locatePi({ root: options.piRoot });
+	const pi = locatePi({ root: options.piRoot ?? options.config?.pi?.root });
 	const { ModelRuntime } = await import(pathToFileURL(pi.index).href);
 	const agentDir = options.agentDir ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 	return ModelRuntime.create({

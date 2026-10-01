@@ -16,6 +16,8 @@ npx shiftwork init --model anthropic/claude-sonnet-4-5
 
 `npx shiftwork` always works without installing anything ([npm package](https://www.npmjs.com/package/shiftwork)). npx caches what it downloaded, so write `npx shiftwork@latest …` to be sure you get the newest version, or install it once with `npm i -g shiftwork` and then just run `shiftwork …`.
 
+Shiftwork finds pi by itself: the npm package, the `pi` on PATH, and an install made by the official installer (`~/.pi/agent/install/releases/<version>`, where the `pi` on PATH is only a shell launcher). If pi lives elsewhere, point at its package folder: `"pi": { "root": "/path/to/node_modules/@earendil-works/pi-coding-agent" }`.
+
 `init` creates:
 
 | File | What it is |
@@ -237,6 +239,7 @@ Every backend, pi included, has an optional top-level block named like its prefi
 | `env` | Extra environment variables for the agent process, on top of yours. |
 | `timeoutMs` | A safety timeout for the process. Normal limits are budgets (section 5). |
 | `sandbox` | `codex` only, see below. |
+| `root` | `pi` only: pi's package folder, when Shiftwork can't find it by itself (section 1). |
 
 ```json
 "pi":     { "env": { "PI_CODING_AGENT_DIR": "/home/me/.pi/agent-work" } },

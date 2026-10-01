@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { loadConfig } from "shiftwork-core";
 import { collectDashboardState, REFRESH_MS, renderDashboard } from "./dashboard.js";
 import { createTuiControls, TUI_KEYS } from "./tui-controls.js";
 
@@ -38,21 +40,31 @@ export async function tui(argv) {
 		return 0;
 	}
 
-	const kit = await loadPiTui();
-	if (kit) return interactive(root, kit);
-	return fallback(root);
+	const loaded = await loadPiTui({ piRoot: await configuredPiRoot(root) });
+	if (loaded.kit) return interactive(root, loaded.kit);
+	return fallback(root, loaded.error);
 }
 
-/** Resolve `@earendil-works/pi-tui` from the user's pi install, like RpcClient. Null when unavailable. */
-export async function loadPiTui({ piRoot } = {}) {
+/** `pi.root` from the merged config, or undefined (a broken config must not stop the dashboard). */
+async function configuredPiRoot(root) {
 	try {
-		const { locatePi } = await import("./pi-backend.js");
-		const pi = locatePi({ root: piRoot });
+		const config = await loadConfig(root, process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
+		return config.pi?.root;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Resolve `@earendil-works/pi-tui` from the user's pi install, like RpcClient: { kit } or { error }. */
+export async function loadPiTui({ piRoot, locate } = {}) {
+	try {
+		locate ??= (await import("./pi-backend.js")).locatePi;
+		const pi = locate({ root: piRoot });
 		const require = createRequire(join(pi.root, "package.json"));
 		const entry = require.resolve("@earendil-works/pi-tui");
-		return await import(pathToFileURL(entry).href);
-	} catch {
-		return null;
+		return { kit: await import(pathToFileURL(entry).href) };
+	} catch (error) {
+		return { error };
 	}
 }
 
@@ -92,8 +104,9 @@ async function interactive(root, { ProcessTerminal, TuiMainScreen, Text }) {
 }
 
 /** Plain-text fallback when pi-tui isn't resolvable: a frame every second, with the same keys. */
-async function fallback(root) {
-	process.stdout.write("shiftwork tui: pi's TUI library not found, plain-text mode (r run · s stop · d dry-run · f filter · q quit)\n");
+async function fallback(root, error) {
+	const reason = error?.message ? ` (${error.message})` : "";
+	process.stdout.write(`shiftwork tui: pi's TUI library not found${reason}, plain-text mode (r run · s stop · d dry-run · f filter · q quit)\n`);
 	let last = null;
 	const paint = () => {
 		if (!last) return;

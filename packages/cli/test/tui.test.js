@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openRunState } from "shiftwork-core";
 import { collectDashboardState, formatLogLine, renderDashboard, tailShiftLog } from "../src/dashboard.js";
+import { loadPiTui } from "../src/tui.js";
 
 const parallelRunState = fileURLToPath(new URL("./fixtures/parallel-run-state.json", import.meta.url));
 
@@ -244,4 +245,26 @@ test("shiftwork tui --once works on an empty repo", async () => {
 	assert.match(stdout, /Runner: idle \(no run state\)/);
 	assert.match(stdout, /Tickets: none/);
 	assert.match(stdout, /Cooldowns: none/);
+});
+
+test("loadPiTui resolves pi-tui next to a managed-install pi package, and reports why it can't", async () => {
+	const modules = join(await mkdtemp(join(tmpdir(), "sw-tui-managed-")), "releases", "1.0.0", "node_modules", "@earendil-works");
+	const piRoot = join(modules, "pi-coding-agent");
+	const tuiRoot = join(modules, "pi-tui");
+	await mkdir(piRoot, { recursive: true });
+	await mkdir(tuiRoot, { recursive: true });
+	await writeFile(join(piRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.0" }));
+	await writeFile(join(tuiRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-tui", type: "module", exports: "./index.js" }));
+	await writeFile(join(tuiRoot, "index.js"), "export const Text = 'stub';\n");
+
+	const found = await loadPiTui({ piRoot, locate: ({ root }) => ({ root }) });
+	assert.equal(found.kit.Text, "stub");
+
+	const missing = await loadPiTui({
+		locate: () => {
+			throw new Error("pi not found: set pi.root");
+		},
+	});
+	assert.equal(missing.kit, undefined);
+	assert.match(missing.error.message, /pi\.root/);
 });

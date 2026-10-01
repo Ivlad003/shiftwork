@@ -16,6 +16,8 @@ npx shiftwork init --model anthropic/claude-sonnet-4-5
 
 `npx shiftwork` працює без встановлення ([пакет у npm](https://www.npmjs.com/package/shiftwork)). npx кешує завантажене, тож пиши `npx shiftwork@latest …`, щоб точно отримати найновішу версію, або встанови один раз через `npm i -g shiftwork` і далі запускай просто `shiftwork …`.
 
+Shiftwork сам знаходить pi: npm-пакет, `pi` у PATH, а також інсталяцію офіційним інсталятором (`~/.pi/agent/install/releases/<версія>`, де `pi` у PATH — лише shell-лаунчер). Якщо pi стоїть деінде, вкажи теку його пакета: `"pi": { "root": "/шлях/до/node_modules/@earendil-works/pi-coding-agent" }`.
+
 `init` створює:
 
 | Файл | Що це |
@@ -239,6 +241,7 @@ Skill — це тека з файлом `SKILL.md`. Вкажи, де вони л
 | `env` | Додаткові змінні середовища для процесу агента, поверх твого середовища. |
 | `timeoutMs` | Аварійний таймаут процесу. Звичайні ліміти задаються бюджетами (розділ 5). |
 | `sandbox` | Лише для `codex`, див. нижче. |
+| `root` | Лише для `pi`: тека пакета pi, якщо Shiftwork не знаходить його сам (розділ 1). |
 
 ```json
 "pi":     { "env": { "PI_CODING_AGENT_DIR": "/home/me/.pi/agent-work" } },
