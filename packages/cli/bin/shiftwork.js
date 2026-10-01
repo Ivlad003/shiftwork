@@ -55,6 +55,9 @@ Run options:
                         for shifts and tickets, including tickets' Budget: lines
   --no-limit <limits>    Lift only these limits: tokens, cost, turns, time, context, stall
                         (comma-separated or repeated; adds to "unlimited" in the config)
+  --no-review            Turn review shifts off for this run (they are on by default:
+                        every resolved ticket is reviewed once, on the strongest
+                        configured tier — see "review" in .pi/shiftwork.json)
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 
@@ -247,6 +250,20 @@ async function github(argv) {
 	return githubLabelsCommand({ root, config, create: values.create });
 }
 
+/** The review line printed at start: the tier and its scope, or why reviews are off. */
+function reviewStartLine(config, noReview) {
+	const review = config.review;
+	if (review?.enabled) {
+		const scope = review.features?.length && review.types?.length
+			? `features ${review.features.join(", ")} and types ${review.types.join(", ")}`
+			: review.features?.length ? `features ${review.features.join(", ")}` : review.types?.length ? `types ${review.types.join(", ")}` : "every ticket";
+		return `shiftwork: review · ${review.tier} for ${scope}`;
+	}
+	if (noReview) return "shiftwork: review off (--no-review)";
+	if (review?.reason) return `shiftwork: review off: ${review.reason}`;
+	return "shiftwork: review off (config)";
+}
+
 /** `--no-budget` lifts every limit; `--no-limit tokens,time` (repeatable) adds to the config's `unlimited`. */
 function unlimitedFrom(values, configured) {
 	if (values["no-budget"]) return true;
@@ -272,6 +289,7 @@ async function run(argv) {
 			"no-worktree": { type: "boolean" },
 			"no-budget": { type: "boolean" },
 			"no-limit": { type: "string", multiple: true },
+			"no-review": { type: "boolean" },
 			dir: { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
@@ -300,6 +318,8 @@ async function run(argv) {
 		maxAttempts: values["max-attempts"] ? Number(values["max-attempts"]) : loaded.maxAttempts,
 		parallel: values.parallel !== undefined ? Number(values.parallel) : loaded.parallel,
 		unlimited: unlimitedFrom(values, loaded.unlimited),
+		// `--no-review` turns reviews off for this one run, like `review: false` in the config.
+		review: values["no-review"] ? false : loaded.review,
 		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
 	});
 	if ((config.parallel ?? 1) > 1 && values["no-worktree"]) {
@@ -310,6 +330,7 @@ async function run(argv) {
 		const lifted = config.unlimited.length === Object.keys(LIMIT_NAMES).length ? "all limits" : config.unlimited.map((field) => Object.keys(LIMIT_NAMES).find((name) => LIMIT_NAMES[name] === field)).join(", ");
 		console.error(`shiftwork: no budget for ${lifted}: shifts run until the agent stops${config.unlimited.includes("maxCostUsd") ? ", whatever it costs" : ""}`);
 	}
+	console.log(reviewStartLine(config, values["no-review"]));
 
 	if (values["dry-run"]) {
 		const { collectDryRunLines } = await import("../src/dry-run.js");

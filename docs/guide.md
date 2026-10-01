@@ -347,13 +347,13 @@ The TUI only watches and starts or stops runs. Models, tiers, routing and budget
 
 ### Reviews after each ticket
 
-Turn on a **review shift**: after a ticket lands, a fresh agent on the tier you choose reads the ticket, the spec and the diff, runs Verify, and gives a verdict.
+Reviews are **on by default**: after a ticket lands, a fresh agent on the review tier reads the ticket, the spec and the diff, runs Verify, and gives a verdict. The review tier is the strongest one configured — `premium` if it exists, else `standard`, else `quick`, else the first tier in `tiers` — so every ticket costs one more shift, usually on your most expensive model. Set `tier` to review somewhere cheaper, or narrow the reviews with the optional `features` and `types` filters:
 
 ```json
-"review": { "enabled": true, "tier": "premium", "features": ["signup"], "types": ["code", "refactor"] }
+"review": { "tier": "standard", "features": ["signup"], "types": ["code", "refactor"] }
 ```
 
-`features` and `types` are optional filters. The verdict is written to the ticket as `### Review`: **accept** (done), **reopen** (back to `ready-for-agent`; the next `run` fixes forward on top of the landed commit), or **follow-up** (a new ticket is filed in the feature, with the same Verify). Reviews are off by default. `--dry-run` shows which tickets would be reviewed.
+The verdict is written to the ticket as `### Review`: **accept** (done), **reopen** (back to `ready-for-agent`; the next `run` fixes forward on top of the landed commit), or **follow-up** (a new ticket is filed in the feature, with the same Verify). To turn reviews off: `"review": false` (or `{ "enabled": false }`) in the config, or `shiftwork run --no-review` for one run. With no tiers there is nothing to review on, so reviews stay off and `run` says so at start. `run` prints the review tier (or its filters) at start; `--dry-run` shows which tickets would be reviewed (`review=<tier>` or `review=no`).
 
 ## 8. A full config example
 
@@ -423,7 +423,7 @@ One `.pi/shiftwork.json` that uses most of this guide: five different agents, a 
   "skillSources": { "tdd": "/home/me/.agents/skills/tdd", "design": "./skills/design" },
   "skillGroups":  { "core": ["tdd"], "design": ["design"] },
 
-  "review": { "enabled": true, "tier": "premium", "types": ["code", "refactor"] },
+  "review": { "tier": "premium", "types": ["code", "refactor"] },
   "jev": { "enabled": true, "model": ["typesafe/jev-latest", "opencode/jev-1.13-free"] },
 
   "pi":       { "timeoutMs": 10800000 },
@@ -443,7 +443,7 @@ What it does:
 - **Tier `premium`'s `thinking` (`high`)** reaches `openrouter/anthropic/claude-opus-5` (pi) and `grok:grok-4.7` (as `--reasoning-effort high`); `claude:opus` doesn't get it (section 2).
 - **Parallelism.** Two tickets at once, each in its own worktree, but at most one shift on Ollama (one GPU) and one on Claude Code (one subscription).
 - **Money.** `openrouter` and `xai` are paid. If a free model is back within 20 minutes, Shiftwork waits for it. When a whole tier is cooling, it borrows from the tier above (`crossTier: "up"`).
-- **Reviews** run on `premium`, for `code` and `refactor` tickets only.
+- **Reviews** (on by default) run on `premium`, for `code` and `refactor` tickets only.
 
 Check it before a run:
 

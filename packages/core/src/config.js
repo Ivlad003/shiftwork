@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseCooldownDuration } from "./classify.js";
+import { TIER_ORDER } from "./planner.js";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -21,7 +22,7 @@ const DEFAULTS = {
 	budgets: { default: {}, tiers: {}, models: {}, ticket: {} },
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
-	review: { enabled: false, when: "resolve" },
+	review: { enabled: true, when: "resolve" },
 };
 
 // `github` is deliberately not in DEFAULTS: a github block requires labels.in,
@@ -275,11 +276,18 @@ function checkJev(value, path) {
 }
 
 const REVIEW_WHEN = ["resolve"];
-const REVIEW_FIELDS = ["enabled", "tier", "when", "features", "types"];
+const REVIEW_FIELDS = ["enabled", "tier", "when", "features", "types", "reason"];
+// The conventional tier ladder strongest first: the default review tier picks the strongest configured one.
+const STRONGEST_TIER_ORDER = [...TIER_ORDER].reverse();
+
+/** Why reviews stay off when there is no tier to review on. */
+export const REVIEW_NO_TIER_REASON = "no tier to review on; set review.tier";
 
 function checkReview(value, path, tiers) {
-	if (value === undefined) return { ...DEFAULTS.review };
-	if (!isPlainObject(value)) fail(path, "must be an object");
+	// `review: false` opts out entirely; `true` is every default. Anything else must be the object form.
+	if (value === false) return { enabled: false, when: "resolve" };
+	if (value === true || value === undefined) value = {};
+	if (!isPlainObject(value)) fail(path, "must be an object, true or false");
 	for (const key of Object.keys(value)) {
 		if (!REVIEW_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown review field; expected one of ${REVIEW_FIELDS.join(", ")}`);
 	}
@@ -287,7 +295,18 @@ function checkReview(value, path, tiers) {
 	if (typeof out.enabled !== "boolean") fail(`${path}.enabled`, "must be true or false");
 	if (!REVIEW_WHEN.includes(out.when)) fail(`${path}.when`, `must be one of ${REVIEW_WHEN.join(", ")}`);
 	if (out.tier !== undefined && !tiers[out.tier]) fail(`${path}.tier`, `unknown tier "${out.tier}"`);
-	if (out.enabled && out.tier === undefined) fail(`${path}.tier`, "required when review.enabled is true");
+	// No explicit tier: review on the strongest configured tier, else the first declared one.
+	if (out.enabled && out.tier === undefined) {
+		const names = Object.keys(tiers);
+		const tier = STRONGEST_TIER_ORDER.find((name) => names.includes(name)) ?? names[0];
+		// No tiers at all: nothing to review on, so reviews stay off with the reason.
+		if (tier === undefined) {
+			out.enabled = false;
+			out.reason = REVIEW_NO_TIER_REASON;
+		} else {
+			out.tier = tier;
+		}
+	}
 	if (out.features !== undefined && !(Array.isArray(out.features) && out.features.every((f) => typeof f === "string" && f.length > 0))) {
 		fail(`${path}.features`, "must be an array of feature names");
 	}
