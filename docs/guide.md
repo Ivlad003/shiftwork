@@ -229,6 +229,17 @@ What happens near and at a limit:
 
 `to`: `next` (next model in the chain), `same-tier` (another model of the tier), `escalate` / `downgrade` (a tier up or down). `maxHandoffs` (default 3) caps handoffs per ticket.
 
+### No limits
+
+To let agents run until they stop on their own, lift the limits for one run:
+
+```bash
+npx shiftwork run --no-budget              # every limit: turns, tokens, cost, time, context, stall
+npx shiftwork run --no-limit tokens,time   # only these: tokens, cost, turns, time, context, stall
+```
+
+Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.pi/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window.
+
 ## 6. Other agents' settings
 
 Every backend, pi included, has an optional top-level block named like its prefix: `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor`.

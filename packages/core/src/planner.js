@@ -69,9 +69,12 @@ function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierNam
 		skillSources: config.skillSources ?? {},
 	});
 	const ticketBudget = resolveTicketBudget(ticket, config);
-	const budget = capBudget(
-		mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget),
-		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
+	const budget = liftLimits(
+		capBudget(
+			mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget),
+			capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
+		),
+		config,
 	);
 	return {
 		backend: ref.backend,
@@ -328,7 +331,16 @@ function capBudgetRemaining(ticketBudget, usage) {
 export function resolveTicketBudget(ticket, config) {
 	const fromTicket = parseTicketBudget(ticket.budget);
 	const fromConfig = config.budgets?.ticket;
-	return mergeBudgets(fromConfig, fromTicket);
+	return liftLimits(mergeBudgets(fromConfig, fromTicket), config);
+}
+
+/** Drop the limits `config.unlimited` lifts (`run --no-budget` / `--no-limit`). */
+function liftLimits(budget, config) {
+	const lifted = config.unlimited ?? [];
+	if (!budget || !lifted.length) return budget;
+	const out = { ...budget };
+	for (const field of lifted) delete out[field];
+	return out;
 }
 
 /** A unit must not run on into another letter (Unicode-aware, so Ukrainian units work too). */

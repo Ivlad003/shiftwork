@@ -650,3 +650,36 @@ test("planShift: a stalled CLI model is not chosen again", () => {
 	const fresh = planShift({ ticket: t({ type: "code" }), config: cliConfig, history: { blockedModels: [first.ref] } });
 	assert.equal(fresh.ref, "codex:gpt-5");
 });
+
+const limitedConfig = (extra = {}) =>
+	validateConfig({
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10, maxTokens: 1000 } } },
+		budgets: { default: { maxWallMin: 45, stallTurns: 5 }, ticket: { maxCostUsd: 8 } },
+		models: { "fake/m1": { budget: { maxContextPct: 70 } } },
+		...extra,
+	});
+
+test("unlimited: true lifts every shift and ticket limit, including the ticket's Budget line", () => {
+	const ticket = t({ type: "code", budget: "$2 · 50 turns" });
+	const cfg = limitedConfig({ unlimited: true });
+	assert.deepEqual(planShift({ ticket, config: cfg }).budget, {});
+	assert.deepEqual(resolveTicketBudget(ticket, cfg), {});
+});
+
+test("unlimited as a list lifts only those limits, by short or full name", () => {
+	const ticket = t({ type: "code", budget: "200k tokens · 1h" });
+	const cfg = limitedConfig({ unlimited: ["tokens", "maxWallMin"] });
+	const budget = planShift({ ticket, config: cfg }).budget;
+	assert.equal(budget.maxTokens, undefined);
+	assert.equal(budget.maxWallMin, undefined);
+	assert.equal(budget.maxTurns, 10);
+	assert.equal(budget.stallTurns, 5);
+	assert.equal(budget.maxContextPct, 70);
+	assert.deepEqual(resolveTicketBudget(ticket, cfg), { maxCostUsd: 8 });
+});
+
+test("unlimited rejects unknown limit names", () => {
+	assert.throws(() => limitedConfig({ unlimited: ["tokens", "speed"] }), /unlimited.*speed/);
+	assert.throws(() => limitedConfig({ unlimited: "yes" }), /unlimited/);
+});

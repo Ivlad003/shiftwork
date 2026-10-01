@@ -63,6 +63,7 @@ export function validateConfig(input) {
 	}
 
 	checkBudgets(config.budgets, "budgets");
+	config.unlimited = normalizeUnlimited(config.unlimited, "unlimited");
 	checkModels(config.models, "models");
 	checkOnExceed(config.onExceed, "onExceed");
 	checkCrossTier(config.crossTier, "crossTier");
@@ -190,6 +191,26 @@ function checkBudgets(value, path) {
 }
 
 const BUDGET_FIELDS = ["maxTokens", "maxCostUsd", "maxTurns", "maxWallMin", "maxContextPct", "stallTurns"];
+
+/** Short names for budget limits, as `unlimited` and `run --no-limit` take them. */
+export const LIMIT_NAMES = { tokens: "maxTokens", cost: "maxCostUsd", turns: "maxTurns", time: "maxWallMin", context: "maxContextPct", stall: "stallTurns" };
+
+/**
+ * `unlimited`: true (lift every budget limit) or a list of limits by short or full name.
+ * Returns the full field names to lift; [] when nothing is lifted.
+ */
+export function normalizeUnlimited(value, path = "unlimited") {
+	if (value === undefined || value === false || value === null) return [];
+	if (value === true) return [...BUDGET_FIELDS];
+	if (!Array.isArray(value)) fail(path, `must be true or a list of limits (${Object.keys(LIMIT_NAMES).join(", ")})`);
+	const out = [];
+	for (const name of value) {
+		const field = LIMIT_NAMES[name] ?? (BUDGET_FIELDS.includes(name) ? name : undefined);
+		if (!field) fail(path, `unknown limit ${JSON.stringify(name)}; expected one of ${Object.keys(LIMIT_NAMES).join(", ")}`);
+		if (!out.includes(field)) out.push(field);
+	}
+	return out;
+}
 
 function checkBudget(value, path) {
 	if (value === undefined) return;

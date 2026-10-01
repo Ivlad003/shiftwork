@@ -53,6 +53,19 @@ test("init keeps other pi settings", async () => {
 	assert.ok(settings.compaction);
 });
 
+test("run --no-budget lifts every limit and --no-limit only the named ones", async () => {
+	const root = await repo({ "f/01-git.md": t("01", "Commit it", "**Type:** git\n**Budget:** $2 · 10 turns") });
+	await exec(["init", "--dir", root, "--model", "prov/model-a"]);
+
+	const all = await exec(["run", "--dry-run", "--dir", root, "--no-budget"]);
+	assert.match(all.stdout, /f\/01 {2}type=git {2}tier=quick {2}model=prov\/model-a {2}thinking=low {2}budget=- /);
+
+	const some = await exec(["run", "--dry-run", "--dir", root, "--no-limit", "turns,time"]);
+	assert.match(some.stdout, /budget=\$2 · 60% ctx · 5 stall /);
+
+	await assert.rejects(exec(["run", "--dry-run", "--dir", root, "--no-limit", "speed"]), /unknown limit "speed"/);
+});
+
 test("run --dry-run prints each frontier ticket's route and spends nothing", async () => {
 	const root = await repo({
 		"f/01-git.md": t("01", "Commit it", "**Type:** git"),

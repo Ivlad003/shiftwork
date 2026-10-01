@@ -102,6 +102,10 @@ export declare function resolveTicketBudget(ticket: Ticket, config: Record<strin
 export declare function loadConfig(root: string, userDir?: string): Promise<Record<string, unknown>>;
 export declare function validateConfig(input: Record<string, unknown>): Record<string, unknown>;
 export declare const THINKING_LEVELS: readonly string[];
+/** Short budget-limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`) → budget fields. */
+export declare const LIMIT_NAMES: Readonly<Record<string, keyof Budget>>;
+/** `unlimited` (true or a list of limit names) → the budget fields it lifts. */
+export declare function normalizeUnlimited(value: unknown, path?: string): Array<keyof Budget>;
 
 export interface Budget {
   maxTokens?: number;

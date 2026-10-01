@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { formatTicketsTable, loadConfig, openCooldowns, openRepoTracker, openRunState, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { formatTicketsTable, LIMIT_NAMES, loadConfig, openCooldowns, openRepoTracker, openRunState, runFrontier, validateConfig, VERSION } from "shiftwork-core";
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
@@ -35,6 +35,10 @@ Run options:
                         in .pi/shiftwork.json; > 1 needs worktree.enabled and one worktree
                         per ticket; "concurrency" caps the shifts per provider)
   --no-worktree          Work in the main checkout instead of a git worktree per ticket
+  --no-budget            Lift every budget limit (turns, tokens, cost, time, context, stall),
+                        for shifts and tickets, including tickets' Budget: lines
+  --no-limit <limits>    Lift only these limits: tokens, cost, turns, time, context, stall
+                        (comma-separated or repeated; adds to "unlimited" in the config)
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 
@@ -155,6 +159,15 @@ function formatAge(ms) {
 	return remH ? `${d}d ${remH}h` : `${d}d`;
 }
 
+/** `--no-budget` lifts every limit; `--no-limit tokens,time` (repeatable) adds to the config's `unlimited`. */
+function unlimitedFrom(values, configured) {
+	if (values["no-budget"]) return true;
+	const named = (values["no-limit"] ?? []).flatMap((list) => list.split(",")).map((s) => s.trim()).filter(Boolean);
+	if (!named.length) return configured;
+	if (configured === true) return true;
+	return [...(Array.isArray(configured) ? configured : []), ...named];
+}
+
 async function run(argv) {
 	const { values } = parseArgs({
 		args: argv,
@@ -168,6 +181,8 @@ async function run(argv) {
 			"max-attempts": { type: "string" },
 			parallel: { type: "string" },
 			"no-worktree": { type: "boolean" },
+			"no-budget": { type: "boolean" },
+			"no-limit": { type: "string", multiple: true },
 			dir: { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
@@ -187,10 +202,16 @@ async function run(argv) {
 		thinking: values.thinking ?? loaded.thinking,
 		maxAttempts: values["max-attempts"] ? Number(values["max-attempts"]) : loaded.maxAttempts,
 		parallel: values.parallel !== undefined ? Number(values.parallel) : loaded.parallel,
+		unlimited: unlimitedFrom(values, loaded.unlimited),
 		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
 	});
 	if ((config.parallel ?? 1) > 1 && values["no-worktree"]) {
 		throw new Error("--no-worktree cannot be combined with parallel > 1: every parallel ticket needs its own worktree");
+	}
+
+	if (config.unlimited.length) {
+		const lifted = config.unlimited.length === Object.keys(LIMIT_NAMES).length ? "all limits" : config.unlimited.map((field) => Object.keys(LIMIT_NAMES).find((name) => LIMIT_NAMES[name] === field)).join(", ");
+		console.error(`shiftwork: no budget for ${lifted}: shifts run until the agent stops${config.unlimited.includes("maxCostUsd") ? ", whatever it costs" : ""}`);
 	}
 
 	if (values["dry-run"]) {
