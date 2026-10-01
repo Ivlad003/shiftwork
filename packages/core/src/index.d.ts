@@ -11,6 +11,8 @@ export interface Ticket {
 	number?: string;
 	title?: string;
 	status?: string;
+	/** True when the feature's spec.md Status is `paused`: the ticket is kept off the frontier. */
+	featurePaused?: boolean;
 	blockedBy: string[];
 	type?: string;
 	model?: string;
@@ -249,6 +251,10 @@ export interface Tracker {
 }
 
 export declare function openTracker(root: string): Tracker;
+/** The file with only its Status line set: the line when there is one, else one under the `#` title, else at the top. */
+export declare function applyStatusLine(text: string, status: string): string;
+/** Set a feature spec's Status line (pause/resume): only that line changes, under the shared-state lock. */
+export declare function setSpecStatus(root: string, feature: string, status: string): Promise<void>;
 
 /** Tracker on an OpenSpec layout (`openspec/changes/<change>/tasks.md` + `.shiftwork.md`). */
 export declare function openOpenSpecTracker(root: string, options?: { verify?: string[] }): Tracker;

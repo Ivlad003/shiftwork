@@ -72,6 +72,7 @@ async function chosenTicket(tracker, spec) {
 	const tickets = await tracker.list();
 	const ticket = tickets.find((t) => t.feature === feature && t.number === number);
 	if (!ticket) throw new Error(`--ticket ${spec} is not on the frontier: no such ticket`);
+	if (ticket.featurePaused) throw new Error(`feature ${feature} is paused (shiftwork feature resume ${feature})`);
 	const claim = (await tracker.activeClaims()).find((c) => c.ticket.feature === feature && c.ticket.number === number);
 	if (claim) throw new Error(`--ticket ${spec} is not on the frontier: claimed by pid ${claim.pid}`);
 	if (ticket.status !== READY && ticket.status !== CLAIMED) {
@@ -113,6 +114,13 @@ export async function runFrontier({
 	// A chosen ticket (`options.ticket`, `<feature>/<NN>`) is checked before anything is claimed
 	// or written: one that is not on the frontier is refused with its reason (spec story 5).
 	const chosen = options.ticket ? await chosenTicket(tracker, options.ticket) : null;
+	// `--feature` on a paused feature is refused like a chosen ticket: before anything is claimed or written.
+	if (
+		options.feature &&
+		(await tracker.list()).some((t) => t.feature === options.feature && t.featurePaused)
+	) {
+		throw new Error(`feature ${options.feature} is paused (shiftwork feature resume ${options.feature})`);
+	}
 	const time = clock ?? {
 		now: () => new Date(),
 		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

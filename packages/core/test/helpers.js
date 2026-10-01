@@ -2,11 +2,18 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** Create a temp repo root with the given tickets: { "feature/01-slug.md": "markdown" }. */
+/** Create a temp repo root with the given tickets: { "feature/01-slug.md": "markdown" }, plus
+ * optional feature specs: { "feature/spec.md": "markdown" } (the spec's `**Status:** paused` gates
+ * a feature, see `loadTickets` in src/index.js). */
 export async function makeRepo(tickets) {
 	const root = await mkdtemp(join(tmpdir(), "shiftwork-test-"));
 	for (const [rel, body] of Object.entries(tickets)) {
 		const [feature, file] = rel.split("/");
+		if (file === "spec.md") {
+			await mkdir(join(root, ".scratch", feature), { recursive: true });
+			await writeFile(join(root, ".scratch", feature, "spec.md"), body);
+			continue;
+		}
 		const dir = join(root, ".scratch", feature, "issues");
 		await mkdir(dir, { recursive: true });
 		await writeFile(join(dir, file), body);

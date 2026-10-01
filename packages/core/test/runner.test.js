@@ -178,6 +178,34 @@ test("--ticket refuses a resolved ticket with its reason, and nothing is claimed
 	assertNothingWritten(root, "f", "01-a.md");
 });
 
+test("a paused feature leaves the frontier: run works only other features", async () => {
+	const root = await makeRepo({
+		"a/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"a/spec.md": "# Spec: A\n\n**Status:** paused\n",
+		"b/01-b.md": ticket("01", "B", { extra: "**Verify:** `b.txt`" }),
+	});
+	const backend = fakeBackend([{ files: { "b.txt": "" } }]);
+
+	const summary = await run(root, backend);
+
+	assert.deepEqual(workedIds(backend), ["b/01"]);
+	assert.deepEqual(summary.resolved.map((t) => `${t.feature}/${t.number}`), ["b/01"]);
+	assert.match(await ticketText(root, "a", "01-a.md"), /\*\*Status:\*\* ready-for-agent/);
+});
+
+test("--ticket and --feature on a paused feature are refused, and nothing is claimed or written", async () => {
+	const root = await makeRepo({
+		"a/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),
+		"a/spec.md": "# Spec: A\n\n**Status:** paused\n",
+	});
+	const backend = fakeBackend([]);
+
+	await assert.rejects(run(root, backend, { ticket: "a/01" }), /feature a is paused \(shiftwork feature resume a\)/);
+	await assert.rejects(run(root, backend, { feature: "a" }), /feature a is paused \(shiftwork feature resume a\)/);
+	assert.equal(backend.shifts.length, 0);
+	assertNothingWritten(root, "a", "01-a.md");
+});
+
 test("--ticket refuses a ticket claimed by a live runner with its reason", async () => {
 	const root = await makeRepo({
 		"f/01-a.md": ticket("01", "A", { extra: "**Verify:** `a.txt`" }),

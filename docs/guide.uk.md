@@ -311,11 +311,15 @@ npx shiftwork run --once               # один тікет (наступний
 npx shiftwork run --ticket signup/03   # саме цей тікет, якщо він готовий
 npx shiftwork run --feature signup     # тільки ця фіча, поки є готові тікети
 npx shiftwork run --parallel 3         # до трьох тікетів одночасно
+npx shiftwork feature pause signup     # заморозити фічу: її тікети йдуть з frontier
+npx shiftwork feature resume signup    # розморозити: тікети повертаються
 npx shiftwork tui                      # живий дашборд
 npx shiftwork tickets check signup     # planning gate: чи робочі тікети цієї фічі
 ```
 
 `shiftwork tickets check <feature> [--min N] [--except NN]` — це Verify-гейт планувального тікета: вихід 0, коли щонайменше `N` (за замовчуванням 1) тікетів, крім винятків (за замовчуванням `01` — сам план), мають статус `ready-for-agent` чи пізніший, у кожного є чекбокс приймання та рядок `Verify`, і кожне число з `Blocked by:` існує у фічі. Інакше вихід 1, по одному рядку на проблему (`signup/03: no Verify line`).
+
+`shiftwork feature pause <feature>` заморожує одну фічу: ставить `**Status:** paused` у `.scratch/<feature>/spec.md` (додає рядок під заголовком `#`, коли в спеки його нема) і друкує `⏸ <feature> paused: its tickets leave the frontier` — самі тікети не змінюються. Поки фіча на паузі, жоден її тікет не в frontier: `run`, `run --once`, `--parallel`, dark-factory і TUI її пропускають, а `run --ticket <feature>/<NN>` і `run --feature <feature>` відмовляються з `feature <feature> is paused (shiftwork feature resume <feature>)`. `shiftwork feature resume <feature>` повертає спеці `ready-for-agent`, і її тікети повертаються в frontier. Пауза фічі, над якою працює зміна, дає їй допрацювати й влитися; нових тікетів цієї фічі runner не бере — щоб зупинитися одразу, лишався `STOP` (або `s` у TUI). `status` пише `⏸ paused` після назви фічі на паузі; `run --dry-run` пише `<feature>: paused, skipped` по одному рядку на фічу на паузі з готовими тікетами. Інший статус спеки нічого не змінює: він не гейтить тікети. Пауза тільки для `.scratch`: під OpenSpec-трекером обидві команди виходять з кодом 1 (`pause is supported for .scratch features only`).
 
 Кожен тікет працює у власному git worktree в `~/.cache/shiftwork/worktrees/`. Залежності туди ставляться так: `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. Якщо лендінг тікета конфліктує з тим, що влитий першим, гілка перебазовується на нову ціль і Verify проходить знову; якщо й rebase конфліктує, робота переробляється поверх неї у свіжому worktree, ще одним shiftом (`- Landing conflict with …; redone on top of …` у тікеті). Щоб акуратно зупинитися, створи в корені репозиторію файл `STOP` (або натисни `s` у TUI): поточна зміна напише handoff, і runner завершиться. `Ctrl-C`, `kill` (SIGTERM) і закритий термінал (SIGHUP) роблять те саме; повторний сигнал, або 60 с без завершення, зупиняє агентів і команди Verify одразу, тож жоден процес агента не переживе runner. Логи змін лежать у `logs/<feature>/<NN>/`.
 
@@ -323,7 +327,7 @@ npx shiftwork tickets check signup     # planning gate: чи робочі тік
 
 Оркестратор — це сам runner: звичайний код, а не модель. Окремий агент-оркестратор чи ручний вибір не потрібні: напиши тікети, запусти `shiftwork run`, і він сам пройде їх один за одним.
 
-1. **Лише готові тікети.** Тікет можна брати, коли його статус `ready-for-agent` і кожен тікет з рядка `Blocked by` уже `resolved`. Такі тікети — це **frontier**. `needs-info`, `ready-for-human`, `wontfix` і тікети, які тримає інший runner, пропускаються.
+1. **Лише готові тікети.** Тікет можна брати, коли його статус `ready-for-agent` і кожен тікет з рядка `Blocked by` уже `resolved`. Такі тікети — це **frontier**. `needs-info`, `ready-for-human`, `wontfix` і тікети, які тримає інший runner, пропускаються — як і кожен тікет **фічи на паузі** (`shiftwork feature pause <feature>`), поки її не розморозять (`shiftwork feature resume <feature>`).
 2. **Фіча за фічею.** Runner закриває одну фічу, перш ніж братися за наступну. Він лишається на поточній фічі, поки в ній є готовий тікет, і бере її тікети за номером (`01`, `02`, …). Переходить далі лише тоді, коли у фічі немає нічого готового: усе `resolved`, або решта заблокована чи чекає на тебе.
 3. **Яка фіча наступна.** Фіча, яку вже почали (якийсь тікет `resolved` чи `claimed`), іде перед новою; серед рівних — за алфавітом назви. Щоб задати порядок самому, додай до назв фіч номери (`01-auth`, `02-billing`).
 4. **Для кожного тікета:** вибрати модель за routing і рівнем (провайдери на cooldown пропускаються), запустити зміну в окремому worktree, запустити `Verify`. Пройшло → злити в основну гілку, запустити рев'ю (якщо ввімкнене), взяти наступний тікет. Не пройшло → ще одна спроба (до `maxAttempts`, потім `needs-info`) або передача наступній моделі, коли скінчився бюджет чи ліміт провайдера.

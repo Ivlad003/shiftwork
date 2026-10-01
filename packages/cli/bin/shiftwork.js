@@ -15,6 +15,12 @@ Usage:
                                 local tier to .pi/shiftwork.json
   shiftwork status [dir] [--dir <path>]
                                 List tickets and the frontier of ready ones
+  shiftwork feature pause <feature> [--dir <path>]
+                                Freeze a feature: "paused" in its spec's Status line (added
+                                under the title when the spec has none; the tickets untouched),
+                                so none of its tickets stays on the frontier
+  shiftwork feature resume <feature> [--dir <path>]
+                                Thaw a paused feature back to "ready-for-agent"
   shiftwork run [options]       Work the frontier until nothing is left
   shiftwork tui [--once] [--dir <path>]
                                 Full-screen dashboard (Queue, Agents, Cooldowns, Log);
@@ -69,6 +75,9 @@ try {
 	switch (command) {
 		case "status":
 			await status(rest);
+			break;
+		case "feature":
+			process.exitCode = await feature(rest);
 			break;
 		case "tickets":
 			process.exitCode = await tickets(rest);
@@ -127,9 +136,10 @@ async function status(argv) {
 			console.log(`${mark} ${t.feature}/${t.number}  [${t.status ?? "?"}]  ${t.title ?? ""}${claimInfo}${blocked}`);
 		}
 		console.log(`\n${ready.size} ready of ${tickets.length} tickets (→ = frontier)`);
+		const paused = new Set(tickets.filter((t) => t.featurePaused).map((t) => t.feature));
 		const features = [...new Set(tickets.map((t) => t.feature))].sort();
 		for (const feature of features) {
-			console.log(`\n${feature}`);
+			console.log(`\n${feature}${paused.has(feature) ? "  ⏸ paused" : ""}`);
 			console.log(formatTicketsTable(tickets.filter((t) => t.feature === feature)));
 		}
 	}
@@ -209,6 +219,30 @@ async function tickets(argv) {
 	}
 	for (const problem of problems) console.log(problem);
 	return 1;
+}
+
+/** `feature pause|resume <feature>`: freeze or thaw one feature (see ../src/feature-pause.js). */
+async function feature(argv) {
+	const [subcommand, ...rest] = argv;
+	if (subcommand !== "pause" && subcommand !== "resume") {
+		console.log(HELP);
+		return subcommand === undefined ? 0 : 1;
+	}
+	const { positionals, values } = parseArgs({
+		args: rest,
+		allowPositionals: true,
+		options: { dir: { type: "string" }, help: { type: "boolean", short: "h" } },
+	});
+	if (values.help) {
+		console.log(HELP);
+		return 0;
+	}
+	const name = positionals[0];
+	if (!name) throw new Error(`usage: shiftwork feature ${subcommand} <feature> [--dir <path>]`);
+	const root = values.dir ?? process.cwd();
+	const { featurePauseCommand } = await import("../src/feature-pause.js");
+	await featurePauseCommand({ root, action: subcommand, feature: name });
+	return 0;
 }
 
 function formatAge(ms) {

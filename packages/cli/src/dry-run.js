@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, openCooldowns, openRepoTracker, planShift, shouldReview, validateConfig } from "shiftwork-core";
+import { frontier, loadConfig, openCooldowns, openRepoTracker, planShift, shouldReview, validateConfig } from "shiftwork-core";
 import { createJevClassifier } from "./jev.js";
 
 /** Plan each frontier ticket, classifying untyped ones, and print the route. Spends nothing besides classify. */
@@ -60,11 +60,21 @@ export async function collectDryRunLines(root, { feature, config, agentDir } = {
 		...(await loadConfig(root, agentDir)),
 		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
 	});
-	const tickets = (await (await openRepoTracker(root, config)).frontier()).filter((t) => !feature || t.feature === feature);
+	const tracker = await openRepoTracker(root, config);
+	const all = (await tracker.list()).filter((t) => !feature || t.feature === feature);
+	const tickets = (await tracker.frontier()).filter((t) => !feature || t.feature === feature);
 	const cooldowns = await openCooldowns(root).active();
-	const lines = [];
+	const lines = pausedFeatures(all).map((f) => `${f}: paused, skipped`);
 	await dryRunFrontier({ tickets, config, cooldowns, classifyTicket: createJevClassifier({ config, agentDir }), log: (line) => lines.push(line) });
 	return lines;
+}
+
+/** Paused features with a ticket the frontier would offer were the feature not paused:
+ * the source of the `<feature>: paused, skipped` dry-run line, once per feature. */
+function pausedFeatures(tickets) {
+	// The frontier without the pause marks: what would run were the features resumed.
+	const ready = new Set(frontier(tickets.map(({ featurePaused: _paused, ...ticket }) => ticket)).map((t) => t.feature));
+	return [...new Set(tickets.filter((t) => t.featurePaused && ready.has(t.feature)).map((t) => t.feature))].sort();
 }
 
 function readOptional(path) {

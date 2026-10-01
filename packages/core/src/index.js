@@ -83,7 +83,11 @@ export function frontier(tickets) {
 	const key = (feature, number) => `${feature ?? ""}/${number}`;
 	const status = new Map(tickets.map((t) => [key(t.feature, t.number), t.status]));
 	return tickets
-		.filter((t) => t.status === READY && t.blockedBy.every((n) => status.get(key(t.feature, n)) === RESOLVED))
+		.filter(
+			(t) =>
+				// A paused feature's spec (`**Status:** paused`) keeps all of its tickets off the frontier.
+				!t.featurePaused && t.status === READY && t.blockedBy.every((n) => status.get(key(t.feature, n)) === RESOLVED),
+		)
 		.sort((a, b) => Number(a.number) - Number(b.number) || String(a.feature).localeCompare(String(b.feature)));
 }
 
@@ -114,6 +118,8 @@ export async function loadTickets(root = process.cwd()) {
 	}
 	const tickets = [];
 	for (const feature of features.filter((f) => f.isDirectory())) {
+		// The feature's spec Status is read once per load: `paused` marks every ticket of it.
+		const paused = await isSpecPaused(join(scratch, feature.name, "spec.md"));
 		const issuesDir = join(scratch, feature.name, "issues");
 		let files;
 		try {
@@ -123,12 +129,21 @@ export async function loadTickets(root = process.cwd()) {
 		}
 		for (const file of files.filter((f) => f.endsWith(".md")).sort()) {
 			const path = join(issuesDir, file);
-			tickets.push({ feature: feature.name, ...parseTicket(await readFile(path, "utf8"), path) });
+			tickets.push({ feature: feature.name, ...(paused ? { featurePaused: true } : {}), ...parseTicket(await readFile(path, "utf8"), path) });
 		}
 	}
 	return tickets;
 }
-export { formatTicketsTable, openTracker } from "./tracker.js";
+
+/** Whether a feature spec's `**Status:**` line is `paused`; a missing spec never pauses. */
+async function isSpecPaused(specPath) {
+	try {
+		return field(await readFile(specPath, "utf8"), "Status")?.toLowerCase() === "paused";
+	} catch {
+		return false;
+	}
+}
+export { applyStatusLine, formatTicketsTable, openTracker, setSpecStatus } from "./tracker.js";
 export { detectTracker, openOpenSpecTracker, openRepoTracker, parseTasks } from "./openspec.js";
 export { openCooldowns } from "./cooldowns.js";
 export { lockPath, withLock } from "./lock.js";

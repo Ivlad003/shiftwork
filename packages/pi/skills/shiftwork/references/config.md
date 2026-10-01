@@ -24,7 +24,8 @@
 | Command | What |
 | --- | --- |
 | `npx shiftwork init [--model <provider>/<id>] [--ollama]` | write `.pi/shiftwork.json` and pi settings |
-| `npx shiftwork status` | the tickets and the ready frontier |
+| `npx shiftwork status` | the tickets and the ready frontier; `⏸ paused` after a paused feature's name |
+| `npx shiftwork feature pause <feature>` / `resume <feature>` | freeze a feature (`**Status:** paused` in its spec — its tickets leave the frontier; `run --ticket`/`--feature` on it are refused) / thaw it back to `ready-for-agent` |
 | `npx shiftwork run --dry-run` | which model, tier and thinking each ticket gets, and whether it gets a review |
 | `npx shiftwork run --once` | work one ticket |
 | `npx shiftwork run` | work the frontier until nothing is left |

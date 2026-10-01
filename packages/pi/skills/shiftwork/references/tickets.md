@@ -19,6 +19,8 @@ A ticket states its triage state with `**Status:**`, then carries these optional
 
 Triage roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. The runner owns two more: `claimed` (it holds the ticket) and `resolved` (the verify gate passed).
 
+The feature's `spec.md` has a `**Status:**` line too — the feature's pause switch: `paused` (set by `npx shiftwork feature pause <feature>`) keeps every ticket of the feature off the runner's frontier until `npx shiftwork feature resume <feature>`; `resume` sets the spec back to `ready-for-agent`. Any other spec status doesn't gate tickets.
+
 Never edit a `**Status:**` line while working a ticket. Report progress by ticking the acceptance checkboxes you completed.
 
 ## Writing one

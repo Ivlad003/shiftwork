@@ -62,6 +62,23 @@ test("status shows the frontier, active claims and cooldowns", async () => {
 	assert.match(stdout, /remaining/);
 });
 
+test("status marks a paused feature and keeps its tickets off the frontier", async () => {
+	const root = await repo({
+		"a/01-a.md": t("01", "A"),
+		"b/01-b.md": t("01", "B"),
+	});
+	await mkdir(join(root, ".scratch", "a"), { recursive: true });
+	await writeFile(join(root, ".scratch", "a", "spec.md"), "# Spec: A\n\n**Status:** paused\n");
+
+	const { stdout, stderr } = await exec(["status", "--dir", root]);
+
+	assert.equal(stderr, "");
+	assert.match(stdout, /\ba {2}⏸ paused/);
+	assert.doesNotMatch(stdout, /→ a\/01/);
+	assert.match(stdout, /→ b\/01/);
+	assert.match(stdout, /1 ready of 2 tickets/);
+});
+
 test("status lists every running shift of a parallel: 2 run (fixture from a real run)", async () => {
 	const root = await repo({
 		"parallel/01-first.md": t("01", "First"),

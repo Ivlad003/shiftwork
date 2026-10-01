@@ -157,17 +157,36 @@ function applyTicketsTable(spec, table) {
 	return `${prefix}\n${TABLE_START}\n${table}\n${TABLE_END}\n`;
 }
 
-async function setStatusLine(path, status) {
-	const text = await readFile(path, "utf8");
+/** The file with only its Status line set to `status`: the line when there is one, else one
+ * under the `#` title, else at the very top. Every other byte is kept. */
+export function applyStatusLine(text, status) {
 	const line = /^(\s*(?:\*\*)?Status:(?:\*\*)?[ \t]*)([^\r\n]*?)([ \t]*)$/im;
-	let next;
 	if (line.test(text)) {
-		next = text.replace(line, (_all, prefix, _old, trailing) => `${prefix}${status}${trailing}`);
-	} else {
-		next = text.replace(/^(#[^\n]*\n)/, `$1\n**Status:** ${status}\n`);
-		if (next === text) next = `**Status:** ${status}\n\n${text}`;
+		return text.replace(line, (_all, prefix, _old, trailing) => `${prefix}${status}${trailing}`);
 	}
-	await writeAtomic(path, next);
+	const titled = text.replace(/^(#[^\n]*\n)/, `$1\n**Status:** ${status}\n`);
+	return titled !== text ? titled : `**Status:** ${status}\n\n${text}`;
+}
+
+async function setStatusLine(path, status) {
+	await writeAtomic(path, applyStatusLine(await readFile(path, "utf8"), status));
+}
+
+/** Set a feature spec's Status line (feature pause/resume): only that line changes, and
+ * the write goes through the shared-state lock like other tracker writes. A spec that
+ * doesn't exist yet gets one holding nothing but the line. */
+export async function setSpecStatus(root, feature, status) {
+	await withLock(root, async () => {
+		const specPath = join(root, ".scratch", feature, "spec.md");
+		let spec;
+		try {
+			spec = await readFile(specPath, "utf8");
+		} catch (error) {
+			if (error.code !== "ENOENT") throw error;
+			spec = "";
+		}
+		await writeAtomic(specPath, applyStatusLine(spec, status));
+	});
 }
 
 export async function writeAtomic(path, content) {

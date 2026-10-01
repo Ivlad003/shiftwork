@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTicket } from "../src/index.js";
+import { frontier, loadTickets, parseTicket } from "../src/index.js";
+import { makeRepo, ticket } from "./helpers.js";
 
 const withVerify = (line) => parseTicket(`# 01: A\n\n**Status:** ready-for-agent\n**Verify:** ${line}\n`);
 
@@ -19,11 +20,28 @@ test("Blocked by, Type, Model and Skills are parsed", () => {
 });
 
 test("frontier resolves blockers within the same feature only", async () => {
-	const { frontier } = await import("../src/index.js");
 	const tickets = [
 		{ feature: "new", number: "01", status: "ready-for-agent", blockedBy: [], path: "n1" },
 		{ feature: "new", number: "02", status: "ready-for-agent", blockedBy: ["01"], path: "n2" },
 		{ feature: "old", number: "01", status: "resolved", blockedBy: [], path: "o1" },
 	];
 	assert.deepEqual(frontier(tickets).map((t) => `${t.feature}/${t.number}`), ["new/01"]);
+});
+
+test("a paused feature's spec keeps its tickets off the frontier; another spec status doesn't gate", async () => {
+	const root = await makeRepo({
+		"paused/01-a.md": ticket("01", "A"),
+		"live/01-b.md": ticket("01", "B"),
+		"triaged/01-c.md": ticket("01", "C"),
+		"bare/01-d.md": ticket("01", "D"),
+		"paused/spec.md": "# Spec: paused\n\n**Status:** paused\n",
+		"live/spec.md": "# Spec: live\n\n**Status:** ready-for-agent\n",
+		"triaged/spec.md": "# Spec: triaged\n\n**Status:** needs-triage\n",
+	});
+
+	const tickets = await loadTickets(root);
+
+	assert.equal(tickets.find((t) => t.feature === "paused").featurePaused, true);
+	assert.equal(tickets.find((t) => t.feature === "live").featurePaused, undefined);
+	assert.deepEqual(frontier(tickets).map((t) => t.feature), ["bare", "live", "triaged"]);
 });
