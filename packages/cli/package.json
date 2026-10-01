@@ -1,6 +1,6 @@
 {
   "name": "shiftwork",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shiftwork CLI: autonomous agents working in shifts - a fresh context per ticket, model handoff on budgets and provider limits (pi, Claude Code, Codex, OpenCode).",
   "license": "MIT",
   "author": "ivlad003 <ivlad003@gmail.com>",
@@ -42,7 +42,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "shiftwork-core": "0.1.0"
+    "shiftwork-core": "0.1.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.99.0"
