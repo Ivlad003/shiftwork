@@ -301,7 +301,10 @@ On top of these, every agent gets Shiftwork's own `.pi/shiftwork-worker.md`.
 
 ```bash
 npx shiftwork status                   # every ticket; → marks the ready ones
-npx shiftwork run --once               # one ticket
+npx shiftwork run                      # work the whole frontier, ticket after ticket, until nothing is ready
+npx shiftwork run --dry-run            # which tickets would run, in what order, on which model — starts nothing
+npx shiftwork run --once               # one ticket (the next one in the order below)
+npx shiftwork run --ticket signup/03   # exactly this ticket, if it is ready
 npx shiftwork run --feature signup     # only this feature, until nothing is ready
 npx shiftwork run --parallel 3         # up to three tickets at once
 npx shiftwork tui                      # live dashboard
@@ -311,6 +314,20 @@ npx shiftwork tickets check signup     # planning gate: are this feature's ticke
 `shiftwork tickets check <feature> [--min N] [--except NN]` is the Verify gate for a planning ticket: it exits 0 when at least `N` (default 1) tickets besides the excepted ones (default `01`, the plan itself) are `ready-for-agent` or later, each with an acceptance checkbox and a `Verify` line, and every `Blocked by:` number exists in the feature. Otherwise it exits 1 with one line per problem (`signup/03: no Verify line`).
 
 Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. `Ctrl-C`, `kill` (SIGTERM) and a closed terminal (SIGHUP) do the same; a second signal, or 60 s without the runner finishing, stops the agents and Verify commands at once, so no agent process outlives the runner. Shift logs are in `logs/<feature>/<NN>/`.
+
+### How the runner picks the next ticket
+
+The runner is the orchestrator: plain code, not a model. No orchestrator agent and no manual picking is needed. Write the tickets, start `shiftwork run`, and it works them one after another on its own.
+
+1. **Ready tickets only.** A ticket can run when its status is `ready-for-agent` and every ticket in its `Blocked by` line is `resolved`. These tickets are the **frontier**. `needs-info`, `ready-for-human`, `wontfix` and tickets claimed by another runner are skipped.
+2. **Feature by feature.** The runner finishes one feature before it opens the next. It stays on the current feature while that feature has a ready ticket, taking its tickets by number (`01`, `02`, …). It moves on only when the feature has nothing ready: everything resolved, or the rest blocked or waiting for you.
+3. **Which feature next.** A feature already started (some ticket resolved or claimed) goes before a new one; among equals, alphabetical feature name. To force an order, prefix feature names with numbers (`01-auth`, `02-billing`).
+4. **For each ticket:** pick the model by routing and tier (skipping providers on cooldown), run the shift in its own worktree, run `Verify`. Passed → merge into the main branch, run the review shift if reviews are on, take the next ticket. Failed → another attempt (up to `maxAttempts`, then `needs-info`), or a handoff to the next model when a budget or provider limit runs out.
+5. **The run ends** when the frontier is empty, or on STOP. When every model of a ticket's route is cooling, the runner waits until one is back; a ticket with no usable model at all becomes `needs-info`.
+
+With `--parallel N`, the N slots are filled in the same order: the current feature's ready tickets first, then the next feature's.
+
+You only steer by hand when you want a different order: `run --feature <name>` (one feature), `run --ticket <feature>/<NN>` (one ticket), or `n` on a ticket in the TUI. `run --dry-run` shows the order before anything is spent.
 
 ### What the TUI does
 
