@@ -119,7 +119,15 @@ export { lockPath, withLock } from "./lock.js";
 export { noRunState, openRunState } from "./run-state.js";
 export { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, WORKER_PROMPT } from "./prompt.js";
 export { decideNext, runFrontier, shouldReview } from "./runner.js";
-export { LIMIT_NAMES, loadConfig, normalizeUnlimited, THINKING_LEVELS, validateConfig } from "./config.js";
+export {
+	GITHUB_LABEL_DEFAULTS,
+	GITHUB_LABELS_IN_REQUIRED,
+	LIMIT_NAMES,
+	loadConfig,
+	normalizeUnlimited,
+	THINKING_LEVELS,
+	validateConfig,
+} from "./config.js";
 export { chooseHandoffMode, cooldownKey, parseModelRef, planShift, resolveTicketBudget, skillsForModel, TIER_ORDER } from "./planner.js";
 export { applyProfileContext, createMeter } from "./meter.js";
 export { classifyError, cooldownMs, DEFAULT_COOLDOWN_MS } from "./classify.js";

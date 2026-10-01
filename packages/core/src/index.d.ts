@@ -99,8 +99,14 @@ export interface Review {
 export declare function shouldReview(config: { review?: Review } & Record<string, unknown>, ticket: { feature?: string; type?: string }): boolean;
 
 export interface GitHubLabels {
-	/** Only import issues carrying this label; every collaborator issue when omitted. */
-	in?: string;
+	/** The label that hands an issue to Shiftwork; required in every `github` block. */
+	in: string;
+	/** Label set while a ticket of the issue is being worked. */
+	working: string;
+	/** Label set when Shiftwork needs information from a collaborator. */
+	needsInfo: string;
+	/** Label set when every ticket of the issue is resolved. */
+	done: string;
 }
 
 /** The `github` block of `.pi/shiftwork.json`: the dark-factory watcher's source repo and behavior. */
@@ -118,6 +124,8 @@ export interface GitHub {
 	push: boolean;
 	/** Tier the planning ticket runs on; any configured tier when omitted. */
 	planTier?: string;
+	/** Path to the `gh` binary (the operator's installed GitHub CLI); `gh` on PATH when omitted. */
+	gh?: string;
 }
 
 export declare function resolveTicketBudget(ticket: Ticket, config: Record<string, unknown>): Budget;
@@ -126,6 +134,10 @@ export declare function validateConfig(input: Record<string, unknown>): Record<s
 export declare const THINKING_LEVELS: readonly string[];
 /** Short budget-limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`) → budget fields. */
 export declare const LIMIT_NAMES: Readonly<Record<string, keyof Budget>>;
+/** Default names of the labels Shiftwork itself sets on a GitHub issue. */
+export declare const GITHUB_LABEL_DEFAULTS: Readonly<Record<"working" | "needsInfo" | "done", string>>;
+/** The error for a `github` block without `labels.in`: required, never silently defaulted. */
+export declare const GITHUB_LABELS_IN_REQUIRED: string;
 /** Short budget-limit name, as `unlimited` lists take it. */
 export type LimitName = "tokens" | "cost" | "turns" | "time" | "context" | "stall";
 /**

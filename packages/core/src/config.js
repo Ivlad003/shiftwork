@@ -22,8 +22,11 @@ const DEFAULTS = {
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
 	review: { enabled: false, when: "resolve" },
-	github: { authors: [], pollMin: 5, autoClose: true, push: false },
 };
+
+// `github` is deliberately not in DEFAULTS: a github block requires labels.in,
+// so only checkGitHub knows the absent-block defaults.
+const GITHUB_DEFAULTS = { authors: [], pollMin: 5, autoClose: true, push: false };
 
 /**
  * Load `.pi/shiftwork.json` merged over `<userDir>/shiftwork.json` (the pi agent dir),
@@ -289,31 +292,51 @@ function checkReview(value, path, tiers) {
 	return out;
 }
 
-const GITHUB_FIELDS = ["repo", "authors", "labels", "pollMin", "autoClose", "push", "planTier"];
-const GITHUB_LABEL_FIELDS = ["in"];
+const GITHUB_FIELDS = ["repo", "authors", "labels", "pollMin", "autoClose", "push", "planTier", "gh"];
+const GITHUB_LABEL_FIELDS = ["in", "working", "needsInfo", "done"];
+
+/** Default names of the labels Shiftwork itself sets on an issue (spec: github-watch). */
+export const GITHUB_LABEL_DEFAULTS = {
+	working: "shiftwork:working",
+	needsInfo: "shiftwork:needs-info",
+	done: "shiftwork:done",
+};
+
+/** The error for a `github` block without `labels.in`: it is required, never silently defaulted. */
+export const GITHUB_LABELS_IN_REQUIRED =
+	'github.labels.in: required: the label that hands an issue to Shiftwork (see docs/guide.md "Dark-factory: labels")';
 
 /** The `github` block: the dark-factory watcher's source repo and behavior (spec: github-watch). */
 function checkGitHub(value, path, tiers) {
-	if (value === undefined) return { ...DEFAULTS.github };
+	// No github block → no github config: filling defaults here would make a second
+	// validateConfig (loadConfig validates, run re-validates with CLI overrides)
+	// see the filled defaults as a github block and demand labels.in.
+	if (value === undefined) return undefined;
 	if (!isPlainObject(value)) fail(path, "must be an object");
 	for (const key of Object.keys(value)) {
 		if (!GITHUB_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown github field; expected one of ${GITHUB_FIELDS.join(", ")}`);
 	}
-	const out = { ...DEFAULTS.github, ...value };
+	const out = { ...GITHUB_DEFAULTS, ...value };
 	if (out.repo !== undefined && !/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
 		fail(`${path}.repo`, `must be "owner/name", got ${JSON.stringify(out.repo)}`);
 	}
 	if (out.authors !== undefined && !(Array.isArray(out.authors) && out.authors.every((a) => typeof a === "string" && a.length > 0))) {
 		fail(`${path}.authors`, "must be an array of GitHub logins");
 	}
-	if (out.labels !== undefined) {
-		if (!isPlainObject(out.labels)) fail(`${path}.labels`, "must be an object");
-		for (const key of Object.keys(out.labels)) {
-			if (!GITHUB_LABEL_FIELDS.includes(key)) fail(`${path}.labels.${key}`, `unknown labels field; expected one of ${GITHUB_LABEL_FIELDS.join(", ")}`);
-		}
-		if (out.labels.in !== undefined && !(typeof out.labels.in === "string" && out.labels.in.length > 0)) {
-			fail(`${path}.labels.in`, "must be a label name");
-		}
+	if (out.labels !== undefined && !isPlainObject(out.labels)) fail(`${path}.labels`, "must be an object");
+	// `labels.in` hands an issue to Shiftwork, so it is required in every `github` block,
+	// never silently defaulted; the labels Shiftwork sets itself get default names.
+	const labels = { ...GITHUB_LABEL_DEFAULTS, ...(isPlainObject(out.labels) ? out.labels : undefined) };
+	for (const key of Object.keys(out.labels ?? {})) {
+		if (!GITHUB_LABEL_FIELDS.includes(key)) fail(`${path}.labels.${key}`, `unknown labels field; expected one of ${GITHUB_LABEL_FIELDS.join(", ")}`);
+	}
+	if (labels.in === undefined || labels.in === null) throw new Error(GITHUB_LABELS_IN_REQUIRED);
+	for (const key of GITHUB_LABEL_FIELDS) {
+		if (typeof labels[key] !== "string" || labels[key].length === 0) fail(`${path}.labels.${key}`, "must be a label name");
+	}
+	out.labels = labels;
+	if (out.gh !== undefined && !(typeof out.gh === "string" && out.gh.length > 0)) {
+		fail(`${path}.gh`, `must be a path to the gh binary, got ${JSON.stringify(out.gh)}`);
 	}
 	if (out.pollMin !== undefined && !(typeof out.pollMin === "number" && Number.isFinite(out.pollMin) && out.pollMin > 0)) {
 		fail(`${path}.pollMin`, "must be a number of minutes > 0");

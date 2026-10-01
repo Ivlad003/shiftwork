@@ -24,6 +24,12 @@ Usage:
                                 besides the excepted ones (default 01) are ready-for-agent
                                 or later, each with checkboxes and a Verify line, and every
                                 Blocked-by number exists in the feature
+  shiftwork github labels [--create]
+                                Check the dark-factory labels (github.labels) exist in the
+                                GitHub repo: ✔ exists / ✖ missing per label, exit 1 when any
+                                is missing; --create creates the missing ones with a colour
+                                and a description, never edits or deletes one
+                                (see docs/guide.md "Dark-factory: labels")
   shiftwork --version
 
 Run options:
@@ -66,6 +72,9 @@ try {
 		}
 		case "run":
 			process.exitCode = await run(rest);
+			break;
+		case "github":
+			process.exitCode = await github(rest);
 			break;
 		case "tui": {
 			const { tui } = await import("../src/tui.js");
@@ -206,6 +215,31 @@ function formatAge(ms) {
 	const d = Math.floor(h / 24);
 	const remH = h % 24;
 	return remH ? `${d}d ${remH}h` : `${d}d`;
+}
+
+/** `github labels [--create]`: check the dark-factory labels exist; `--create` creates the missing ones. */
+async function github(argv) {
+	const [subcommand, ...rest] = argv;
+	if (subcommand !== "labels") {
+		console.log(HELP);
+		return 0;
+	}
+	const { values } = parseArgs({
+		args: rest,
+		options: {
+			create: { type: "boolean" },
+			dir: { type: "string" },
+			help: { type: "boolean", short: "h" },
+		},
+	});
+	if (values.help) {
+		console.log(HELP);
+		return 0;
+	}
+	const root = values.dir ?? process.cwd();
+	const config = await loadConfig(root, process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"));
+	const { githubLabelsCommand } = await import("../src/github-labels.js");
+	return githubLabelsCommand({ root, config, create: values.create });
 }
 
 /** `--no-budget` lifts every limit; `--no-limit tokens,time` (repeatable) adds to the config's `unlimited`. */

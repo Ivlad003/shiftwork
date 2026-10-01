@@ -136,28 +136,37 @@ test("unlimited on a tier and a model profile normalizes to budget field names",
 
 test("github is validated: defaults when absent, full block passes, bad values fail with their path", () => {
 	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] }, plan: { chain: ["a/2"] } } };
-	assert.deepEqual(validateConfig({ ...base }).github, { authors: [], pollMin: 5, autoClose: true, push: false });
+	assert.equal(validateConfig({ ...base }).github, undefined, "no github block → no github config");
+	assert.deepEqual(validateConfig({ ...base, github: { labels: { in: "sw" } } }).github, {
+		authors: [],
+		labels: { in: "sw", working: "shiftwork:working", needsInfo: "shiftwork:needs-info", done: "shiftwork:done" },
+		pollMin: 5,
+		autoClose: true,
+		push: false,
+	}, "a github block fills its own defaults");
 
 	const full = validateConfig({
 		...base,
 		github: {
 			repo: "ivlad003/shiftwork",
 			authors: ["octocat"],
-			labels: { in: "sw" },
+			labels: { in: "sw", working: "sw:working", needsInfo: "sw:needs-info", done: "sw:done" },
 			pollMin: 2,
 			autoClose: false,
 			push: true,
 			planTier: "plan",
+			gh: "/opt/gh",
 		},
 	});
 	assert.deepEqual(full.github, {
 		repo: "ivlad003/shiftwork",
 		authors: ["octocat"],
-		labels: { in: "sw" },
+		labels: { in: "sw", working: "sw:working", needsInfo: "sw:needs-info", done: "sw:done" },
 		pollMin: 2,
 		autoClose: false,
 		push: true,
 		planTier: "plan",
+		gh: "/opt/gh",
 	});
 
 	const partial = validateConfig({ ...base, github: { repo: "ivlad003/shiftwork", labels: { in: "sw" } } });
@@ -165,19 +174,32 @@ test("github is validated: defaults when absent, full block passes, bad values f
 	assert.equal(partial.github.push, false, "push defaults");
 	assert.equal(partial.github.pollMin, 5, "pollMin defaults");
 	assert.equal(partial.github.planTier, undefined, "planTier stays optional");
+	assert.equal(partial.github.gh, undefined, "gh defaults to gh on PATH");
+	assert.deepEqual(
+		partial.github.labels,
+		{ in: "sw", working: "shiftwork:working", needsInfo: "shiftwork:needs-info", done: "shiftwork:done" },
+		"labels.in is required, the others get their defaults",
+	);
 
+	const inLabels = { in: "sw" };
 	for (const [project, message] of [
 		[{ ...base, github: { repo: "shiftwork" } }, /github\.repo: must be "owner\/name"/],
 		[{ ...base, github: { repo: "a/b/c" } }, /github\.repo: must be "owner\/name"/],
-		[{ ...base, github: { pollMin: -1 } }, /github\.pollMin: must be a number of minutes > 0/],
-		[{ ...base, github: { pollMin: "5" } }, /github\.pollMin: must be a number of minutes > 0/],
-		[{ ...base, github: { planTier: "nope" } }, /github\.planTier: unknown tier "nope"/],
+		// A github block without labels.in: the label that hands an issue to Shiftwork is required.
+		[{ ...base, github: { repo: "a/b" } }, /github\.labels\.in: required: the label that hands an issue to Shiftwork \(see docs\/guide\.md "Dark-factory: labels"\)/],
+		[{ ...base, github: {} }, /github\.labels\.in: required/],
+		[{ ...base, github: { labels: { working: "sw:working" } } }, /github\.labels\.in: required/],
+		[{ ...base, github: { pollMin: -1, labels: inLabels } }, /github\.pollMin: must be a number of minutes > 0/],
+		[{ ...base, github: { pollMin: "5", labels: inLabels } }, /github\.pollMin: must be a number of minutes > 0/],
+		[{ ...base, github: { planTier: "nope", labels: inLabels } }, /github\.planTier: unknown tier "nope"/],
 		[{ ...base, github: { strict: true } }, /github\.strict: unknown github field/],
-		[{ ...base, github: { authors: "octocat" } }, /github\.authors: must be an array of GitHub logins/],
+		[{ ...base, github: { authors: "octocat", labels: inLabels } }, /github\.authors: must be an array of GitHub logins/],
 		[{ ...base, github: { labels: { in: "" } } }, /github\.labels\.in: must be a label name/],
+		[{ ...base, github: { labels: { ...inLabels, working: "" } } }, /github\.labels\.working: must be a label name/],
 		[{ ...base, github: { labels: { out: "x" } } }, /github\.labels\.out: unknown labels field/],
-		[{ ...base, github: { autoClose: "yes" } }, /github\.autoClose: must be true or false/],
-		[{ ...base, github: { push: 1 } }, /github\.push: must be true or false/],
+		[{ ...base, github: { autoClose: "yes", labels: inLabels } }, /github\.autoClose: must be true or false/],
+		[{ ...base, github: { push: 1, labels: inLabels } }, /github\.push: must be true or false/],
+		[{ ...base, github: { gh: 5, labels: inLabels } }, /github\.gh: must be a path to the gh binary/],
 		[{ ...base, github: "on" }, /github: must be an object/],
 	]) {
 		assert.throws(() => validateConfig(project), message);

@@ -439,6 +439,42 @@ f/04  type=docs  tier=local  model=ollama/qwen2.5-coder:7b  thinking=off  budget
 f/05  type=infra  tier=premium  model=claude:opus  thinking=high  budget=$4 · 120 turns · 45 min · 70% ctx · 8 stall  review=no
 ```
 
+## Dark-factory: labels
+
+Dark-factory mode takes work from GitHub **issues** instead of `.scratch/`: you hand an issue over with one label, Shiftwork plans and builds it, and reports back on the issue with comments and its own labels. Every label has one meaning:
+
+| Label | Meaning | Who sets it |
+|---|---|---|
+| `shiftwork:in` | The issue is handed to Shiftwork: only issues with this label are taken | You, or any collaborator |
+| `shiftwork:working` | A ticket of the issue is being worked on | Shiftwork |
+| `shiftwork:needs-info` | Shiftwork asked a question in a comment and the issue waits for an answer | Shiftwork |
+| `shiftwork:done` | Every ticket of the issue is resolved | Shiftwork |
+
+Rename them in the `github` block of `.pi/shiftwork.json`. Only `in` is required — without it there is no way to hand an issue over; the others default to the names above:
+
+```json
+"github": {
+  "repo": "owner/name",
+  "labels": {
+    "in": "shiftwork:in",
+    "working": "shiftwork:working",
+    "needsInfo": "shiftwork:needs-info",
+    "done": "shiftwork:done"
+  }
+}
+```
+
+`repo` is `owner/name` (defaults to the `origin` remote). A missing label is an error, never silently created: dark-factory exits with the missing names and tells you to run the command below.
+
+Shiftwork does all GitHub work with the GitHub CLI and its login — no token in the config, and Shiftwork never reads or stores one. Set it up once:
+
+1. Install the GitHub CLI: <https://cli.github.com>. Shiftwork runs your installed `gh` (point at it with `"gh": "/path/to/gh"` in the `github` block when it is not on PATH).
+2. Log in: `gh auth login`.
+3. Check the login: `gh auth status`.
+4. Add the `github` block (above) to `.pi/shiftwork.json`.
+5. Create the labels: `npx shiftwork github labels --create`. It prints `✔ name exists` / `✖ name missing` for each configured label and creates the missing ones with a colour and a description; it never edits or deletes a label. Without `--create` it only checks, and exits 1 when a label is missing.
+6. Hand work over: a collaborator puts the `in` label on an issue.
+
 ## 9. Not there yet
 
 - Editing config from the TUI.

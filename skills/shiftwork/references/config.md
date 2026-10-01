@@ -15,7 +15,7 @@
 - `review`: `{ enabled, tier, features?, types? }` — off by default. Enabled, one review shift runs in a fresh context on `tier` after every ticket lands; the reviewer ends with `<shiftwork:review verdict="accept|reopen|follow-up" reason="…"/>`.
 - `worktree`: `{ enabled, setup }` — `setup` is shell commands (for example `["npm ci --ignore-scripts"]`) whose files are never committed.
 - `tracker`: `"scratch"` (default) or `"openspec"`.
-- `github`: dark-factory mode's source repo — `{ repo, authors, labels: { in }, pollMin, autoClose, push, planTier }`. `repo` is `owner/name` (defaults to the `origin` remote), `authors` adds logins whose issues are imported on top of repo collaborators, `labels.in` narrows imports to issues with that label, `pollMin` (minutes between polls, default 5), `autoClose` (close the issue when every ticket of it is resolved, default true), `push` (`git push` main after a landing so commit links resolve, default false), `planTier` (the tier the planning ticket runs on).
+- `github`: dark-factory mode's source repo — `{ repo, authors, labels, pollMin, autoClose, push, planTier, gh }`. `repo` is `owner/name` (defaults to the `origin` remote), `authors` adds logins whose issues are imported on top of repo collaborators, `labels: { in (required), working, needsInfo, done }` — `in` is the label a collaborator puts on an issue to hand it to Shiftwork (missing → config error); the others default to `shiftwork:working` / `shiftwork:needs-info` / `shiftwork:done` and Shiftwork sets them itself; `pollMin` (minutes between polls, default 5), `autoClose` (close the issue when every ticket of it is resolved, default true), `push` (`git push` main after a landing so commit links resolve, default false), `planTier` (the tier the planning ticket runs on), `gh` (path to the GitHub CLI binary; `gh` from PATH when omitted — Shiftwork uses the operator's installed `gh` and its login, no token). A missing repo label is an error, never silently created: `shiftwork github labels` checks (exit 1 when missing) and `--create` creates the missing ones (see docs/guide.md "Dark-factory: labels").
 - Local models (`ollama/…`) are never paid, and a stopped Ollama server (`OLLAMA_HOST`, default `http://localhost:11434`) makes them unavailable, not cooling.
 
 ## Commands
@@ -28,6 +28,7 @@
 | `npx shiftwork run --once` | work one ticket |
 | `npx shiftwork run` | work the frontier until nothing is left |
 | `npx shiftwork tickets check <feature> [--min <n>] [--except NN]` | planning gate: at least n tickets besides the excepted ones (default `01`) are ready with checkboxes and a Verify line, and every Blocked-by number exists |
+| `npx shiftwork github labels [--create]` | check the dark-factory labels exist in the GitHub repo (`✔ exists` / `✖ missing`, exit 1 when any is missing); `--create` creates the missing ones with a colour and a description, never edits or deletes one |
 | `npx shiftwork tui` | live dashboard: r run · s stop · d dry-run · f filter · q quit |
 
 In pi: `/shift` (frontier), `/shift run`, `/shift stop`.

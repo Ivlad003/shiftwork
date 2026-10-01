@@ -446,6 +446,42 @@ f/04  type=docs  tier=local  model=ollama/qwen2.5-coder:7b  thinking=off  budget
 f/05  type=infra  tier=premium  model=claude:opus  thinking=high  budget=$4 · 120 turns · 45 min · 70% ctx · 8 stall  review=no
 ```
 
+## Dark-factory: лейбли
+
+Режим dark-factory бере роботу з GitHub-**іссюїв** замість `.scratch/`: ти передаєш іссью одним лейблом, Shiftwork планує і робить її, а потім звітує в іссью коментарями і власними лейблами. Кожен лейбл має один сенс:
+
+| Лейбл | Значення | Хто ставить |
+|---|---|---|
+| `shiftwork:in` | Іссью передано Shiftwork: беруться лише іссью з цим лейблом | Ти, або будь-який колаборатор |
+| `shiftwork:working` | Тікет цієї іссїї у роботі | Shiftwork |
+| `shiftwork:needs-info` | Shiftwork поставив запитання в коментарі, іссью чекає відповіді | Shiftwork |
+| `shiftwork:done` | Усі тікети іссїї виконані | Shiftwork |
+
+Перейменуй їх у блоці `github` файлу `.pi/shiftwork.json`. Обов'язковий лише `in` — без нього немає способу передати іссью; решта за замовчуванням мають назви вище:
+
+```json
+"github": {
+  "repo": "owner/name",
+  "labels": {
+    "in": "shiftwork:in",
+    "working": "shiftwork:working",
+    "needsInfo": "shiftwork:needs-info",
+    "done": "shiftwork:done"
+  }
+}
+```
+
+`repo` — це `owner/name` (за замовчуванням з remote `origin`). Відсутній лейбл — це помилка, він ніколи не створюється мовчки: dark-factory завершується зі списком відсутніх назв і підказкою виконати команду нижче.
+
+Усю роботу з GitHub Shiftwork робить через GitHub CLI і твій логін — токена в конфігу немає, і Shiftwork його ніколи не читає й не зберігає. Налаштуй один раз:
+
+1. Встанови GitHub CLI: <https://cli.github.com>. Shiftwork запускає твій встановлений `gh` (вкажи його в блоці `github`: `"gh": "/шлях/до/gh"`, якщо його немає в PATH).
+2. Увійди: `gh auth login`.
+3. Перевір вхід: `gh auth status`.
+4. Додай блок `github` (вище) у `.pi/shiftwork.json`.
+5. Створи лейбли: `npx shiftwork github labels --create`. Команда друкує `✔ назва exists` / `✖ назва missing` для кожного налаштованого лейбла і створює відсутні з кольором та описом; вона ніколи не редагує й не видаляє лейбл. Без `--create` лише перевіряє і виходить з кодом 1, коли якогось лейбла немає.
+6. Передай роботу: колаборатор ставить лейбл `in` на іссью.
+
 ## 9. Чого ще немає
 
 - Редагування конфігу з TUI.
