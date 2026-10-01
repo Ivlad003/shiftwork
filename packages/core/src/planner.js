@@ -5,7 +5,8 @@
  * Untyped tickets with classification.complexity=complex raise the tier by one.
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
- * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, then are capped by the ticket budget.
+ * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, the union of `unlimited` lists (top-level,
+ * tier and model profile) is lifted, then the ticket budget (lifted only by the top-level list) caps the result.
  * Thinking: the ticket type's routing → the model profile → the tier → global. A profile's contextWindow is used for context fill.
  * A provider at its `concurrency` cap (`fullProviders`) is skipped like a cooling one, but no
  * cooldown is written and there is no end time: waiting re-plans after FULL_PROVIDER_RETRY_MS.
@@ -69,12 +70,14 @@ function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierNam
 		skillSources: config.skillSources ?? {},
 	});
 	const ticketBudget = resolveTicketBudget(ticket, config);
-	const budget = liftLimits(
-		capBudget(
+	// Lift the top-level, tier and profile `unlimited` lists from the shift budget only:
+	// the ticket budget (itself lifted only by the top-level list) still caps the shift.
+	const budget = capBudget(
+		liftLimits(
 			mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget),
-			capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
+			[...(config.unlimited ?? []), ...(config.tiers?.[tier]?.unlimited ?? []), ...(profile?.unlimited ?? [])],
 		),
-		config,
+		capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget,
 	);
 	return {
 		backend: ref.backend,
@@ -331,12 +334,12 @@ function capBudgetRemaining(ticketBudget, usage) {
 export function resolveTicketBudget(ticket, config) {
 	const fromTicket = parseTicketBudget(ticket.budget);
 	const fromConfig = config.budgets?.ticket;
-	return liftLimits(mergeBudgets(fromConfig, fromTicket), config);
+	// Only the top-level `unlimited` (and `run --no-budget` / `--no-limit`) lifts ticket budgets.
+	return liftLimits(mergeBudgets(fromConfig, fromTicket), config.unlimited ?? []);
 }
 
-/** Drop the limits `config.unlimited` lifts (`run --no-budget` / `--no-limit`). */
-function liftLimits(budget, config) {
-	const lifted = config.unlimited ?? [];
+/** Drop the given lifted limits (`unlimited` lists, `run --no-budget` / `--no-limit`). */
+function liftLimits(budget, lifted) {
 	if (!budget || !lifted.length) return budget;
 	const out = { ...budget };
 	for (const field of lifted) delete out[field];

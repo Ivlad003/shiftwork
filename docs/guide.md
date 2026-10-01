@@ -240,6 +240,15 @@ npx shiftwork run --no-limit tokens,time   # only these: tokens, cost, turns, ti
 
 Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.pi/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window.
 
+Per tier and per model, `unlimited` takes the same values and lifts **shift limits only**:
+
+```json
+"tiers":  { "local": { "chain": ["ollama/qwen3"], "unlimited": ["turns", "time"] } },
+"models": { "ollama/qwen3": { "unlimited": true } }
+```
+
+A shift on that tier or model runs with the union of the top-level, tier and model lists lifted. The ticket's own budget still caps it — a `**Budget:**` line is a per-ticket decision only the top-level `unlimited` lifts — and only that tier or model is affected, so a free tier can run without turn/time limits while paid models stay capped.
+
 ## 6. Other agents' settings
 
 Every backend, pi included, has an optional top-level block named like its prefix: `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor`.

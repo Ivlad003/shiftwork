@@ -113,6 +113,27 @@ test("parallel and concurrency are validated: > 1 needs worktree.enabled, caps a
 	}
 });
 
+test("unlimited on a tier and a model profile normalizes to budget field names", () => {
+	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] }, standard: { chain: ["a/2"] } } };
+	const config = validateConfig({
+		...base,
+		tiers: { quick: { chain: ["a/1"], unlimited: ["turns", "time"] }, standard: { chain: ["a/2"] } },
+		models: { "a/1": { unlimited: true } },
+	});
+	assert.deepEqual(config.tiers.quick.unlimited, ["maxTurns", "maxWallMin"]);
+	assert.equal(config.tiers.standard.unlimited, undefined, "absent when not set");
+	assert.deepEqual(config.models["a/1"].unlimited, ["maxTokens", "maxCostUsd", "maxTurns", "maxWallMin", "maxContextPct", "stallTurns"]);
+
+	assert.throws(
+		() => validateConfig({ ...base, tiers: { quick: { chain: ["a/1"], unlimited: ["speed"] } } }),
+		/tiers\.quick\.unlimited: unknown limit "speed"/,
+	);
+	assert.throws(
+		() => validateConfig({ ...base, models: { "a/1": { unlimited: "yes" } } }),
+		/models\.a\/1\.unlimited: must be true or a list of limits/,
+	);
+});
+
 test("verifyTimeoutMin must be a positive number of minutes", () => {
 	const base = { routing: { code: { tier: "quick" } }, tiers: { quick: { chain: ["a/1"] } } };
 	assert.equal(validateConfig({ ...base, verifyTimeoutMin: 20 }).verifyTimeoutMin, 20);

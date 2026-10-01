@@ -97,6 +97,7 @@ export function validateConfig(input) {
 		checkSkillGroups(tier.skills, `tiers.${name}.skills`, skillGroups);
 		checkSkillGroups(tier.preload, `tiers.${name}.preload`, skillGroups);
 		checkBudget(tier.budget, `tiers.${name}.budget`);
+		if (tier.unlimited !== undefined) tier.unlimited = normalizeUnlimited(tier.unlimited, `tiers.${name}.unlimited`);
 		for (const group of tier.preload ?? []) {
 			if (!(tier.skills ?? []).includes(group)) fail(`tiers.${name}.preload`, `preload group "${group}" is not in tier skills`);
 		}
@@ -153,7 +154,7 @@ function checkOpenSpec(value, path) {
 	}
 }
 
-const PROFILE_FIELDS = ["contextWindow", "thinking", "budget"];
+const PROFILE_FIELDS = ["contextWindow", "thinking", "budget", "unlimited"];
 
 function checkModels(value, path) {
 	if (value === undefined) return;
@@ -173,6 +174,7 @@ function checkProfile(value, path) {
 	}
 	checkThinking(value.thinking, `${path}.thinking`, { optional: true });
 	checkBudget(value.budget, `${path}.budget`);
+	if (value.unlimited !== undefined) value.unlimited = normalizeUnlimited(value.unlimited, `${path}.unlimited`);
 }
 
 function checkBudgets(value, path) {

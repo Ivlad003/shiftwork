@@ -683,3 +683,68 @@ test("unlimited rejects unknown limit names", () => {
 	assert.throws(() => limitedConfig({ unlimited: ["tokens", "speed"] }), /unlimited.*speed/);
 	assert.throws(() => limitedConfig({ unlimited: "yes" }), /unlimited/);
 });
+
+test("tier unlimited lifts only that tier's shift limits", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "free" }, docs: { tier: "standard" } },
+		tiers: {
+			free: { chain: ["fake/m1"], budget: { maxTurns: 10, maxTokens: 1000 }, unlimited: ["turns", "time"] },
+			standard: { chain: ["fake/m1"], budget: { maxTurns: 10, maxTokens: 1000 } },
+		},
+		budgets: { default: { maxWallMin: 45, stallTurns: 5 }, ticket: { maxCostUsd: 8 } },
+		models: { "fake/m1": { budget: { maxContextPct: 70 } } },
+	});
+	assert.deepEqual(planShift({ ticket: t({ type: "code" }), config: cfg }).budget, {
+		maxTokens: 1000,
+		stallTurns: 5,
+		maxContextPct: 70,
+		maxCostUsd: 8,
+	});
+	assert.deepEqual(planShift({ ticket: t({ type: "docs" }), config: cfg }).budget, {
+		maxTurns: 10,
+		maxTokens: 1000,
+		maxWallMin: 45,
+		stallTurns: 5,
+		maxContextPct: 70,
+		maxCostUsd: 8,
+	});
+});
+
+test("a model profile's unlimited: true lifts every shift limit for that model only", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10, maxTokens: 1000 } } },
+		budgets: { default: { maxWallMin: 45, stallTurns: 5 }, ticket: { maxCostUsd: 8 } },
+		models: { "fake/m2": { budget: { maxContextPct: 70 }, unlimited: true } },
+	});
+	const lifted = planShift({ ticket: t({ type: "code", model: "fake/m2" }), config: cfg }).budget;
+	assert.deepEqual(lifted, { maxCostUsd: 8 }, "only the ticket budget is left");
+	const capped = planShift({ ticket: t({ type: "code" }), config: cfg }).budget;
+	assert.deepEqual(capped, { maxTurns: 10, maxTokens: 1000, maxWallMin: 45, stallTurns: 5, maxCostUsd: 8 });
+});
+
+test("shift limits lifted are the union of the top-level, tier and profile lists", () => {
+	const cfg = validateConfig({
+		routing: { code: { tier: "standard" } },
+		unlimited: ["turns"],
+		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10, maxTokens: 1000 }, unlimited: ["time"] } },
+		budgets: { default: { maxWallMin: 45, stallTurns: 5 } },
+		models: { "fake/m1": { unlimited: ["stall"] } },
+	});
+	assert.deepEqual(planShift({ ticket: t({ type: "code" }), config: cfg }).budget, { maxTokens: 1000 });
+});
+
+test("tier unlimited does not lift the ticket's Budget line; top-level unlimited does", () => {
+	const tier = validateConfig({
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10 }, unlimited: ["turns"] } },
+	});
+	const ticket = t({ type: "code", budget: "50 turns" });
+	assert.equal(planShift({ ticket, config: tier }).budget.maxTurns, 50, "the ticket's own budget still caps");
+	const top = validateConfig({
+		routing: { code: { tier: "standard" } },
+		unlimited: ["turns"],
+		tiers: { standard: { chain: ["fake/m1"], budget: { maxTurns: 10 } } },
+	});
+	assert.equal(planShift({ ticket, config: top }).budget.maxTurns, undefined);
+});

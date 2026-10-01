@@ -7,6 +7,7 @@
 - `model`, `defaultTier`, `routing.<type>` (`{ tier, model, thinking }`): routing order is the ticket's `**Model:**` → `routing[Type]` → the tier chain's first model → `defaultTier` → `model`.
 - `tiers.<name>`: `chain` — fallback order of `"provider/model"` entries — plus `thinking`, `skills`/`preload` (skill groups) and a per-tier `budget`.
 - `budgets` — `default`, `tiers.<name>`, `models.<provider/model>` and `ticket` (written by a `**Budget:**` line): token, cost, turn and context limits. Past a limit, Shiftwork hands the shift to another model.
+- `unlimited` — `true` or a list of limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`), lifts every limit or only those. Also accepted on `tiers.<name>` and `models.<provider/model>`, where it lifts shift limits only: a shift there runs with the union of the top-level, tier and model lists lifted, while the ticket's own `Budget:` line still caps it (only the top-level `unlimited` lifts ticket budgets).
 - `maxAttempts`, `maxHandoffs`, `softLimitPct`, `crossTier`, `allowInPlace`: how hard the runner tries before giving up on a ticket and whether handoffs stay in-process.
 - `cooldown`: `rate`/`usage`/`quota`/`server` durations. All workers share one provider's cooldown; a missing CLI or a stopped Ollama server makes a backend unavailable instead.
 - `skillGroups` / `skillSources`: named groups of skill paths. A tier's `skills` narrows the skills advertised to its models; `preload` forces some of them into context.
