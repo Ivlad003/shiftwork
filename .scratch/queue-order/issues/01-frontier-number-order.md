@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 **Type:** code
-**Verify:** `node --test packages/core/test/runner.test.js packages/core/test/openspec.test.js` · `npm test`
+**Verify:** `node --test packages/core/test/tracker.test.js packages/core/test/runner.test.js packages/core/test/openspec.test.js` · `npm test`
 
 - [ ] Tracker test: features `a-feat` (tickets 03, 04 ready) and `b-feat` (01, 02 ready) → frontier order `b-feat/01, b-feat/02, a-feat/03, a-feat/04`; equal numbers sort by feature name
 - [ ] An orphaned claim still appears in the sorted frontier
