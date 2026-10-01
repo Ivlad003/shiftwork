@@ -40,8 +40,8 @@ test("dashboard: idle runner, one ready ticket", () => {
 
 	assert.match(frame, /Runner: idle \(no run state\)/);
 	assert.match(frame, /Frontier: f\/01 \(1 ready of 1\)/);
-	assert.match(frame, /f \(0\/1 resolved\)/);
-	assert.match(frame, /\| 01 \| First \| ready-for-agent \| {2}\|/);
+	assert.match(frame, /▾ f 0\/1 resolved · 1 ready/);
+	assert.match(frame, /01 First · ready-for-agent/);
 	assert.match(frame, /Cooldowns: none/);
 	assert.match(frame, /Log: no current shift log/);
 });
@@ -71,11 +71,11 @@ test("dashboard: running shift shows ticket, shift, model, budget use and contex
 		log: { path: join("logs", "orch", "11", "attempt-2.jsonl"), lines: ["11:59:58 turn · 12345 tokens"] },
 	}).join("\n");
 
-	assert.match(frame, /Runner: working orch\/11 · TUI dashboard \(pid 1\)/);
-	assert.match(frame, /shift 3 · attempt 2 · xai\/grok-4\.6 · thinking high/);
-	assert.match(frame, /usage: 12345 tokens · \$0\.25 · 5 turns · ctx 38%/);
-	assert.match(frame, /budget: \$2 · 200000 tok/);
-	assert.match(frame, /started 4m ago/);
+	assert.match(frame, /Runner: working orch\/11 · TUI dashboard \(pid 1\) · started 4m ago/);
+	assert.match(frame, /orch\/11 TUI dashboard · xai\/grok-4\.6 · shift 3 · attempt 2/);
+	assert.match(frame, /12345 tokens · \$0\.25 · 5 turns · ctx 38%/);
+	assert.match(frame, /\$2 · 200000 tok/);
+	assert.match(frame, /4m elapsed/);
 	assert.match(frame, /Log: logs\/orch\/11\/attempt-2\.jsonl\n {2}11:59:58 turn · 12345 tokens/);
 });
 
@@ -91,10 +91,10 @@ test("dashboard: a parallel: 2 run state lists every worker (fixture from a real
 	const run = await openRunState(root).read();
 	const frame = renderDashboard({ ...base, run }).join("\n");
 
-	assert.match(frame, /Runner: running \(pid \d+\) · 2 workers/);
-	assert.match(frame, /parallel\/01 · First · shift 1 · attempt 1 · fake\/m1/);
-	assert.match(frame, /parallel\/02 · Second · shift 1 · attempt 1 · fake\/m1/);
-	assert.match(frame, /    usage: 120 tokens · \$0\.01 · 1 turns/);
+	assert.match(frame, /Runner: running \(pid \d+\) · 2 workers · started [0-9a-z ]+ ago/);
+	assert.match(frame, /parallel\/01 First · fake\/m1 · shift 1 · attempt 1/);
+	assert.match(frame, /parallel\/02 Second · fake\/m1 · shift 1 · attempt 1/);
+	assert.match(frame, /120 tokens · \$0\.01 · 1 turns/);
 });
 
 test("dashboard: waiting on cooldowns shows the time left", () => {
@@ -146,9 +146,10 @@ test("dashboard: a feature filter scopes the frontier and the ticket tables", ()
 
 	assert.match(frame, /filter: b/);
 	assert.match(frame, /Frontier: b\/01 \(1 ready of 1\)/);
-	assert.match(frame, /\| 01 \| Two \|/);
-	assert.doesNotMatch(frame, /\| 01 \| One \|/);
-	assert.doesNotMatch(frame, /^a \(0\/1 resolved\)$/m);
+	assert.match(frame, /▾ b 0\/1 resolved · 1 ready/);
+	assert.match(frame, /01 Two · ready-for-agent/);
+	assert.doesNotMatch(frame, /01 One/);
+	assert.doesNotMatch(frame, /▾ a /);
 });
 
 test("dashboard: a notice and the dry-run panel render", () => {
@@ -165,6 +166,135 @@ test("dashboard: a notice and the dry-run panel render", () => {
 	assert.match(pending, /Dry-run \(feature f\): planning…/);
 });
 
+test("dashboard: a ticket a worker holds shows the model ref, prefix included", () => {
+	const frame = renderDashboard({
+		...base,
+		tickets: [ticket("f", "01", "Held", "claimed")],
+		run: {
+			pid: 1,
+			live: true,
+			workers: [{ ticket: { feature: "f", number: "01", title: "Held" }, model: "claude:sonnet", attempt: 1, shift: 1 }],
+		},
+	}).join("\n");
+
+	assert.match(frame, /01 Held · claimed · ● claude:sonnet/);
+});
+
+test("dashboard: collapsed features use ▸ and hide their tickets", () => {
+	const frame = renderDashboard({
+		...base,
+		tickets: [ticket("parallel", "01", "First"), ticket("parallel", "02", "Second")],
+		frontier: [ticket("parallel", "01", "First")],
+		collapsed: ["parallel"],
+	}).join("\n");
+
+	assert.match(frame, /▸ parallel 0\/2 resolved · 1 ready/);
+	assert.doesNotMatch(frame, /01 First/);
+	assert.doesNotMatch(frame, /▾ parallel/);
+});
+
+test("dashboard: details render the ticket's fields, route and latest shift report", () => {
+	const held = {
+		...ticket("f", "03", "Tabbed rendering", "ready-for-agent"),
+		type: "code",
+		model: "anthropic/claude-sonnet",
+		budget: "$2 · 50 turns",
+		verify: ["npm test", "node packages/cli/bin/shiftwork.js tui --once"],
+		blockedBy: ["02"],
+	};
+	const withShift = renderDashboard({
+		...base,
+		tickets: [held],
+		details: "f/03",
+		dryRun: { lines: ["f/03  type=code  tier=standard  model=anthropic/claude-sonnet"] },
+		ticketDetails: {
+			key: "f/03",
+			ticket: held,
+			what: "render the tab of the spec",
+			shift: ["### Shift 1 — pi opencode-go/glm-5.3 (medium)", "- Outcome: new attempt"],
+		},
+	}).join("\n");
+
+	assert.match(withShift, /f\/03 · Tabbed rendering · ready-for-agent/);
+	assert.match(withShift, /Type: code/);
+	assert.match(withShift, /Model: anthropic\/claude-sonnet/);
+	assert.match(withShift, /Budget: \$2 · 50 turns/);
+	assert.match(withShift, /Verify: npm test · node packages\/cli\/bin\/shiftwork\.js tui --once/);
+	assert.match(withShift, /Blocked by: 02/);
+	assert.match(withShift, /Route: f\/03 {2}type=code/);
+	assert.match(withShift, /What to build: render the tab of the spec/);
+	assert.match(withShift, /Last shift report:\n {2}### Shift 1 — pi opencode-go\/glm-5\.3 \(medium\)/);
+
+	const bare = {
+		...ticket("f", "01", "No comments"),
+		type: "docs",
+	};
+	const without = renderDashboard({
+		...base,
+		tickets: [bare],
+		details: "f/01",
+		ticketDetails: { key: "f/01", ticket: bare, what: "a short task", shift: [] },
+	}).join("\n");
+
+	assert.match(without, /Type: docs/);
+	assert.match(without, /Model: -/);
+	assert.match(without, /What to build: a short task/);
+	assert.doesNotMatch(without, /Last shift report/);
+	assert.doesNotMatch(without, /### Shift/);
+});
+
+test("renderDashboard: each tab fits height and width; a 40-ticket queue keeps the cursor row visible", () => {
+	const tickets = Array.from({ length: 40 }, (_, i) => {
+		const number = String(i + 1).padStart(2, "0");
+		return ticket("big", number, `Ticket ${number}`);
+	});
+	const last = tickets.at(-1);
+	const longLog = Array.from({ length: 30 }, (_, i) => `12:00:00 turn · line ${i + 1}`);
+	const state = {
+		...base,
+		tickets,
+		frontier: tickets,
+		cursor: { queue: 40, agents: 4, cooldowns: 4, log: 29 },
+		run: {
+			pid: 9,
+			live: true,
+			startedAt: "2026-10-01T11:00:00Z",
+			workers: Array.from({ length: 5 }, (_, i) => ({
+				ticket: { feature: "big", number: String(i + 1).padStart(2, "0"), title: `Ticket ${String(i + 1).padStart(2, "0")}` },
+				model: "claude:sonnet",
+				tier: "standard",
+				attempt: 1,
+				shift: 1,
+				usage: { tokens: 10, costUsd: 0.01, turns: 1, contextPct: 4 },
+			})),
+		},
+		cooldowns: Array.from({ length: 5 }, (_, i) => ({
+			provider: `p${i}`,
+			kind: "rate",
+			until: "2026-10-01T12:10:00Z",
+		})),
+		log: { path: join("logs", "big", "40", "attempt-1.jsonl"), lines: longLog },
+	};
+	const width = 48;
+	const height = 12;
+
+	for (const tab of ["queue", "agents", "cooldowns", "log"]) {
+		const lines = renderDashboard({ ...state, tab }, { width, height });
+		assert.ok(lines.length <= height, `${tab}: ${lines.length} lines`);
+		for (const line of lines) {
+			assert.ok(line.length <= width, `${tab}: ${line.length} > ${width}: ${line}`);
+		}
+	}
+
+	const queue = renderDashboard({ ...state, tab: "queue" }, { width, height });
+	assert.equal(queue.some((line) => line.includes(`${last.number} ${last.title}`)), true);
+	assert.match(queue.join("\n"), />   40 Ticket 40/);
+	assert.equal(
+		renderDashboard({ ...state, tab: "queue" }, { width, height }).join("\n").includes("Ticket 01"),
+		false,
+	);
+});
+
 test("collectDashboardState: an empty repo has no run, no log and no tickets", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-tui-empty-"));
 	const state = await collectDashboardState(root, { now });
@@ -174,6 +304,100 @@ test("collectDashboardState: an empty repo has no run, no log and no tickets", a
 	assert.deepEqual(state.tickets, []);
 	assert.deepEqual(state.cooldowns, []);
 	renderDashboard(state); // must not throw
+});
+
+test("collectDashboardState: tails the selected worker's log, else the first", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-log-pick-"));
+	await mkdir(join(root, ".scratch", "f", "issues"), { recursive: true });
+	await writeFile(join(root, ".scratch", "f", "issues", "01-first.md"), "# 01: First\n\n**Status:** claimed\n");
+	await writeFile(join(root, ".scratch", "f", "issues", "02-second.md"), "# 02: Second\n\n**Status:** claimed\n");
+	await mkdir(join(root, ".pi"), { recursive: true });
+	await writeFile(
+		join(root, ".pi", "shiftwork-run.json"),
+		JSON.stringify({
+			runners: [
+				{
+					pid: process.pid,
+					running: true,
+					workers: [
+						{ ticket: { feature: "f", number: "01" }, attempt: 1 },
+						{ ticket: { feature: "f", number: "02" }, attempt: 2 },
+					],
+				},
+			],
+		}),
+	);
+	await mkdir(join(root, "logs", "f", "01"), { recursive: true });
+	await mkdir(join(root, "logs", "f", "02"), { recursive: true });
+	await writeFile(join(root, "logs", "f", "01", "attempt-1.jsonl"), `${JSON.stringify({ at: "2026-10-01T11:00:00Z", type: "turn", usage: { totalTokens: 1 } })}\n`);
+	await writeFile(join(root, "logs", "f", "02", "attempt-2.jsonl"), `${JSON.stringify({ at: "2026-10-01T11:00:01Z", type: "turn", usage: { totalTokens: 99 } })}\n`);
+
+	const first = await collectDashboardState(root, { now });
+	assert.equal(first.log.path, join("logs", "f", "01", "attempt-1.jsonl"));
+	assert.match(first.log.lines[0], /1 tokens/);
+
+	const selected = await collectDashboardState(root, { now, view: { selectedWorker: "f/02" } });
+	assert.equal(selected.log.path, join("logs", "f", "02", "attempt-2.jsonl"));
+	assert.match(selected.log.lines[0], /99 tokens/);
+});
+
+test("collectDashboardState: open details read the ticket body and the latest shift report", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-details-"));
+	await mkdir(join(root, ".scratch", "f", "issues"), { recursive: true });
+	await writeFile(
+		join(root, ".scratch", "f", "issues", "01-with-shift.md"),
+		[
+			"# 01: With shift",
+			"",
+			"**What to build:** the tabbed frame",
+			"",
+			"**Blocked by:** 02",
+			"",
+			"**Status:** ready-for-agent",
+			"**Type:** code",
+			"**Model:** anthropic/claude-sonnet",
+			"**Budget:** $2",
+			"**Verify:** `npm test`",
+			"",
+			"## Comments",
+			"",
+			"### Shift 1 — pi fake/m1 (low)",
+			"- Outcome: new attempt",
+			"",
+			"### Shift 2 — pi opencode-go/glm-5.3 (medium)",
+			"- Outcome: resolved",
+			"",
+		].join("\n"),
+	);
+	await writeFile(
+		join(root, ".scratch", "f", "issues", "02-no-comments.md"),
+		"# 02: No comments\n\n**What to build:** nothing extra\n\n**Status:** resolved\n",
+	);
+
+	const closed = await collectDashboardState(root, { now });
+	assert.equal(closed.ticketDetails, null);
+
+	const withShift = await collectDashboardState(root, { now, view: { details: "f/01" } });
+	assert.equal(withShift.ticketDetails.key, "f/01");
+	assert.equal(withShift.ticketDetails.what, "the tabbed frame");
+	assert.equal(withShift.ticketDetails.shift[0], "### Shift 2 — pi opencode-go/glm-5.3 (medium)");
+	assert.equal(
+		withShift.ticketDetails.shift.some((line) => line.includes("Shift 1")),
+		false,
+	);
+	const frame = renderDashboard({ ...withShift, details: "f/01" }).join("\n");
+	assert.match(frame, /Type: code/);
+	assert.match(frame, /What to build: the tabbed frame/);
+	assert.match(frame, /Last shift report:/);
+	assert.match(frame, /### Shift 2 — pi opencode-go\/glm-5\.3 \(medium\)/);
+	assert.doesNotMatch(frame, /### Shift 1 /);
+
+	const bare = await collectDashboardState(root, { now, view: { details: "f/02" } });
+	assert.equal(bare.ticketDetails.what, "nothing extra");
+	assert.deepEqual(bare.ticketDetails.shift, []);
+	const bareFrame = renderDashboard({ ...bare, details: "f/02" }).join("\n");
+	assert.match(bareFrame, /What to build: nothing extra/);
+	assert.doesNotMatch(bareFrame, /Last shift report/);
 });
 
 test("tailShiftLog: a missing log file gives an empty tail, not a crash", async () => {
@@ -231,8 +455,9 @@ test("shiftwork tui --once prints one frame and exits", async () => {
 
 	assert.equal(stderr, "");
 	assert.match(stdout, /Runner: working f\/01 · First \(pid \d+\)/);
-	assert.match(stdout, /shift 1 · attempt 1 · fake\/m1 · thinking low/);
-	assert.match(stdout, /usage: 120 tokens · \$0\.25 · 1 turns · ctx 12%/);
+	assert.match(stdout, /f\/01 First · fake\/m1 · shift 1 · attempt 1/);
+	assert.match(stdout, /120 tokens · \$0\.25 · 1 turns · ctx 12%/);
+	assert.match(stdout, /01 First · claimed · ● fake\/m1/);
 	assert.match(stdout, /Log: logs\/f\/01\/attempt-1\.jsonl/);
 	assert.match(stdout, /turn · 120 tokens/);
 });

@@ -81,7 +81,7 @@ async function interactive(root, { ProcessTerminal, TuiMainScreen, Text }) {
 	};
 	const controls = createTuiControls({ root, onChange: paint });
 	const refresh = async () => {
-		last = await collectDashboardState(root);
+		last = await collectDashboardState(root, { view: controls.view });
 		controls.setDashboard(last);
 		paint();
 	};
@@ -114,7 +114,7 @@ async function fallback(root, error) {
 	};
 	const controls = createTuiControls({ root, onChange: paint });
 	const frame = async () => {
-		last = await collectDashboardState(root);
+		last = await collectDashboardState(root, { view: controls.view });
 		controls.setDashboard(last);
 		paint();
 	};
