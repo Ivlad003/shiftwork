@@ -36,6 +36,9 @@ const cases = [
 	["You've run out of credits. Purchase credits to keep using Grok Build.", , "quota"],
 	["out of budget", , "quota"],
 	["billing hard limit reached", , "quota"],
+	['error: 402: {"type":"server_error","message":"Upstream request failed: Insufficient account funds"}', , "quota"],
+	["insufficient balance", , "quota"],
+	["402 Payment Required", , "quota"],
 
 	// Server (pi-ai 5xx / overloaded)
 	["overloaded_error: The model is currently overloaded", , "server"],

@@ -462,7 +462,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const until = limit ? (limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
 		if (limit) await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(limit.resetAt) });
 		// The limit may have hit after the work was done: if the gate passes, the ticket is resolved.
-		const limitGate = limit && ticket.verify.length > 0 && shift.needsInfo === null ? await verify(ticket.verify, cwd) : null;
+		// With nothing changed, nobody worked the ticket yet: hand it on instead of judging the gate.
+		const workedBeforeLimit = limit && (!workspace?.hasChanges || (await workspace.hasChanges(ticket)));
+		const limitGate = workedBeforeLimit && ticket.verify.length > 0 && shift.needsInfo === null ? await verify(ticket.verify, cwd) : null;
 		if (limit && !limitGate?.ok) {
 			await tracker.appendComment(
 				ticket,

@@ -22,6 +22,9 @@ const QUOTA = pattern([
 	"exceeded your (?:current )?quota",
 	"out of credits",
 	"billing",
+	"insufficient (?:account )?(?:funds|balance|credits?)",
+	"payment.?required",
+	"\\b402\\b",
 ]);
 
 const RATE = pattern(["rate_limit", "rate.?limit", "too many requests", "429", "ResourceExhausted"]);

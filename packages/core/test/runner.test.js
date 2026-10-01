@@ -919,7 +919,7 @@ test("a long cooldown is waited out in steps of at most a minute, so a STOP file
 test("a passing verify gate with no change in the worktree doesn't resolve the ticket", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Verify:** `done.txt`" }) });
 	const workspace = fakeWorkspace({ changed: false });
-	const backend = fakeBackend([{ error: '429: {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}' }]);
+	const backend = fakeBackend([{}]);
 	const verify = async () => ({ ok: true, results: [{ cmd: "npm test", code: 0, outputTail: "" }] });
 
 	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config, workspace });
@@ -927,6 +927,31 @@ test("a passing verify gate with no change in the worktree doesn't resolve the t
 	assert.deepEqual(summary.resolved, []);
 	assert.match(summary.needsInfo[0].reason, /no shift changed anything/);
 	assert.ok(!workspace.calls.some(([op]) => op === "land"));
+});
+
+test("a provider limit before any change hands the ticket to the next model, even when the gate already passes", async () => {
+	const cfg = chainTwoProviders();
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	let changed = false;
+	const workspace = { ...fakeWorkspace(), async hasChanges() { return changed; } };
+	const backend = fakeBackend([
+		{ error: 'error: 402: {"type":"server_error","message":"Upstream request failed: Insufficient account funds"}' },
+		{ files: { "done.txt": "ok" } },
+	]);
+	const verify = async () => {
+		const ok = true;
+		if (backend.shifts.length === 2) changed = true;
+		return { ok, results: [{ cmd: "npm test", code: 0, outputTail: "" }] };
+	};
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify, config: cfg, workspace });
+
+	assert.equal(backend.shifts.length, 2);
+	assert.equal(backend.shifts[1].request.route.model, "other/m2");
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const state = JSON.parse(await readFile(`${root}/.pi/shiftwork-state.json`, "utf8"));
+	assert.equal(state.cooldowns[0].kind, "quota");
+	assert.match(await ticketText(root, "f", "01-a.md"), /Provider limit: quota on fake/);
 });
 
 function stallConfig(extra = {}) {
