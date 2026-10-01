@@ -4,6 +4,20 @@ Shiftwork works a queue of tickets with autonomous coding agents. Each ticket ge
 
 ## Language
 
+### GitHub watch
+
+**Dark-factory mode**:
+The `shiftwork run --dark-factory` loop that polls GitHub, imports collaborators' issues, works the frontier and reports back, without an operator picking each ticket. See ADR-0006.
+_Avoid_: autopilot, unattended mode
+
+**Planning ticket**:
+The first ticket of an imported GitHub feature (`01-plan.md`), which reads the issue and splits it into the tickets that follow.
+_Avoid_: triage ticket, import ticket
+
+**Reconcile step**:
+The pass that reports imported features' progress back to their GitHub issues with comments, labels and closing, never deleting.
+_Avoid_: sync, pushback
+
 ### Work
 
 **Feature**:
