@@ -104,13 +104,6 @@
   "preferWaitMin": 30,
   "review": {
     "enabled": true,
-    "tier": "premium",
-    "features": [
-      "local-and-skills",
-      "parallel",
-      "tui-polish",
-      "tier-unlimited",
-      "github-watch"
-    ]
+    "tier": "premium"
   }
 }
