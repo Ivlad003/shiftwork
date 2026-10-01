@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-export const VERSION = "0.1.4";
+export const VERSION = "0.1.5";
 
 /** Statuses a runner may pick up or treat as finished. */
 export const READY = "ready-for-agent";
