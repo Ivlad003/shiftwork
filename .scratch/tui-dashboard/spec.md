@@ -56,5 +56,5 @@ Starting a chosen ticket while a runner is live (it needs a queue the live runne
 | 01 | `shiftwork run --ticket` works one chosen ticket | resolved | opencode-go/glm-5.3 |
 | 02 | TUI view state and key decoding | resolved | opencode-go/glm-5.3 |
 | 03 | Tabbed, height-aware dashboard rendering | resolved | xai/grok-4.6 |
-| 04 | Interactive full-screen TUI with tabs and run-this-ticket | needs-info | opencode-go/glm-5.3 |
+| 04 | Interactive full-screen TUI with tabs and run-this-ticket | resolved | xai/grok-4.6 |
 <!-- shiftwork:tickets:end -->

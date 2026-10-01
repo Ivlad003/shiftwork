@@ -100,7 +100,7 @@ function onTerminalResize(terminal, handler) {
 export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text }, options = {}) {
 	const terminal = options.terminal ?? new ProcessTerminal();
 	const ui = new TuiAltScreen(terminal, false);
-	const text = new Text("");
+	const text = new Text("", 0, 0);
 	if (typeof ui.setLayoutRoot === "function") ui.setLayoutRoot(text);
 	else ui.addChild(text);
 	let last = null;
