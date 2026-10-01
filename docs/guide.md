@@ -290,9 +290,16 @@ Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`.
 
 ### What the TUI does
 
-| It shows | Keys |
-|---|---|
-| The running ticket, its model, tier, usage and budget; the ready tickets per feature; active cooldowns; the log tail | `r` start a run · `s` stop with handoff · `d` dry run (route and budget of each ready ticket) · `f` filter by feature · `q` quit |
+Four full-screen tabs (`1`–`4`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**. A header shows the tabs and the last notice; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense.
+
+| Tab | It shows | Keys |
+|---|---|---|
+| Queue | Features as folders (`▾ parallel 3/4`) with their tickets (number, title, status, blockers, `● model` when an agent holds one) | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `n` run this ticket · `esc` back |
+| Agents | One row per running shift: ticket, model, tier, shift/attempt, tokens, cost, turns, context fill, budget, elapsed | `↑↓`/`j k` move · `enter` opens that agent's log |
+| Cooldowns | Active provider cooldowns and time left | `↑↓`/`j k` move |
+| Log | Tail of the selected agent's shift log (else the first live worker's) | `↑↓`/`j k` move |
+
+Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `q` quit. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live.
 
 The TUI only watches and starts or stops runs. Models, tiers, routing and budgets are edited in `.pi/shiftwork.json`; the next ticket picks up the changes.
 

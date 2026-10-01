@@ -395,6 +395,46 @@ test("reducer: n starts the selected frontier ticket; anything else is refused w
 	assert.match(live.state.notice, /a runner is already working \(pid 42\)/);
 });
 
+test("n on a ready ticket starts a detached runner with --ticket; a blocked ticket is refused", async () => {
+	const root = await repo({
+		"demo/07-widget.md": ticketBody,
+		"demo/08-blocked.md": `# 08: Blocked\n\n**Blocked by:** 07\n\n**Status:** ready-for-agent\n\n**Type:** git\n`,
+	});
+	const controls = createTuiControls({
+		root,
+		start: (root_, effect) => startDetachedRunner(root_, { ticket: effect.ticket, bin: argvRunner }),
+	});
+	controls.setDashboard({
+		run: null,
+		tickets: [
+			{ feature: "demo", number: "07", status: "ready-for-agent", blockedBy: [] },
+			{ feature: "demo", number: "08", status: "ready-for-agent", blockedBy: ["07"] },
+		],
+		frontier: [{ feature: "demo", number: "07", blockedBy: [] }],
+		claims: [],
+	});
+
+	await controls.handleKey("down"); // demo/07
+	await controls.handleKey("down"); // demo/08
+	const blocked = await controls.handleKey("n");
+	assert.deepEqual(blocked, []);
+	assert.match(controls.view.notice, /demo\/08 is not on the frontier: blocked by 07/);
+
+	await controls.handleKey("up"); // demo/07
+	const effects = await controls.handleKey("n");
+	assert.deepEqual(effects, [{ type: "start-runner", feature: null, ticket: "demo/07" }]);
+	assert.match(controls.view.notice, /runner started \(pid \d+\)/);
+
+	const argv = await waitFor(async () => {
+		try {
+			return JSON.parse(await readFile(join(root, "argv.json"), "utf8"));
+		} catch {
+			return false;
+		}
+	});
+	assert.deepEqual(argv, ["run", "--ticket", "demo/07"]);
+});
+
 test("reducer: n's start effect is wired through the controls like r's", async () => {
 	const root = await repo({ "demo/07-widget.md": ticketBody });
 	const started = [];

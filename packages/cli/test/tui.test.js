@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openRunState } from "shiftwork-core";
 import { collectDashboardState, formatLogLine, renderDashboard, tailShiftLog } from "../src/dashboard.js";
-import { loadPiTui } from "../src/tui.js";
+import { interactive, loadPiTui } from "../src/tui.js";
 
 const parallelRunState = fileURLToPath(new URL("./fixtures/parallel-run-state.json", import.meta.url));
 
@@ -492,4 +492,183 @@ test("loadPiTui resolves pi-tui next to a managed-install pi package, and report
 	});
 	assert.equal(missing.kit, undefined);
 	assert.match(missing.error.message, /pi\.root/);
+});
+
+test("shiftwork tui --help describes the tabs and keys", async () => {
+	const { stdout, stderr } = await exec(["tui", "--help"]);
+
+	assert.equal(stderr, "");
+	assert.match(stdout, /Queue/);
+	assert.match(stdout, /Agents/);
+	assert.match(stdout, /Cooldowns/);
+	assert.match(stdout, /Log/);
+	assert.match(stdout, /1–4/);
+	assert.match(stdout, /n runs the selected ticket/);
+	assert.match(stdout, /TuiAltScreen/);
+});
+
+async function waitFor(check, timeoutMs = 5_000) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const found = await check();
+		if (found) return found;
+		if (Date.now() > deadline) throw new Error("timed out");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+/** A Terminal that records size, one resize, and input — no real TTY. */
+class StubTerminal {
+	constructor({ columns = 80, rows = 24 } = {}) {
+		this.columns = columns;
+		this.rows = rows;
+		this.writes = [];
+		this.started = false;
+		this.stopped = false;
+		this._onInput = null;
+		this._onResize = null;
+	}
+	start(onInput, onResize) {
+		this.started = true;
+		this._onInput = onInput;
+		this._onResize = onResize;
+	}
+	stop() {
+		this.stopped = true;
+	}
+	write(data) {
+		this.writes.push(data);
+	}
+	drainInput() {
+		return Promise.resolve();
+	}
+	get kittyProtocolActive() {
+		return false;
+	}
+	moveBy() {}
+	hideCursor() {}
+	showCursor() {}
+	clearLine() {}
+	clearFromCursor() {}
+	clearScreen() {}
+	setTitle() {}
+	setProgress() {}
+	send(data) {
+		this._onInput?.(data);
+	}
+	resize(columns, rows) {
+		this.columns = columns;
+		this.rows = rows;
+		this._onResize?.();
+	}
+}
+
+class StubText {
+	constructor(text = "") {
+		this.frames = [];
+		this.text = text;
+	}
+	setText(text) {
+		this.text = text;
+		this.frames.push(text);
+	}
+	invalidate() {}
+	render() {
+		return this.text.split("\n");
+	}
+}
+
+class StubTuiAltScreen {
+	constructor(terminal) {
+		this.terminal = terminal;
+		this.listeners = [];
+		this.layoutRoot = null;
+		this.children = [];
+		this.renders = 0;
+		this.started = false;
+		this.stopped = false;
+	}
+	setLayoutRoot(component) {
+		this.layoutRoot = component;
+	}
+	addChild(component) {
+		this.children.push(component);
+	}
+	addInputListener(listener) {
+		this.listeners.push(listener);
+		return () => {};
+	}
+	requestRender() {
+		this.renders += 1;
+	}
+	start() {
+		this.started = true;
+		this.terminal.start((data) => {
+			for (const listener of this.listeners) {
+				const result = listener(data);
+				if (result?.consume) return;
+			}
+		}, () => this.requestRender());
+	}
+	stop() {
+		this.stopped = true;
+		this.terminal.stop();
+	}
+}
+
+test("interactive: stub terminal size, one resize, a key chunk reaching handleKey", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-stub-"));
+	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "01-first.md"),
+		"# 01: First\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n",
+	);
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "02-second.md"),
+		"# 02: Second\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n",
+	);
+
+	const terminal = new StubTerminal({ columns: 80, rows: 24 });
+	const keys = [];
+	let text;
+	const kit = {
+		ProcessTerminal: class {},
+		TuiAltScreen: StubTuiAltScreen,
+		Text: class extends StubText {
+			constructor(initial) {
+				super(initial);
+				text = this;
+			}
+		},
+	};
+
+	const done = interactive(root, kit, { terminal, onKey: (key) => keys.push(key) });
+
+	const first = await waitFor(() => (text?.frames.length ? text.text : false));
+	const firstLines = first.split("\n");
+	assert.ok(firstLines.length <= 24, `first frame ${firstLines.length} lines`);
+	for (const line of firstLines) {
+		assert.ok(line.length <= 80, `first frame line ${line.length} > 80`);
+	}
+	assert.match(first, /\[1 Queue\]/);
+
+	const before = text.frames.length;
+	terminal.resize(40, 10);
+	const resized = await waitFor(() => (text.frames.length > before ? text.text : false));
+	const resizedLines = resized.split("\n");
+	assert.ok(resizedLines.length <= 10, `resized frame ${resizedLines.length} lines`);
+	for (const line of resizedLines) {
+		assert.ok(line.length <= 40, `resized line ${line.length} > 40: ${line}`);
+	}
+
+	terminal.send("\x1b[B\x1b[B2");
+	await waitFor(() => keys.includes("2"));
+	assert.deepEqual(
+		keys.filter((k) => k === "down" || k === "2"),
+		["down", "down", "2"],
+	);
+
+	terminal.send("q");
+	assert.equal(await done, 0);
+	assert.equal(terminal.stopped, true);
 });

@@ -17,7 +17,8 @@ Usage:
                                 List tickets and the frontier of ready ones
   shiftwork run [options]       Work the frontier until nothing is left
   shiftwork tui [--once] [--dir <path>]
-                                Dashboard: tickets, the live runner, cooldowns, logs; r runs, s stops, d dry-runs
+                                Full-screen dashboard (Queue, Agents, Cooldowns, Log);
+                                1–4 tabs, n runs the selected ticket, r runs, s stops, d dry-runs
   shiftwork --version
 
 Run options:
