@@ -5,7 +5,7 @@ import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
 import { chooseHandoffMode, cooldownKey, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
-import { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
+import { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, REVIEW_WRAP_UP_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
 import { noRunState, openRunState } from "./run-state.js";
 
 const NEEDS_INFO = "needs-info";
@@ -21,6 +21,8 @@ const REVIEW_MARKER = /<shiftwork:review\s+verdict="([^"]*)"\s+reason="([^"]*)"\
 const REVIEW_VERDICTS = new Set(["accept", "reopen", "follow-up"]);
 /** Review findings kept in the ticket; the full review text stays in the review log. */
 const REVIEW_FINDING_LINES = 40;
+/** Recorded when two review shifts give no verdict: no silent accept, a human reviews by hand. */
+const NO_VERDICT_REASON = "review gave no verdict twice; review it by hand";
 
 /**
  * Decide what happens to a ticket after one attempt. Pure.
@@ -628,6 +630,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					slots,
 				});
 				if (review.verdict === "reopen") return { action: "reopen", reason: review.reason, review };
+				// No verdict twice is no silent accept: the ticket goes to needs-info, the landed commit stays.
+				if (review.verdict === "none") return { action: NEEDS_INFO, reason: review.reason, review };
 				return { action: "resolve", reason, review };
 			}
 			return { action: "resolve", reason };
@@ -672,7 +676,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
  * One review shift on the review tier, in a fresh context, after a ticket lands.
  * The reviewer reads the ticket, the spec and the landed diff, runs the verify gate
  * and ends with a verdict marker; the runner records it as `### Review` in Comments.
- * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "skip", reason: string, warning?: string, followUp?: object }>}
+ * A review that ends without a valid verdict (an unknown verdict word counts as none)
+ * is retried once, in a fresh context, on the next model of the review tier's chain;
+ * a second miss is no silent accept — the ticket goes to needs-info for a human.
+ * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip", reason: string, warnings?: string[], followUp?: object }>}
  */
 async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots }) {
 	const review = config.review;
@@ -693,59 +700,113 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		await tracker.appendComment(ticket, `### Review\n- Not run: ${why}`);
 		return { verdict: "skip", reason: why };
 	}
+	// The review's own budget: ticket, tier and model budgets never cap it, and no
+	// `unlimited` list lifts it — only `review.budget` itself does.
+	const route = { ...plan, budget: review.budget };
 
-	const releaseSlot = slots ? slots.acquire(plan.provider) : undefined;
-	if (slots && !releaseSlot) {
-		await tracker.appendComment(ticket, `### Review\n- Not run: ${plan.provider} is at its concurrency cap`);
-		return { verdict: "skip", reason: `${plan.provider} at its concurrency cap` };
-	}
-	let shift;
-	try {
-		shift = await runShift(
-			backend,
-			{
-				root,
-				cwd: root,
-				route: plan,
-				prompt: buildReviewPrompt(ticket, { root, landed }),
-				systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
-				softLimitPct: config.softLimitPct ?? 80,
-				ticketPath: ticket.path,
-				// A review is one shift: no handoffs, no in-place swaps.
-				maxHandoffs: 0,
-			},
-			(event) => log({ ticket, attempt: "review", event }),
-		);
-	} finally {
-		releaseSlot?.();
+	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots });
+	if (first.notRun) {
+		await tracker.appendComment(ticket, `### Review\n- Not run: ${first.notRun}`);
+		return { verdict: "skip", reason: first.notRun };
 	}
 
-	const markers = [...shift.text.matchAll(REVIEW_MARKER)];
-	const marker = markers[markers.length - 1];
-	let verdict = marker?.[1];
-	let reason = marker?.[2];
-	let warning;
-	if (!marker) {
-		warning = shift.error ? `review shift failed: ${shift.error}; treated as accept` : "review ended without a verdict marker; treated as accept";
-	} else if (!REVIEW_VERDICTS.has(verdict)) {
-		warning = `unknown review verdict "${verdict}"; treated as accept`;
+	const warnings = [];
+	let outcome = reviewVerdict(route, first.shift);
+	let finalShift = first.shift;
+	let retryRoute = undefined;
+	if (!outcome.verdict) {
+		// No verdict is not accept: once more, in a fresh context, on the next model of the chain.
+		warnings.push(outcome.why);
+		retryRoute = nextReviewRoute(route, config, review);
+		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots });
+		finalShift = second.shift ?? finalShift;
+		outcome = second.notRun
+			? { verdict: null, reason: null, why: `${retryRoute.model}: ${second.notRun}` }
+			: reviewVerdict(retryRoute, second.shift);
+		if (!outcome.verdict) warnings.push(outcome.why);
 	}
-	if (warning) {
-		verdict = "accept";
-		reason = reason?.trim() || "no verdict given";
+	let verdict = outcome.verdict;
+	let reason = outcome.reason;
+	if (!verdict) {
+		// Two review shifts, no verdict: recorded as none, and a human reviews by hand.
+		verdict = "none";
+		reason = NO_VERDICT_REASON;
 	}
 
 	// reopen puts the ticket back on the frontier: the landed commit stays, the next shift fixes forward.
 	if (verdict === "reopen") await tracker.setStatus(ticket, READY);
+	// none hands the ticket to a human: the landed commit stays, the review is recorded as none.
+	if (verdict === "none") await tracker.setStatus(ticket, NEEDS_INFO);
 
 	const verifyResult = ticket.verify.length ? await verify(ticket.verify, root) : null;
 	let followUp;
 	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { root, type, reason, verify: ticket.verify });
 	await tracker.appendComment(
 		ticket,
-		formatReviewComment({ route: plan, verdict, reason, warning, verifyResult, shift, followUp }),
+		[
+			formatReviewComment({ route, retryRoute, verdict, reason, warnings, verifyResult, shift: finalShift, followUp }),
+			...(verdict === "none" ? [`<shiftwork:needs-info reason="${NO_VERDICT_REASON}"/>`] : []),
+		].join("\n"),
 	);
-	return { verdict, reason, warning, followUp };
+	return { verdict, reason, warnings, followUp };
+}
+
+/** Run one review shift on `route`: its own provider slot, the reviewer prompt, no handoffs, the wrap-up steer at its soft limit. */
+async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots }) {
+	const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
+	if (slots && !releaseSlot) return { notRun: `${route.provider} is at its concurrency cap` };
+	try {
+		const shift = await runShift(
+			backend,
+			{
+				root,
+				cwd: root,
+				route,
+				prompt: buildReviewPrompt(ticket, { root, landed }),
+				systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
+				softLimitPct: config.softLimitPct ?? 80,
+				ticketPath: ticket.path,
+				// A review is one shift: no handoffs, no in-place swaps.
+				maxHandoffs: 0,
+				// At its soft limit a review wraps up and gives its verdict; it never gets the worker handoff prompt.
+				softLimitSteer: REVIEW_WRAP_UP_PROMPT,
+			},
+			(event) => log({ ticket, attempt: "review", event }),
+		);
+		return { shift };
+	} finally {
+		releaseSlot?.();
+	}
+}
+
+/** One review shift's verdict: the last marker in its text, or why there is none (an unknown verdict word counts as none). */
+function reviewVerdict(route, shift) {
+	const markers = [...shift.text.matchAll(REVIEW_MARKER)];
+	const marker = markers[markers.length - 1];
+	const verdict = marker?.[1];
+	const reason = marker?.[2]?.trim();
+	if (marker && REVIEW_VERDICTS.has(verdict)) return { verdict, reason: reason || "no reason given" };
+	const why = !marker
+		? shift.error
+			? `review shift failed: ${shift.error}`
+			: "review ended without a verdict marker"
+		: `unknown review verdict "${verdict}"`;
+	return { verdict: null, reason: null, why: `${route.model}: ${why}` };
+}
+
+/**
+ * The retry route for a review without a verdict: the next model of the review tier's
+ * chain after `route`'s (the chain's first model when `route`'s is the last or not in
+ * the chain, so a single-model chain retries on its only model, in a fresh context).
+ * Everything else but the model stays as planned, the review budget included.
+ */
+function nextReviewRoute(route, config, review) {
+	const chain = config.tiers?.[review.tier]?.chain ?? [];
+	const used = route.ref ?? route.model;
+	const model = chain[chain.indexOf(used) + 1] ?? chain[0];
+	if (!model || model === used) return route;
+	const ref = parseModelRef(model);
+	return { ...route, backend: ref.backend, model: ref.model, provider: ref.provider, ref: model };
 }
 
 /** File the follow-up ticket: a new ticket in the feature, blocked by nothing, with the reviewed ticket's verify gate. */
@@ -759,8 +820,9 @@ async function createFollowUp(tracker, ticket, { root, type, reason, verify }) {
 	return { ...(await tracker.createTicket(ticket.feature, { title, what, type, verify })), created: true };
 }
 
-function formatReviewComment({ route, verdict, reason, warning, verifyResult, shift, followUp }) {
-	const lines = [`### Review — ${route.backend} ${route.model} (${route.thinking})`, `- Verdict: ${verdict} — ${reason}`, `- Time: ${formatDuration(shift.wallMin)}`];
+function formatReviewComment({ route, retryRoute, verdict, reason, warnings = [], verifyResult, shift, followUp }) {
+	const retried = retryRoute && retryRoute.model !== route.model ? `, retried on ${retryRoute.backend} ${retryRoute.model} (${retryRoute.thinking})` : "";
+	const lines = [`### Review — ${route.backend} ${route.model} (${route.thinking})${retried}`, `- Verdict: ${verdict} — ${reason}`, `- Time: ${formatDuration(shift.wallMin)}`];
 	if (verifyResult?.ok) lines.push("- Verify: passed");
 	else if (verifyResult) {
 		const failed = verifyResult.results.find((r) => r.code !== 0) ?? verifyResult;
@@ -769,7 +831,7 @@ function formatReviewComment({ route, verdict, reason, warning, verifyResult, sh
 		if (failed.outputTail) lines.push("", "```", failed.outputTail.trimEnd(), "```", "");
 	} else lines.push("- Verify: not run");
 	for (const w of shift.warnings ?? []) lines.push(`- Warning: ${w}`);
-	if (warning) lines.push(`- Warning: ${warning}`);
+	for (const w of warnings) lines.push(`- Warning: ${w}`);
 	const findings = reviewFindings(shift.text);
 	if (findings.length) lines.push("- Findings:", "", ...findings);
 	if (followUp?.created) lines.push(`- Follow-up: ${followUp.feature}/${followUp.number} — ${followUp.title}`);
@@ -1002,7 +1064,8 @@ async function runShift(backend, request, log) {
 		if (limit.level === "soft" && shift.steer) {
 			const isFirst = !softFired;
 			softFired = true;
-			if (isFirst) await beginGrace(SOFT_LIMIT_STEER, limit.kind);
+			// A review gets the wrap-up prompt instead: it never gets the worker handoff prompt.
+			if (isFirst) await beginGrace(request.softLimitSteer ?? SOFT_LIMIT_STEER, limit.kind);
 		} else if (limit.level === "hard") {
 			return tryInPlace(limit.reason, limit.kind);
 		}

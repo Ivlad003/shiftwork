@@ -95,6 +95,8 @@ export interface Review {
 	features?: string[];
 	/** Ticket types (the effective type) that get reviews; every type when omitted. */
 	types?: string[];
+	/** The review shift's whole budget (`{ maxWallMin: 20, maxTurns: 60 }` by default): ticket, tier and model budgets never cap it, and no `unlimited` list lifts it — only `review.budget` itself does. */
+	budget?: Budget;
 }
 
 /** Whether a resolved ticket gets one review shift on the review tier. */

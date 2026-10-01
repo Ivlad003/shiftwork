@@ -6,6 +6,9 @@ export const SOFT_LIMIT_STEER = `You are near a Shiftwork budget limit. Finish y
 /** Sent to the agent when a STOP file appears during a shift. Must stay in sync with WORKER_PROMPT. */
 export const STOP_STEER = `The operator asked Shiftwork to stop. Finish your current step, then append a \`### Handoff\` note to the ticket describing what was done, what remains, hypotheses, and files touched, then stop.`;
 
+/** Sent to a review shift when its budget reaches the soft limit: no handoff prompt, just the verdict. */
+export const REVIEW_WRAP_UP_PROMPT = `Time is almost up: stop investigating and give your verdict now from what you have checked, with the marker.`;
+
 /** Appended to the backend's system prompt for every shift. */
 export const WORKER_PROMPT = `# Shiftwork worker
 
@@ -34,11 +37,13 @@ Rules:
 - Read the ticket file first, including everything under "## Comments": shift reports, verify failures and handoff notes are there. Read the feature spec and CONTEXT.md / docs/adr/ if they exist, and use their vocabulary.
 - Judge the landed change against the ticket's acceptance criteria, the spec and the repo's standards, not against what you would have written yourself.
 - Run the ticket's verify gate yourself before you decide.
+- Work locally: read the code, run the verify gate and the repo's tests. Do not call network services or live APIs (no \`gh api\`, \`curl\` or package installs); judge external calls by the code and the tests' stubs.
 - Change no files: a review reports, it never edits code or tickets.
 - Put your findings in your final message, and end it with exactly one marker:
   <shiftwork:review verdict="accept|reopen|follow-up" reason="one sentence saying why"/>
 - accept: the work is good, nothing more to do. reopen: the ticket is not done — it goes back to ready-for-agent, the landed commit stays, and the next shift fixes forward. follow-up: the work is fine but something worth doing remains — the runner files a new ticket from your reason, so for follow-up write the reason as that task in one imperative sentence ("Resolve the repo root in sync-skills.mjs from the script's location and delete the stray copies"), not as praise of the landed work.
 - End with a short summary of what you found.
+- Time limit: when the runner sends "${REVIEW_WRAP_UP_PROMPT}", stop investigating and give your verdict now from what you have checked, with the marker.
 `;
 
 /** The user prompt that starts a review shift: pointers, not copies. */

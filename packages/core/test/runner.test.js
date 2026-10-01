@@ -5,7 +5,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openCooldowns, openRunState, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
-import { SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
+import { REVIEWER_PROMPT, REVIEW_WRAP_UP_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
 import { formatDuration } from "../src/runner.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
@@ -1410,6 +1410,12 @@ function reviewConfig(review = {}) {
 	});
 }
 
+/** A review config whose review tier has a chain to retry on: ["fake/r1", "fake/r2"]. */
+function retryReviewConfig(review = {}) {
+	const config = reviewConfig(review);
+	return { ...config, tiers: { ...config.tiers, premium: { chain: ["fake/r1", "fake/r2"], thinking: "high" } } };
+}
+
 const reviewMarker = (verdict, reason) => `<shiftwork:review verdict="${verdict}" reason="${reason}"/>`;
 
 test("shouldReview is on by default on the strongest configured tier and respects the when/features/types filters", () => {
@@ -1512,28 +1518,160 @@ test("a follow-up verdict files a new ready ticket in the feature", async () => 
 	assert.match(created, /"### Review" block in \.scratch\/f\/issues\/01-a\.md\./);
 });
 
-test("a review without the marker is treated as accept with a warning", async () => {
+test("a review without the marker is retried once on the next chain model; a second miss is no silent accept", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
-	const backend = fakeBackend([{ files: { "done.txt": "ok" } }, { text: "Looks good, but I forgot the marker." }]);
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: "Still investigating, no verdict yet." },
+		{ text: "Ran out of time, still no verdict." },
+	]);
 
-	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: retryReviewConfig() });
 
-	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(summary.exitCode, 2);
+	assert.deepEqual(summary.resolved, []);
+	assert.deepEqual(summary.needsInfo.map((t) => t.number), ["01"]);
+	assert.equal(summary.needsInfo[0].reason, "review gave no verdict twice; review it by hand");
+	assert.equal(backend.shifts.length, 3, "one worker shift, two review shifts");
+	assert.equal(backend.shifts[1].request.route.model, "fake/r1");
+	assert.equal(backend.shifts[2].request.route.model, "fake/r2", "the retry runs on the next model of the review tier's chain");
 	const text = await ticketText(root, "f", "01-a.md");
-	assert.match(text, /- Verdict: accept — no verdict given/);
-	assert.match(text, /- Warning: review ended without a verdict marker; treated as accept/);
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+	assert.match(text, /### Review — pi fake\/r1 \(high\), retried on pi fake\/r2 \(high\)/);
+	assert.match(text, /- Verdict: none — review gave no verdict twice; review it by hand/);
+	assert.match(text, /- Warning: fake\/r1: review ended without a verdict marker/);
+	assert.match(text, /- Warning: fake\/r2: review ended without a verdict marker/);
+	assert.match(text, /<shiftwork:needs-info reason="review gave no verdict twice; review it by hand"\/>/);
 });
 
-test("an unknown review verdict is treated as accept with a warning", async () => {
+test("a valid marker on the retry is recorded normally, with the first miss as a warning", async () => {
 	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
-	const backend = fakeBackend([{ files: { "done.txt": "ok" } }, { text: reviewMarker("reject", "not a verdict") }]);
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: "Still investigating, no verdict yet." },
+		{ text: `Checked it all.\n\n${reviewMarker("accept", "matches the spec")}` },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: retryReviewConfig() });
+
+	assert.equal(summary.exitCode, 0);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts[2].request.route.model, "fake/r2");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/);
+	assert.match(text, /### Review — pi fake\/r1 \(high\), retried on pi fake\/r2 \(high\)/);
+	assert.match(text, /- Verdict: accept — matches the spec/);
+	assert.match(text, /- Warning: fake\/r1: review ended without a verdict marker/);
+	assert.doesNotMatch(text, /- Verdict: none/);
+});
+
+test("a single-model review chain retries on its only model, in a fresh context", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: "No verdict, sorry." },
+		{ text: "Still no verdict." },
+	]);
 
 	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
 
-	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.deepEqual(summary.needsInfo.map((t) => t.number), ["01"]);
+	assert.equal(backend.shifts.length, 3);
+	assert.equal(backend.shifts[1].request.route.model, "fake/r1");
+	assert.equal(backend.shifts[2].request.route.model, "fake/r1", "the retry is a fresh context on the only model");
 	const text = await ticketText(root, "f", "01-a.md");
-	assert.match(text, /- Verdict: accept — not a verdict/);
-	assert.match(text, /- Warning: unknown review verdict "reject"; treated as accept/);
+	assert.match(text, /### Review — pi fake\/r1 \(high\)\n/);
+	assert.match(text, /- Verdict: none — review gave no verdict twice; review it by hand/);
+});
+
+test("an unknown verdict word counts as no verdict and is retried like a missing marker", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: reviewMarker("reject", "not a verdict") },
+		{ text: reviewMarker("maybe", "also not a verdict") },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: retryReviewConfig() });
+
+	assert.deepEqual(summary.resolved, []);
+	assert.deepEqual(summary.needsInfo.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+	assert.match(text, /- Verdict: none — review gave no verdict twice; review it by hand/);
+	assert.match(text, /- Warning: fake\/r1: unknown review verdict "reject"/);
+	assert.match(text, /- Warning: fake\/r2: unknown review verdict "maybe"/);
+	assert.doesNotMatch(text, /- Verdict: accept/);
+});
+
+test("at its soft limit a review shift gets the wrap-up prompt, never the worker handoff prompt", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const steered = [];
+	const turn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{
+			events: [turn, { ...turn }, { ...turn }, { ...turn }, { ...turn }, { type: "end", stopReason: "stop" }],
+			steer: async (text) => {
+				steered.push(text);
+			},
+		},
+		// The budget-aborted review is retried once: it also gives no verdict.
+		{ text: "No verdict from the retry either." },
+	]);
+	const config = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: { standard: { chain: ["fake/m1"], thinking: "low" }, premium: { chain: ["fake/r1", "fake/r2"], thinking: "high" } },
+		softLimitPct: 60,
+		unlimited: true,
+		review: { enabled: true, tier: "premium", budget: { maxTurns: 5 } },
+	});
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config });
+
+	assert.deepEqual(steered, [REVIEW_WRAP_UP_PROMPT], "the review is told to wrap up, not to hand off");
+	assert.ok(!steered.includes(SOFT_LIMIT_STEER));
+});
+
+test("the review route's budget is review.budget, independent of ticket, tier and model budgets", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Budget:** $5 · 500 turns\n**Verify:** `done.txt`" }),
+	});
+	const config = validateConfig({
+		defaultType: "code",
+		thinking: "low",
+		maxAttempts: 2,
+		routing: { code: { tier: "standard" } },
+		tiers: {
+			standard: { chain: ["fake/m1"], thinking: "low", budget: { maxTurns: 100, maxWallMin: 100 } },
+			premium: { chain: ["fake/r1"], thinking: "high", budget: { maxTurns: 200, maxWallMin: 200 } },
+		},
+		budgets: { default: { maxTurns: 50 }, ticket: { maxTurns: 10 }, models: { "fake/r1": { maxTurns: 300 } } },
+		models: { "fake/r1": { budget: { maxTurns: 400 } } },
+		unlimited: true,
+		review: { enabled: true, tier: "premium" },
+	});
+	const backend = fakeBackend([{ files: { "done.txt": "ok" } }, { text: reviewMarker("accept", "ok") }]);
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config });
+
+	// The review's own budget, default 20 min / 60 turns: no ticket, tier or model budget caps it, and no `unlimited` list lifts it.
+	assert.deepEqual(backend.shifts[1].request.route.budget, { maxWallMin: 20, maxTurns: 60 });
+	// The worker shift's budget is still the usual merge — here lifted entirely by `unlimited: true`.
+	assert.deepEqual(backend.shifts[0].request.route.budget, {});
+});
+
+test("the reviewer prompt is local-only, wraps up at its soft limit and never asks for a handoff", () => {
+	assert.match(
+		REVIEWER_PROMPT,
+		/Work locally: read the code, run the verify gate and the repo's tests\. Do not call network services or live APIs \(no `gh api`, `curl` or package installs\); judge external calls by the code and the tests' stubs\./,
+	);
+	assert.ok(REVIEWER_PROMPT.includes(REVIEW_WRAP_UP_PROMPT));
+	// It reads the ticket's handoff notes, but never asks for one itself.
+	assert.doesNotMatch(REVIEWER_PROMPT, /### Handoff/);
 });
 
 test("a config with no review block reviews every resolved ticket, on the strongest configured tier", async () => {

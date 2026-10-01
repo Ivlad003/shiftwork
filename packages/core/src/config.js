@@ -25,6 +25,9 @@ const DEFAULTS = {
 	review: { enabled: true, when: "resolve" },
 };
 
+/** The review shift's whole budget, when reviews run: only `review.budget` itself lifts a field of it. */
+export const DEFAULT_REVIEW_BUDGET = { maxWallMin: 20, maxTurns: 60 };
+
 // `github` is deliberately not in DEFAULTS: a github block requires labels.in,
 // so only checkGitHub knows the absent-block defaults.
 const GITHUB_DEFAULTS = { authors: [], pollMin: 5, autoClose: true, push: false };
@@ -276,7 +279,8 @@ function checkJev(value, path) {
 }
 
 const REVIEW_WHEN = ["resolve"];
-const REVIEW_FIELDS = ["enabled", "tier", "when", "features", "types", "reason"];
+// `reason` is an output of checkReview only (why reviews are off with no tier), never an operator field.
+const REVIEW_FIELDS = ["enabled", "tier", "when", "features", "types", "budget"];
 // The conventional tier ladder strongest first: the default review tier picks the strongest configured one.
 const STRONGEST_TIER_ORDER = [...TIER_ORDER].reverse();
 
@@ -288,8 +292,15 @@ function checkReview(value, path, tiers) {
 	if (value === false) return { enabled: false, when: "resolve" };
 	if (value === true || value === undefined) value = {};
 	if (!isPlainObject(value)) fail(path, "must be an object, true or false");
+	// `reason` is this function's own output (why reviews are off with no tier), never an operator
+	// field: re-validating a validated config (`run` does) must not fail on the value it wrote.
+	// Any other `reason` is an unknown field.
 	for (const key of Object.keys(value)) {
-		if (!REVIEW_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown review field; expected one of ${REVIEW_FIELDS.join(", ")}`);
+		if (key === "reason") {
+			if (value.reason !== REVIEW_NO_TIER_REASON) fail(`${path}.reason`, `unknown review field; expected one of ${REVIEW_FIELDS.join(", ")}`);
+		} else if (!REVIEW_FIELDS.includes(key)) {
+			fail(`${path}.${key}`, `unknown review field; expected one of ${REVIEW_FIELDS.join(", ")}`);
+		}
 	}
 	const out = { ...DEFAULTS.review, ...value };
 	if (typeof out.enabled !== "boolean") fail(`${path}.enabled`, "must be true or false");
@@ -312,6 +323,21 @@ function checkReview(value, path, tiers) {
 	}
 	if (out.types !== undefined && !(Array.isArray(out.types) && out.types.every((t) => typeof t === "string" && t.length > 0))) {
 		fail(`${path}.types`, "must be an array of ticket types");
+	}
+	// The review shift's whole budget, only when reviews can run: ticket, tier and model
+	// budgets never cap it, and no `unlimited` list lifts it — only `review.budget` itself does.
+	checkBudget(value.budget, `${path}.budget`);
+	if (out.enabled) out.budget = reviewBudget(value.budget);
+	else delete out.budget;
+	return out;
+}
+
+/** The review budget over its default: `review.budget`'s fields win, a `null` field lifts its default. */
+function reviewBudget(budget) {
+	const out = { ...DEFAULT_REVIEW_BUDGET };
+	for (const [key, limit] of Object.entries(budget ?? {})) {
+		if (limit === undefined || limit === null) delete out[key];
+		else out[key] = limit;
 	}
 	return out;
 }

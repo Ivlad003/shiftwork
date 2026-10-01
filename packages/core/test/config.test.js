@@ -61,7 +61,19 @@ test("tracker and openspec.verify are validated", async () => {
 test("review is on by default on the strongest configured tier; filters are arrays; `false` and `{ enabled: false }` opt out", async () => {
 	// No review block and a full tier ladder: reviews on the strongest configured tier.
 	const ladder = await dirs({ model: "a/1", tiers: { quick: { chain: ["a/1"] }, standard: { chain: ["a/1"] }, premium: { chain: ["a/1"] } } });
-	assert.deepEqual((await loadConfig(ladder.root, ladder.userDir)).review, { enabled: true, tier: "premium", when: "resolve" });
+	assert.deepEqual((await loadConfig(ladder.root, ladder.userDir)).review, {
+		enabled: true,
+		tier: "premium",
+		when: "resolve",
+		budget: { maxWallMin: 20, maxTurns: 60 },
+	});
+	// The review's own budget: `review.budget` over its default, a `null` field lifts its default.
+	const budgeted = await dirs({
+		model: "a/1",
+		tiers: { premium: { chain: ["a/1"] } },
+		review: { budget: { maxTurns: 40, maxWallMin: null } },
+	});
+	assert.deepEqual((await loadConfig(budgeted.root, budgeted.userDir)).review.budget, { maxTurns: 40 });
 
 	// No premium: the strongest of what is configured.
 	const standard = await dirs({ model: "a/1", tiers: { quick: { chain: ["a/1"] }, standard: { chain: ["a/1"] } } });
@@ -100,6 +112,7 @@ test("review is on by default on the strongest configured tier; filters are arra
 		when: "resolve",
 		features: ["f"],
 		types: ["code"],
+		budget: { maxWallMin: 20, maxTurns: 60 },
 	});
 
 	for (const [project, message] of [
@@ -108,6 +121,10 @@ test("review is on by default on the strongest configured tier; filters are arra
 		[{ model: "a/1", review: { enabled: "yes" } }, /review\.enabled: must be true or false/],
 		[{ model: "a/1", review: { when: "land" } }, /review\.when: must be one of resolve/],
 		[{ model: "a/1", review: { strict: true } }, /review\.strict: unknown review field/],
+		// `reason` is an output of checkReview only (why reviews are off with no tier), never an operator field.
+		[{ model: "a/1", review: { reason: "hi" } }, /review\.reason: unknown review field/],
+		[{ model: "a/1", review: { budget: "x" } }, /review\.budget: must be an object/],
+		[{ model: "a/1", review: { budget: { maxTurns: -1 } } }, /review\.budget\.maxTurns: must be a non-negative finite number/],
 		[{ model: "a/1", review: { features: "f" } }, /review\.features: must be an array of feature names/],
 		[{ model: "a/1", review: { types: "code" } }, /review\.types: must be an array of ticket types/],
 		[{ model: "a/1", review: "always" }, /review: must be an object, true or false/],

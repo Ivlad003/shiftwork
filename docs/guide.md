@@ -238,7 +238,7 @@ npx shiftwork run --no-budget              # every limit: turns, tokens, cost, t
 npx shiftwork run --no-limit tokens,time   # only these: tokens, cost, turns, time, context, stall
 ```
 
-Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.pi/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window.
+Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.pi/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window. The review shift's own budget (`review.budget`, section 7) is never lifted by any of these — only `review.budget` itself does.
 
 Per tier and per model, `unlimited` takes the same values and lifts **shift limits only**:
 
@@ -354,6 +354,10 @@ Reviews are **on by default**: after a ticket lands, a fresh agent on the review
 ```
 
 The verdict is written to the ticket as `### Review`: **accept** (done), **reopen** (back to `ready-for-agent`; the next `run` fixes forward on top of the landed commit), or **follow-up** (a new ticket is filed in the feature, with the same Verify). To turn reviews off: `"review": false` (or `{ "enabled": false }`) in the config, or `shiftwork run --no-review` for one run. With no tiers there is nothing to review on, so reviews stay off and `run` says so at start. `run` prints the review tier (or its filters) at start; `--dry-run` shows which tickets would be reviewed (`review=<tier>` or `review=no`).
+
+The reviewer works **locally**: it reads the code, runs the verify gate and the repo's tests, and never calls network services or live APIs — no `gh api`, `curl` or package installs; external calls are judged by the code and the tests' stubs. The review shift runs on **its own budget**, `review.budget` (default `{ "maxWallMin": 20, "maxTurns": 60 }`, the same fields as any other budget): ticket, tier and model budgets never cap it, and `unlimited` lists don't lift it — only `review.budget` itself does. At its soft limit the reviewer is told to stop investigating and give its verdict, not to hand off.
+
+A review must give a verdict — there is **no silent accept**. A review that ends without a valid marker (an unknown verdict word counts as none) is retried once, in a fresh context, on the next model of the review tier's chain. If that one also gives no verdict, the ticket records `- Verdict: none` and goes to `needs-info` (`review gave no verdict twice; review it by hand`): the landed commit stays, and a human reviews it by hand.
 
 ## 8. A full config example
 
