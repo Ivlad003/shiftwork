@@ -90,14 +90,34 @@ A ticket without a `Type` gets `defaultType`, unless Jev (a small classifier mod
 
 | Field | Meaning |
 |---|---|
-| `thinking` | Reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set globally, per tier, per route, or per model. |
+| `thinking` | Reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Set globally, per tier, per route, or per model. Only pi models use it (see below). |
 | `crossTier` | `"up"`: when a whole tier is cooling, borrow from the next tier up (`"down"` or `"none"` also work). |
 | `paidProviders` | Providers that cost money, e.g. `["openrouter"]`. `…:free` and `ollama/…` models never count as paid. |
 | `preferWaitMin` | If a free model will be back within this many minutes, wait for it instead of using a paid one. |
 | `cooldown` | How long a provider rests after a limit when it gives no reset time: `{ "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" }`. |
 | `maxAttempts` | Failed Verify runs before a ticket becomes `needs-info` (default 3). |
 | `parallel` | How many frontier tickets the runner works at once (default 1). Above 1 needs `"worktree": { "enabled": true }`: every parallel ticket gets its own worktree. |
-| `concurrency` | Caps the shifts running at once per provider, e.g. `{ "ollama": 1 }` for a single GPU. A full provider is skipped like a cooling one. |
+| `concurrency` | Caps the shifts running at once per provider, e.g. `{ "ollama": 1 }` for a single GPU. A full provider is skipped like a cooling one. The keys are the cooldown keys: `ollama`, `claude`, `opencode:opencode-go`. |
+
+### Model profiles
+
+The `models` section sets options for one model, whichever tier it sits in. The key is the model name exactly as written in a `chain` or a `Model:` line, backend prefix included.
+
+```json
+"models": {
+  "ollama/qwen2.5-coder:7b": { "contextWindow": 32768 },
+  "xai/grok-4.6":            { "thinking": "high" },
+  "claude:opus":             { "budget": { "maxCostUsd": 4, "maxTurns": 120 } }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `thinking` | Overrides the tier's `thinking`. Order: `routing[type].thinking` → `models[model].thinking` → `tiers[tier].thinking` → global `thinking`. |
+| `contextWindow` | Context window in tokens. `maxContextPct` is measured against it instead of the window the backend reports. Useful for a local model served with a smaller window. |
+| `budget` | Shift budget for this model (fields from section 5). Applied last. |
+
+**`thinking` only works for pi.** Shiftwork passes the reasoning level only to models without a prefix (`provider/model`). The `claude:`, `codex:`, `opencode:`, `grok:` and `cursor:` backends ignore it, even though `--dry-run` and the TUI show `thinking=…` for them too. Set a CLI agent's reasoning level its own way: in its config or with flags in `args` (section 6).
 
 ## 3. Local models (Ollama)
 
@@ -186,7 +206,8 @@ Where to set them in `.pi/shiftwork.json`:
 }
 ```
 
-- A shift budget is built from `default`, then the tier's, then the model's. Later ones override earlier ones.
+- A shift budget is built from `budgets.default`, then the tier's budget, then `budgets.models[model]`, then `models[model].budget` (section 2). Later ones override earlier ones.
+- A tier's budget can go in `budgets.tiers.<tier>` or straight in the tier as `"budget"` (what `init` writes). If both are set, the one in the tier wins.
 - `budgets.ticket` is the default ticket total. A ticket's own `Budget:` line overrides it, and no shift may use more than the ticket has left.
 
 What happens near and at a limit:
@@ -207,15 +228,29 @@ What happens near and at a limit:
 
 ## 6. Other agents' settings
 
-Each CLI backend has an optional block with `command`, `args`, `env` and `timeoutMs`:
+Every backend, pi included, has an optional top-level block named like its prefix: `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor`.
+
+| Field | Meaning |
+|---|---|
+| `command` | The program to run (not for `pi`). Defaults: `claude`, `codex`, `opencode`, `grok`, `cursor-agent`. A full path works. |
+| `args` | Extra flags, placed after Shiftwork's own flags and before the prompt. |
+| `env` | Extra environment variables for the agent process, on top of yours. |
+| `timeoutMs` | A safety timeout for the process. Normal limits are budgets (section 5). |
+| `sandbox` | `codex` only, see below. |
 
 ```json
+"pi":     { "env": { "PI_CODING_AGENT_DIR": "/home/me/.pi/agent-work" } },
 "claude": { "args": ["--max-turns", "200"], "timeoutMs": 3600000 },
 "codex":  { "sandbox": "bypass" },
+"grok":   { "command": "/home/me/.grok/bin/grok" },
 "cursor": { "command": "cursor-agent" }
 ```
 
 `codex.sandbox`: `"approve-for-me"` (default), `"workspace-write"`, or `"bypass"` when the environment is already isolated, or when bwrap can't create a sandbox.
+
+Shiftwork passes `args` through unchecked. See the CLI's own `--help` for what it accepts. `--dry-run` doesn't start agents, so try new `args` with one `shiftwork run --once`.
+
+Never set `command: "agent"` for Grok or Cursor. Both installers link an `agent`, and which one runs depends on PATH order.
 
 ### Project instructions: AGENTS.md and CLAUDE.md
 
@@ -268,6 +303,107 @@ Turn on a **review shift**: after a ticket lands, a fresh agent on the tier you 
 
 `features` and `types` are optional filters. The verdict is written to the ticket as `### Review`: **accept** (done), **reopen** (back to `ready-for-agent`; the next `run` fixes forward on top of the landed commit), or **follow-up** (a new ticket is filed in the feature, with the same Verify). Reviews are off by default. `--dry-run` shows which tickets would be reviewed.
 
-## 8. Not there yet
+## 8. A full config example
+
+One `.pi/shiftwork.json` that uses most of this guide: five different agents, a local model, model profiles, parallel runs and reviews.
+
+```json
+{
+  "defaultType": "code",
+  "thinking": "medium",
+  "maxAttempts": 3,
+  "maxHandoffs": 3,
+  "softLimitPct": 80,
+  "parallel": 2,
+  "worktree": { "enabled": true, "setup": ["npm ci --ignore-scripts"] },
+
+  "tiers": {
+    "local":    { "chain": ["ollama/qwen2.5-coder:7b"], "thinking": "off" },
+    "quick":    { "chain": ["opencode:opencode-go/kimi-k3", "openrouter/qwen/qwen3.8-27b:free", "cursor:auto"],
+                  "thinking": "low", "skills": ["core", "design"], "preload": ["core"],
+                  "budget": { "maxTurns": 40, "maxContextPct": 60, "stallTurns": 5 } },
+    "standard": { "chain": ["claude:sonnet", "codex:gpt-5.6-terra", "xai/grok-4.6"],
+                  "skills": ["core"],
+                  "budget": { "maxCostUsd": 1.5, "maxTokens": 3000000 } },
+    "premium":  { "chain": ["claude:opus", "grok:grok-4.7", "openrouter/anthropic/claude-opus-5"],
+                  "thinking": "high",
+                  "budget": { "maxCostUsd": 3, "maxContextPct": 70 } }
+  },
+
+  "routing": {
+    "git":      { "tier": "quick", "thinking": "low" },
+    "docs":     { "tier": "local" },
+    "test":     { "tier": "standard" },
+    "code":     { "tier": "standard" },
+    "refactor": { "tier": "premium" },
+    "infra":    { "model": "claude:opus" }
+  },
+
+  "models": {
+    "ollama/qwen2.5-coder:7b":            { "contextWindow": 32768 },
+    "xai/grok-4.6":                       { "thinking": "high" },
+    "openrouter/anthropic/claude-opus-5": { "budget": { "maxCostUsd": 3 } },
+    "claude:opus":                        { "budget": { "maxCostUsd": 4, "maxTurns": 120 } }
+  },
+
+  "budgets": {
+    "default": { "maxTurns": 60, "maxWallMin": 45, "stallTurns": 8 },
+    "ticket":  { "maxCostUsd": 8, "maxWallMin": 120 }
+  },
+
+  "onExceed": {
+    "maxCostUsd":    { "to": "downgrade", "mode": "new-process" },
+    "maxTokens":     { "to": "downgrade", "mode": "new-process" },
+    "maxTurns":      { "to": "next",      "mode": "new-process" },
+    "maxWallMin":    { "to": "next",      "mode": "new-process" },
+    "maxContextPct": { "to": "same-tier", "mode": "new-process" },
+    "stallTurns":    { "to": "escalate",  "mode": "new-process" },
+    "verifyFailed":  { "to": "escalate",  "mode": "new-process" }
+  },
+
+  "crossTier": "up",
+  "paidProviders": ["openrouter", "xai"],
+  "preferWaitMin": 20,
+  "cooldown": { "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" },
+  "concurrency": { "ollama": 1, "claude": 1 },
+
+  "skillSources": { "tdd": "/home/me/.agents/skills/tdd", "design": "./skills/design" },
+  "skillGroups":  { "core": ["tdd"], "design": ["design"] },
+
+  "review": { "enabled": true, "tier": "premium", "types": ["code", "refactor"] },
+  "jev": { "enabled": true, "model": ["typesafe/jev-latest", "opencode/jev-1.13-free"] },
+
+  "pi":       { "timeoutMs": 10800000 },
+  "claude":   { "args": ["--max-turns", "200"], "timeoutMs": 3600000 },
+  "codex":    { "sandbox": "workspace-write" },
+  "opencode": { "timeoutMs": 3600000 },
+  "grok":     { "command": "grok" },
+  "cursor":   { "command": "cursor-agent" }
+}
+```
+
+What it does:
+
+- **Four tiers on different agents.** `local`: Ollama only. `quick`: OpenCode → a free OpenRouter model through pi → Cursor. `standard`: Claude Code → Codex → Grok through pi. `premium`: Claude Code with Opus → Grok Build → Opus through OpenRouter.
+- **Routes.** Docs go to the local model, and `infra` always goes to `claude:opus`, whatever the tiers say.
+- **Model profiles.** Ollama's context fill is measured against 32k. `xai/grok-4.6` reasons at `high` although tier `standard` says `medium`. `claude:opus` gets its own budget.
+- **Tier `premium`'s `thinking` (`high`)** only reaches `openrouter/anthropic/claude-opus-5`, the one pi model in that tier. `claude:opus` and `grok:grok-4.7` don't get it (section 2).
+- **Parallelism.** Two tickets at once, each in its own worktree, but at most one shift on Ollama (one GPU) and one on Claude Code (one subscription).
+- **Money.** `openrouter` and `xai` are paid. If a free model is back within 20 minutes, Shiftwork waits for it. When a whole tier is cooling, it borrows from the tier above (`crossTier: "up"`).
+- **Reviews** run on `premium`, for `code` and `refactor` tickets only.
+
+Check it before a run:
+
+```bash
+npx shiftwork run --dry-run
+```
+
+```
+f/04  type=code  tier=standard  model=claude:sonnet  thinking=medium  budget=$1.5 · 3000000 tok · 60 turns · 45 min · 8 stall  review=premium
+f/04  type=docs  tier=local  model=ollama/qwen2.5-coder:7b  thinking=off  budget=$8 · 60 turns · 45 min · 8 stall  review=no
+f/05  type=infra  tier=premium  model=claude:opus  thinking=high  budget=$4 · 120 turns · 45 min · 70% ctx · 8 stall  review=no
+```
+
+## 9. Not there yet
 
 - Editing config from the TUI.

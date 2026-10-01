@@ -5,7 +5,7 @@
 ## Docs
 
 - [README](README.md): What Shiftwork is and how the packages fit together.
-- [Guide](docs/guide.md): Plain-language walkthrough: install, init, models, tiers, routing, budgets, running and steering tickets.
+- [Guide](docs/guide.md): Plain-language walkthrough: install, init, models and backends (pi, Claude Code, Codex, OpenCode, Grok, Cursor), tiers, routing, per-model profiles, budgets, backend settings, a full annotated config, running and steering tickets.
 - [CONTEXT](CONTEXT.md): The domain vocabulary: feature, spec, ticket, shift, budget, handoff, verify gate.
 - [RESEARCH](RESEARCH.md): The design notes (Ukrainian).
 

@@ -90,14 +90,34 @@ CLI-бекенд треба окремо встановити й залогін�
 
 | Поле | Що означає |
 |---|---|
-| `thinking` | Рівень міркування: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Задається глобально, для tier, для маршруту або для моделі. |
+| `thinking` | Рівень міркування: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Задається глобально, для tier, для маршруту або для моделі. Діє лише на моделі pi (див. нижче). |
 | `crossTier` | `"up"`: коли охолоджується весь tier, позичати моделі з tier вище (також можна `"down"` або `"none"`). |
 | `paidProviders` | Платні провайдери, наприклад `["openrouter"]`. Моделі `…:free` і `ollama/…` ніколи не вважаються платними. |
 | `preferWaitMin` | Якщо безкоштовна модель звільниться протягом стількох хвилин, краще почекати на неї, ніж брати платну. |
 | `cooldown` | Скільки провайдер відпочиває після ліміту, якщо сам не сказав, коли ліміт скинеться: `{ "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" }`. |
 | `maxAttempts` | Скільки разів Verify може не пройти, перш ніж тікет стане `needs-info` (за замовчуванням 3). |
 | `parallel` | Скільки тікетів фронтиру ранер опрацьовує одночасно (за замовчуванням 1). Понад 1 потребує `"worktree": { "enabled": true }`: кожен паралельний тікет отримує свій worktree. |
-| `concurrency` | Обмежує кількість одночасних шифтів на провайдера, наприклад `{ "ollama": 1 }` для однієї GPU. Зайнятий провайдер пропускається як той, що охолоджується. |
+| `concurrency` | Обмежує кількість одночасних шифтів на провайдера, наприклад `{ "ollama": 1 }` для однієї GPU. Зайнятий провайдер пропускається як той, що охолоджується. Ключі ті самі, що в кулдаунів: `ollama`, `claude`, `opencode:opencode-go`. |
+
+### Профілі моделей
+
+Секція `models` задає налаштування однієї конкретної моделі, хоч би в якому tier вона стояла. Ключ — назва моделі точно так, як вона записана в `chain` або в рядку `Model:`, разом із префіксом бекенда.
+
+```json
+"models": {
+  "ollama/qwen2.5-coder:7b": { "contextWindow": 32768 },
+  "xai/grok-4.6":            { "thinking": "high" },
+  "claude:opus":             { "budget": { "maxCostUsd": 4, "maxTurns": 120 } }
+}
+```
+
+| Поле | Що означає |
+|---|---|
+| `thinking` | Перекриває `thinking` tier. Порядок: `routing[тип].thinking` → `models[модель].thinking` → `tiers[tier].thinking` → глобальний `thinking`. |
+| `contextWindow` | Вікно контексту в токенах. `maxContextPct` рахується від нього, а не від вікна, яке повідомив бекенд. Корисно для локальної моделі, запущеної з меншим вікном. |
+| `budget` | Бюджет зміни для цієї моделі (поля з розділу 5). Накладається останнім. |
+
+**`thinking` працює лише для pi.** Shiftwork передає рівень міркування тільки моделям без префікса (`provider/model`). Бекенди `claude:`, `codex:`, `opencode:`, `grok:` і `cursor:` його ігнорують, хоча `--dry-run` і TUI показують `thinking=…` і для них. Рівень міркування CLI-агента налаштовуй його власними засобами: його конфігом або прапорцями в `args` (розділ 6).
 
 ## 3. Локальні моделі (Ollama)
 
@@ -188,7 +208,8 @@ Skill — це тека з файлом `SKILL.md`. Вкажи, де вони л
 }
 ```
 
-- Бюджет зміни складається з `default`, потім з бюджету tier, потім з бюджету моделі. Кожен наступний перекриває попередній.
+- Бюджет зміни складається по черзі з `budgets.default`, бюджету tier, `budgets.models[модель]` і `models[модель].budget` (розділ 2). Кожен наступний перекриває попередній.
+- Бюджет tier можна задати в `budgets.tiers.<tier>` або прямо в tier полем `"budget"` (так робить `init`). Якщо задано обидва, перемагає той, що в tier.
 - `budgets.ticket` — загальний бюджет тікета за замовчуванням. Рядок `Budget:` у тікеті його перекриває, і жодна зміна не може витратити більше, ніж у тікета лишилося.
 
 Що відбувається біля ліміту і на ньому:
@@ -209,15 +230,29 @@ Skill — це тека з файлом `SKILL.md`. Вкажи, де вони л
 
 ## 6. Налаштування інших агентів
 
-Кожен CLI-бекенд має необов'язковий блок з `command`, `args` (додаються після власних прапорців Shiftwork), `env` і `timeoutMs`:
+Кожен бекенд, включно з pi, має необов'язковий блок верхнього рівня з тією самою назвою, що й префікс: `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor`.
+
+| Поле | Що означає |
+|---|---|
+| `command` | Яку програму запускати (крім `pi`). За замовчуванням `claude`, `codex`, `opencode`, `grok`, `cursor-agent`. Можна вказати повний шлях. |
+| `args` | Додаткові прапорці. Вони йдуть після прапорців Shiftwork і перед промптом. |
+| `env` | Додаткові змінні середовища для процесу агента, поверх твого середовища. |
+| `timeoutMs` | Аварійний таймаут процесу. Звичайні ліміти задаються бюджетами (розділ 5). |
+| `sandbox` | Лише для `codex`, див. нижче. |
 
 ```json
+"pi":     { "env": { "PI_CODING_AGENT_DIR": "/home/me/.pi/agent-work" } },
 "claude": { "args": ["--max-turns", "200"], "timeoutMs": 3600000 },
 "codex":  { "sandbox": "bypass" },
+"grok":   { "command": "/home/me/.grok/bin/grok" },
 "cursor": { "command": "cursor-agent" }
 ```
 
 `codex.sandbox`: `"approve-for-me"` (за замовчуванням), `"workspace-write"` або `"bypass"`, коли середовище вже ізольоване або bwrap не може створити пісочницю.
+
+Shiftwork не перевіряє `args`, а передає їх як є. Що туди можна писати, дивись у `--help` відповідного CLI. `--dry-run` агентів не запускає, тож нові `args` перевір одним `shiftwork run --once`.
+
+Для Grok і Cursor ніколи не вказуй `command: "agent"`. Обидва інсталятори створюють посилання `agent`, і яка програма відкриється, залежить від порядку в PATH.
 
 ### Інструкції проєкту: AGENTS.md і CLAUDE.md
 
@@ -275,6 +310,107 @@ TUI лише показує стан, запускає й зупиняє роб�
 
 За замовчуванням review вимкнений. `--dry-run` показує, які тікети пройдуть review.
 
-## 8. Чого ще немає
+## 8. Повний приклад конфігу
+
+Один `.pi/shiftwork.json`, де задіяно майже все з цього гайду: п'ять різних агентів, локальна модель, профілі моделей, паралельний запуск і review.
+
+```json
+{
+  "defaultType": "code",
+  "thinking": "medium",
+  "maxAttempts": 3,
+  "maxHandoffs": 3,
+  "softLimitPct": 80,
+  "parallel": 2,
+  "worktree": { "enabled": true, "setup": ["npm ci --ignore-scripts"] },
+
+  "tiers": {
+    "local":    { "chain": ["ollama/qwen2.5-coder:7b"], "thinking": "off" },
+    "quick":    { "chain": ["opencode:opencode-go/kimi-k3", "openrouter/qwen/qwen3.8-27b:free", "cursor:auto"],
+                  "thinking": "low", "skills": ["core", "design"], "preload": ["core"],
+                  "budget": { "maxTurns": 40, "maxContextPct": 60, "stallTurns": 5 } },
+    "standard": { "chain": ["claude:sonnet", "codex:gpt-5.6-terra", "xai/grok-4.6"],
+                  "skills": ["core"],
+                  "budget": { "maxCostUsd": 1.5, "maxTokens": 3000000 } },
+    "premium":  { "chain": ["claude:opus", "grok:grok-4.7", "openrouter/anthropic/claude-opus-5"],
+                  "thinking": "high",
+                  "budget": { "maxCostUsd": 3, "maxContextPct": 70 } }
+  },
+
+  "routing": {
+    "git":      { "tier": "quick", "thinking": "low" },
+    "docs":     { "tier": "local" },
+    "test":     { "tier": "standard" },
+    "code":     { "tier": "standard" },
+    "refactor": { "tier": "premium" },
+    "infra":    { "model": "claude:opus" }
+  },
+
+  "models": {
+    "ollama/qwen2.5-coder:7b":            { "contextWindow": 32768 },
+    "xai/grok-4.6":                       { "thinking": "high" },
+    "openrouter/anthropic/claude-opus-5": { "budget": { "maxCostUsd": 3 } },
+    "claude:opus":                        { "budget": { "maxCostUsd": 4, "maxTurns": 120 } }
+  },
+
+  "budgets": {
+    "default": { "maxTurns": 60, "maxWallMin": 45, "stallTurns": 8 },
+    "ticket":  { "maxCostUsd": 8, "maxWallMin": 120 }
+  },
+
+  "onExceed": {
+    "maxCostUsd":    { "to": "downgrade", "mode": "new-process" },
+    "maxTokens":     { "to": "downgrade", "mode": "new-process" },
+    "maxTurns":      { "to": "next",      "mode": "new-process" },
+    "maxWallMin":    { "to": "next",      "mode": "new-process" },
+    "maxContextPct": { "to": "same-tier", "mode": "new-process" },
+    "stallTurns":    { "to": "escalate",  "mode": "new-process" },
+    "verifyFailed":  { "to": "escalate",  "mode": "new-process" }
+  },
+
+  "crossTier": "up",
+  "paidProviders": ["openrouter", "xai"],
+  "preferWaitMin": 20,
+  "cooldown": { "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" },
+  "concurrency": { "ollama": 1, "claude": 1 },
+
+  "skillSources": { "tdd": "/home/me/.agents/skills/tdd", "design": "./skills/design" },
+  "skillGroups":  { "core": ["tdd"], "design": ["design"] },
+
+  "review": { "enabled": true, "tier": "premium", "types": ["code", "refactor"] },
+  "jev": { "enabled": true, "model": ["typesafe/jev-latest", "opencode/jev-1.13-free"] },
+
+  "pi":       { "timeoutMs": 10800000 },
+  "claude":   { "args": ["--max-turns", "200"], "timeoutMs": 3600000 },
+  "codex":    { "sandbox": "workspace-write" },
+  "opencode": { "timeoutMs": 3600000 },
+  "grok":     { "command": "grok" },
+  "cursor":   { "command": "cursor-agent" }
+}
+```
+
+Що тут відбувається:
+
+- **Чотири tiers на різних агентах.** `local`: тільки Ollama. `quick`: OpenCode → безкоштовна модель OpenRouter через pi → Cursor. `standard`: Claude Code → Codex → Grok через pi. `premium`: Claude Code з Opus → Grok Build → Opus через OpenRouter.
+- **Маршрути.** Документацію пише локальна модель, а `infra` завжди йде на `claude:opus`, хоч би що було в tiers.
+- **Профілі моделей.** Ollama рахує заповнення контексту від 32k. `xai/grok-4.6` міркує на `high`, хоча tier `standard` має `medium`. `claude:opus` отримує свій бюджет.
+- **`thinking` tier `premium` (`high`)** реально дістанеться лише `openrouter/anthropic/claude-opus-5`, бо це єдина модель pi в цьому tier. Для `claude:opus` і `grok:grok-4.7` його не буде (розділ 2).
+- **Паралельність.** Два тікети одночасно, кожен у своєму worktree. Але не більше однієї зміни на Ollama (одна GPU) і однієї на Claude Code (одна підписка).
+- **Гроші.** `openrouter` і `xai` платні. Якщо безкоштовна модель звільниться протягом 20 хвилин, Shiftwork почекає на неї. Коли весь tier охолоджується, моделі позичаються з tier вище (`crossTier: "up"`).
+- **Review** запускається на `premium` лише для тікетів `code` і `refactor`.
+
+Перевір результат перед запуском:
+
+```bash
+npx shiftwork run --dry-run
+```
+
+```
+f/04  type=code  tier=standard  model=claude:sonnet  thinking=medium  budget=$1.5 · 3000000 tok · 60 turns · 45 min · 8 stall  review=premium
+f/04  type=docs  tier=local  model=ollama/qwen2.5-coder:7b  thinking=off  budget=$8 · 60 turns · 45 min · 8 stall  review=no
+f/05  type=infra  tier=premium  model=claude:opus  thinking=high  budget=$4 · 120 turns · 45 min · 70% ctx · 8 stall  review=no
+```
+
+## 9. Чого ще немає
 
 - Редагування конфігу з TUI.
