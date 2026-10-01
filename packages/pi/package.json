@@ -1,6 +1,6 @@
 {
   "name": "pi-shiftwork",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Shiftwork for pi (pi.dev): /shift command over markdown tickets; ticket runner, skill tiers, model budgets and provider fallback are in development.",
   "license": "MIT",
   "author": "ivlad003 <ivlad003@gmail.com>",
@@ -46,8 +46,8 @@
     "prepack": "node ../../scripts/sync-skills.mjs"
   },
   "dependencies": {
-    "shiftwork": "0.1.5",
-    "shiftwork-core": "0.1.5"
+    "shiftwork": "0.1.6",
+    "shiftwork-core": "0.1.6"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
