@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { openRunState } from "shiftwork-core";
 import { collectDryRunLines } from "../src/dry-run.js";
-import { createTuiControls, reduceKey, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
+import { createTuiControls, decodeKeys, queueRows, reduceKey, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
 
 const stubRunner = fileURLToPath(new URL("./fixtures/stub-runner.js", import.meta.url));
 const argvRunner = fileURLToPath(new URL("./fixtures/argv-runner.js", import.meta.url));
@@ -236,4 +236,203 @@ test("q fires onQuit; a failing effect becomes a notice, not a crash", async () 
 	await controls.handleKey("d");
 	assert.equal(controls.view.dryRun, null);
 	assert.match(controls.view.notice, /dry-run failed: no config/);
+});
+// --- The tabbed view: tabs, cursor, collapse, details, `n` (phase-5 spec) ---
+
+/** Press one key on one frame: the next view state. */
+const press = (state, key, dashboard) => reduceKey(state, key, dashboard).state;
+
+/** One frame with two features: demo (frontier 01, blocked 02, resolved 03) and other (ready 01). */
+const frame = () => ({
+	run: null,
+	tickets: [
+		{ feature: "demo", number: "01", title: "first", status: "ready-for-agent", blockedBy: [] },
+		{ feature: "demo", number: "02", title: "blocked", status: "ready-for-agent", blockedBy: ["01"] },
+		{ feature: "demo", number: "03", title: "done", status: "resolved", blockedBy: [] },
+		{ feature: "other", number: "01", title: "elsewhere", status: "ready-for-agent", blockedBy: [] },
+	],
+	frontier: [
+		{ feature: "demo", number: "01", blockedBy: [] },
+		{ feature: "other", number: "01", blockedBy: [] },
+	],
+	claims: [],
+	cooldowns: [],
+	log: { path: "logs/demo/01/attempt-1.jsonl", lines: ["one", "two", "three"] },
+});
+
+test("queueRows: feature folders then their tickets, counts, the frontier and the worker marker", () => {
+	const d = frame();
+	d.run = { pid: 7, live: true, workers: [{ ticket: { feature: "demo", number: "02" }, model: "fake/m1" }] };
+	const rows = queueRows(d, {});
+	assert.deepEqual(
+		rows.map((r) => r.kind),
+		["feature", "ticket", "ticket", "ticket", "feature", "ticket"],
+	);
+	assert.deepEqual(rows[0], { kind: "feature", feature: "demo", collapsed: false, resolved: 1, ready: 1, total: 3 });
+	assert.deepEqual(rows[1], {
+		kind: "ticket",
+		feature: "demo",
+		number: "01",
+		title: "first",
+		status: "ready-for-agent",
+		blockedBy: [],
+		frontier: true,
+		worker: null,
+	});
+	assert.equal(rows[2].worker.model, "fake/m1"); // the agent working on the ticket (story 3)
+	assert.equal(rows[3].status, "resolved");
+	assert.equal(rows[3].frontier, false);
+
+	// A feature filter narrows the queue to that feature's rows.
+	assert.deepEqual(
+		queueRows(d, { featureFilter: "other" }).map((r) => r.feature),
+		["other", "other"],
+	);
+});
+
+test("reducer: 1–4 switch tabs, tab cycles through all four and back", () => {
+	const d = frame();
+	assert.equal(press(idle, "1", d).tab, "queue");
+	assert.equal(press(idle, "2", d).tab, "agents");
+	assert.equal(press(idle, "3", d).tab, "cooldowns");
+	assert.equal(press(idle, "4", d).tab, "log");
+	let state = idle;
+	for (const tab of ["agents", "cooldowns", "log", "queue"]) {
+		state = press(state, "tab", d);
+		assert.equal(state.tab, tab);
+	}
+});
+
+test("reducer: up/down (k/j) move the cursor, clamped at both ends, each tab its own", () => {
+	const d = frame(); // queue: 6 rows; log: 3 lines
+	let state = press(idle, "down", d);
+	assert.equal(state.cursor.queue, 1);
+	state = press(state, "j", d);
+	assert.equal(state.cursor.queue, 2);
+	state = press(press(press(state, "down", d), "down", d), "down", d);
+	assert.equal(state.cursor.queue, 5); // clamped at the last row
+	state = press(press(state, "up", d), "k", d);
+	assert.equal(state.cursor.queue, 3);
+	state = press(press(press(state, "up", d), "up", d), "up", d);
+	assert.equal(state.cursor.queue, 0); // clamped at the first row
+
+	// The Log tab has its own cursor over the log lines, clamped the same way.
+	state = press(press(state, "4", d), "down", d);
+	assert.equal(state.cursor.log, 1);
+	assert.equal(state.cursor.queue, 0); // the queue cursor is kept
+	// Empty rows: the cursor stays at 0.
+	assert.deepEqual(press(idle, "down", {}).cursor, { queue: 0, agents: 0, cooldowns: 0, log: 0 });
+});
+
+test("reducer: left collapses the feature under the cursor, right expands it; queueRows hides the tickets", () => {
+	const d = frame();
+	let state = press(press(idle, "down", d), "left", d); // cursor on demo/01 → its feature
+	assert.deepEqual(state.collapsed, ["demo"]);
+	const rows = queueRows(d, state);
+	assert.equal(rows.length, 3); // two folder rows + other/01: demo's tickets are hidden
+	assert.equal(rows[0].collapsed, true);
+	assert.equal(state.cursor.queue, 1); // clamped into the shrunken list (the other folder row)
+	state = press(state, "right", d); // the cursor is on the other folder: expanding it is a no-op
+	assert.deepEqual(state.collapsed, ["demo"]);
+	state = press(press(state, "up", d), "right", d); // back on the demo folder → expand
+	assert.deepEqual(state.collapsed, []);
+	assert.equal(queueRows(d, state).length, 6);
+
+	// left/right only mean folders on the Queue tab.
+	state = press(press(idle, "4", d), "left", d);
+	assert.deepEqual(state.collapsed, []);
+});
+
+test("reducer: enter opens the selected ticket's details; esc and backspace close them", () => {
+	const d = frame();
+	let state = press(press(idle, "down", d), "enter", d); // demo/01
+	assert.equal(state.details, "demo/01");
+	state = press(state, "esc", d);
+	assert.equal(state.details, null);
+	state = press(press(state, "down", d), "enter", d); // demo/02
+	assert.equal(state.details, "demo/02");
+	state = press(state, "backspace", d);
+	assert.equal(state.details, null);
+	assert.equal(press(idle, "enter", d).details, null); // enter on a feature row opens nothing
+});
+
+test("reducer: enter on an Agents row selects that worker and switches to the Log tab", () => {
+	const d = frame();
+	d.run = { pid: 7, live: true, workers: [{ ticket: { feature: "demo", number: "02" }, model: "fake/m1" }] };
+	const state = press({ ...idle, tab: "agents" }, "enter", d);
+	assert.equal(state.tab, "log");
+	assert.equal(state.selectedWorker, "demo/02");
+});
+
+test("reducer: n starts the selected frontier ticket; anything else is refused with a notice", () => {
+	const d = frame();
+	const on01 = reduceKey(press(idle, "down", d), "n", d); // demo/01 is ready and unblocked
+	assert.deepEqual(on01.effects, [{ type: "start-runner", feature: null, ticket: "demo/01" }]);
+	assert.match(on01.state.notice, /starting demo\/01…/);
+
+	const blocked = reduceKey(press(press(idle, "down", d), "down", d), "n", d); // demo/02
+	assert.deepEqual(blocked.effects, []);
+	assert.match(blocked.state.notice, /demo\/02 is not on the frontier: blocked by 01/);
+
+	const resolved = reduceKey(press(press(press(idle, "down", d), "down", d), "down", d), "n", d); // demo/03
+	assert.match(resolved.state.notice, /demo\/03 is not on the frontier: status resolved/);
+
+	// A claimed ticket is not on the frontier any more.
+	const claimedD = {
+		...d,
+		claims: [{ ticket: { feature: "demo", number: "01" }, pid: 123 }],
+		frontier: d.frontier.filter((t) => !(t.feature === "demo" && t.number === "01")),
+	};
+	const claimed = reduceKey(press(idle, "down", d), "n", claimedD);
+	assert.match(claimed.state.notice, /demo\/01 is not on the frontier: claimed by pid 123/);
+
+	const folder = reduceKey(idle, "n", d); // the cursor is on the demo folder row
+	assert.deepEqual(folder.effects, []);
+	assert.match(folder.state.notice, /no ticket selected: the cursor is on the feature demo/);
+
+	const live = reduceKey(press(idle, "down", d), "n", { ...d, run: { pid: 42, live: true } });
+	assert.deepEqual(live.effects, []);
+	assert.match(live.state.notice, /a runner is already working \(pid 42\)/);
+});
+
+test("reducer: n's start effect is wired through the controls like r's", async () => {
+	const root = await repo({ "demo/07-widget.md": ticketBody });
+	const started = [];
+	const controls = createTuiControls({
+		root,
+		start: (root_, effect) => (started.push(effect), { started: true, pid: 1, logFile: "logs/x.log" }),
+	});
+	controls.setDashboard({
+		run: null,
+		tickets: [{ feature: "demo", number: "07", status: "ready-for-agent", blockedBy: [] }],
+		frontier: [{ feature: "demo", number: "07", blockedBy: [] }],
+		claims: [],
+	});
+	await controls.handleKey("down"); // the cursor moves onto demo/07
+	await controls.handleKey("n");
+	assert.deepEqual(started, [{ type: "start-runner", feature: null, ticket: "demo/07" }]);
+	assert.equal(controls.view.tab, "queue"); // the tabbed view state survives the round-trip
+	assert.deepEqual(controls.view.cursor, { queue: 1, agents: 0, cooldowns: 0, log: 0 });
+});
+
+// --- decodeKeys: raw terminal input → key names ---
+
+test("decodeKeys: each key, and several keys arriving in one chunk", () => {
+	assert.deepEqual(decodeKeys("\x1b[A"), ["up"]);
+	assert.deepEqual(decodeKeys("\x1b[B"), ["down"]);
+	assert.deepEqual(decodeKeys("\x1b[C"), ["right"]);
+	assert.deepEqual(decodeKeys("\x1b[D"), ["left"]);
+	assert.deepEqual(decodeKeys("\x1bOA"), ["up"]); // application cursor mode
+	assert.deepEqual(decodeKeys("\r"), ["enter"]);
+	assert.deepEqual(decodeKeys("\x1b"), ["esc"]);
+	assert.deepEqual(decodeKeys("\t"), ["tab"]);
+	assert.deepEqual(decodeKeys("\x7f"), ["backspace"]);
+	assert.deepEqual(decodeKeys("n"), ["n"]);
+	assert.deepEqual(decodeKeys("\x03"), ["\x03"]); // Ctrl-C keeps today's key name
+	assert.deepEqual(decodeKeys("\x1b[B\x1b[Bn"), ["down", "down", "n"]);
+	assert.deepEqual(decodeKeys("\x1b[Ak\r"), ["up", "k", "enter"]);
+	assert.deepEqual(decodeKeys(Buffer.from("\tj\x7f")), ["tab", "j", "backspace"]);
+	// Unknown escape sequences are consumed, not decoded into garbage keys.
+	assert.deepEqual(decodeKeys("\x1b[5~n"), ["n"]);
+	assert.deepEqual(decodeKeys("\x1b[1;5Aq"), ["q"]);
 });
