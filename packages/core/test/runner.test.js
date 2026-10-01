@@ -20,6 +20,15 @@ async function ticketText(root, feature, file) {
 	return readFile(`${root}/.scratch/${feature}/issues/${file}`, "utf8");
 }
 
+/** The `<feature>/<number>` of every shift the backend started, in start order. */
+function workedIds(backend) {
+	return backend.shifts.map((s) => {
+		const match = s.request.prompt.match(/\.scratch\/([^/]+)\/issues\/(\d+)-/);
+		assert.ok(match, `no ticket in prompt: ${s.request.prompt.slice(0, 200)}`);
+		return `${match[1]}/${match[2]}`;
+	});
+}
+
 /** A refused --ticket wrote nothing: the ticket file is unchanged, no claim, no run state. */
 async function assertNothingWritten(root, feature, file) {
 	const text = await ticketText(root, feature, file);
@@ -100,6 +109,21 @@ test("tickets run in frontier order and a blocker unlocks the next ticket", asyn
 	const summary = await run(root, backend);
 
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01", "02"]);
+});
+
+test("the runner stays on a feature until it has nothing ready (a/01, a/02, then b/01)", async () => {
+	const root = await makeRepo({
+		"a/01-a.md": ticket("01", "A", { extra: "**Verify:** `a1.txt`" }),
+		"a/02-a.md": ticket("02", "A2", { blockedBy: "01", extra: "**Verify:** `a2.txt`" }),
+		"b/01-b.md": ticket("01", "B", { extra: "**Verify:** `b1.txt`" }),
+	});
+	const backend = fakeBackend([{ files: { "a1.txt": "" } }, { files: { "a2.txt": "" } }, { files: { "b1.txt": "" } }]);
+
+	const summary = await run(root, backend);
+
+	// It does not jump to b/01 after a/01: the current feature's next ready ticket wins.
+	assert.deepEqual(workedIds(backend), ["a/01", "a/02", "b/01"]);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01", "02", "01"]);
 });
 
 test("--once works exactly one ticket; the ticket's own Model overrides the default", async () => {
@@ -1964,6 +1988,29 @@ function runParallel(root, backend, configOverrides = {}) {
 		options: { parallel: 2 },
 	});
 }
+
+test("parallel: 2 fills both slots with the current feature's ready tickets first", async () => {
+	const root = await makeRepo({
+		"a/01-a.md": ticket("01", "A", { extra: "**Verify:** `a1.txt`" }),
+		"a/02-a.md": ticket("02", "A2", { extra: "**Verify:** `a2.txt`" }),
+		"b/01-b.md": ticket("01", "B", { extra: "**Verify:** `b1.txt`" }),
+	});
+	const backend = gateBackend([{ files: { "a1.txt": "" } }, { files: { "a2.txt": "" } }, { files: { "b1.txt": "" } }]);
+	const running = runParallel(root, backend);
+	await waitFor(() => backend.shifts.length === 2 && backend.shifts.every((s) => s.startedAt));
+
+	// Once the first slot takes feature a's ticket, the second takes a's next one,
+// not feature b's number-01 ticket.
+	assert.deepEqual(workedIds(backend), ["a/01", "a/02"]);
+
+	backend.shifts.forEach((s) => s.open());
+	// Feature b's ticket starts only after a's are done; release its gate too.
+	await waitFor(() => backend.shifts.length === 3 && backend.shifts[2].startedAt);
+	backend.shifts[2].open();
+	const summary = await running;
+	assert.deepEqual(workedIds(backend), ["a/01", "a/02", "b/01"]);
+	assert.deepEqual(summary.resolved.map((t) => t.number).sort(), ["01", "01", "02"]);
+});
 
 test("parallel: 2 works two independent tickets at once", async () => {
 	const root = await makeRepo({

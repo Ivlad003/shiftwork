@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { CLAIMED, frontier as computeFrontier, READY, RESOLVED } from "./index.js";
+import { CLAIMED, frontier as computeFrontier, orderFrontier, READY, RESOLVED } from "./index.js";
 import { createExclusive, isAlive, readOwner } from "./lock.js";
 import { openTracker, writeAtomic } from "./tracker.js";
 
@@ -116,7 +116,8 @@ export function openOpenSpecTracker(root, { verify } = {}) {
 			}
 			const reopened = tickets.map((t) => (orphaned.includes(t) ? { ...t, status: READY } : t));
 			const ready = new Set(computeFrontier(reopened).map(key));
-			return tickets.filter((t) => ready.has(key(t)));
+			// Orphaned claims included: they are reopened above and matched by key here.
+			return orderFrontier(tickets.filter((t) => ready.has(key(t))), tickets, { current: null });
 		},
 
 		/** Take an exclusive claim on `ticket`; null when a live process already holds it. */

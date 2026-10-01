@@ -45,6 +45,12 @@ export interface Route {
 
 export declare function parseTicket(markdown: string, path?: string): Ticket;
 export declare function frontier<T extends Ticket>(tickets: T[]): T[];
+/**
+ * The order the frontier is worked, feature by feature: the `current` feature
+ * first, then started features (a `resolved` or `claimed` ticket) before not
+ * started ones, then feature name, then ticket number. Pure.
+ */
+export declare function orderFrontier<T extends Ticket>(frontier: T[], tickets: T[], options?: { current?: string | null }): T[];
 export declare function loadTickets(root?: string): Promise<(Ticket & { feature: string })[]>;
 export type Plan =
 	| Route

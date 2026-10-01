@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { CLAIMED, frontier, loadTickets, READY } from "./index.js";
+import { CLAIMED, frontier, loadTickets, orderFrontier, READY } from "./index.js";
 import { createExclusive, isAlive, readOwner, withLock } from "./lock.js";
 
 const TABLE_START = "<!-- shiftwork:tickets:start -->";
@@ -43,7 +43,8 @@ export function openTracker(root) {
 			}
 			const reopened = tickets.map((t) => (orphaned.includes(t) ? { ...t, status: READY } : t));
 			const ready = new Set(frontier(reopened).map((t) => t.path));
-			return tickets.filter((t) => ready.has(t.path));
+			// Orphaned claims included: they are reopened above and matched by path here.
+			return orderFrontier(tickets.filter((t) => ready.has(t.path)), tickets, { current: null });
 		},
 
 		/** Take an exclusive claim on `ticket`; null when a live process already holds it. */

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { openTracker } from "../src/index.js";
+import { openTracker, orderFrontier } from "../src/index.js";
 import { makeRepo, ticket } from "./helpers.js";
 
 test("claim returns a claim for a free frontier ticket and marks it claimed", async () => {
@@ -128,6 +128,62 @@ test("a failed write leaves the ticket intact and no temp files behind", { skip:
 
 const START = "<!-- shiftwork:tickets:start -->";
 const END = "<!-- shiftwork:tickets:end -->";
+
+// The feature-by-feature frontier order (spec: work the frontier feature by feature).
+
+const plainTicket = (feature, number, status = "ready-for-agent") => ({ feature, number, status, blockedBy: [] });
+
+const ids = (tickets) => tickets.map((t) => `${t.feature}/${t.number}`);
+
+test("orderFrontier: started features before not started, then feature name, then number", () => {
+	const tickets = [
+		plainTicket("a", "01"),
+		plainTicket("a", "02"),
+		plainTicket("b", "01", "resolved"),
+		plainTicket("b", "02"),
+		plainTicket("c", "01"),
+		plainTicket("c", "02", "claimed"),
+	];
+	const page = [plainTicket("c", "01"), plainTicket("a", "01"), plainTicket("b", "02"), plainTicket("a", "02")];
+
+	assert.deepEqual(ids(orderFrontier(page, tickets)), ["b/02", "c/01", "a/01", "a/02"]);
+});
+
+test("orderFrontier: the current feature goes before every other", () => {
+	const tickets = [
+		plainTicket("a", "01", "resolved"),
+		plainTicket("a", "02"),
+		plainTicket("b", "01", "resolved"),
+		plainTicket("b", "02"),
+	];
+	const page = [plainTicket("b", "02"), plainTicket("a", "02")];
+
+	assert.deepEqual(ids(orderFrontier(page, tickets, { current: "b" })), ["b/02", "a/02"]);
+	assert.deepEqual(ids(orderFrontier(page, tickets, { current: "a" })), ["a/02", "b/02"]);
+});
+
+test("orderFrontier: among not started features, feature name then ticket number", () => {
+	const tickets = [plainTicket("b", "02"), plainTicket("b", "01"), plainTicket("a", "02"), plainTicket("a", "01")];
+	const page = [plainTicket("b", "02"), plainTicket("a", "02"), plainTicket("b", "01"), plainTicket("a", "01")];
+
+	assert.deepEqual(ids(orderFrontier(page, tickets)), ["a/01", "a/02", "b/01", "b/02"]);
+});
+
+test("frontier() returns the feature-by-feature order, an orphaned claim included", async () => {
+	const root = await makeRepo({
+		"a/01-a.md": ticket("01", "A"),
+		"b/01-b.md": ticket("01", "B", { status: "resolved" }),
+		"b/02-b.md": ticket("02", "B2"),
+		"c/01-c.md": ticket("01", "C", { status: "claimed" }),
+	});
+	const tracker = openTracker(root);
+	const orphan = (await tracker.list()).find((t) => t.feature === "c");
+	await tracker.claim(orphan, { pid: await deadPid() });
+
+	const frontier = await tracker.frontier();
+
+	assert.deepEqual(ids(frontier), ["b/02", "c/01", "a/01"]);
+});
 
 test("setStatus updates the spec table and leaves bytes outside the markers unchanged", async () => {
 	const prefix = "# Spec\n\nKeep this `code` and <!-- comment -->.\n\n";

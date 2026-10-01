@@ -39,6 +39,24 @@ test("each unchecked task is a ticket blocked by the previous task, across secti
 	assert.deepEqual((await tracker.frontier()).map((t) => t.number), ["1.1"]);
 });
 
+test("frontier() works feature by feature: a started change before a fresh one, orphaned claims included", async () => {
+	const root = await makeOpenSpecRepo({
+		a: { tasks: "- [ ] 1.1 Fresh task\n" },
+		b: { tasks: "- [x] 1.1 Done task\n- [ ] 1.2 Next task\n" },
+		c: { tasks: "- [ ] 1.1 Orphan task\n" },
+	});
+	const tracker = openOpenSpecTracker(root);
+	const orphan = (await tracker.list()).find((t) => t.feature === "c");
+	await tracker.claim(orphan, { pid: await deadPid() });
+
+	const frontier = await tracker.frontier();
+
+	assert.deepEqual(
+		frontier.map((t) => `${t.feature}/${t.number}`),
+		["b/1.2", "c/1.1", "a/1.1"],
+	);
+});
+
 test("a checked box is a resolved ticket and unblocks the next task", async () => {
 	const root = await makeOpenSpecRepo({ "add-auth": { tasks: TASKS.replace("- [ ] 1.1", "- [x] 1.1") } });
 	const tracker = openOpenSpecTracker(root);

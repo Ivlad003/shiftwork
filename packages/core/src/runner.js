@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { orderFrontier } from "./index.js";
 import { classifyError, cooldownMs } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
@@ -103,6 +104,9 @@ export async function runFrontier({
 	const maxAttempts = config.maxAttempts ?? 3;
 	const summary = { resolved: [], needsInfo: [], reopened: [], stoppedReason: undefined };
 	const seen = new Set();
+	// The feature of the ticket last worked: the frontier is re-ordered with it as
+	// `current`, so the runner stays on that feature while it has a ready ticket.
+	let currentFeature = null;
 	// A tracker ticket is identified by feature + number: the OpenSpec tracker shares
 	// one .shiftwork.md path between all tasks of a change.
 	const seenKey = (t) => (t.number === undefined ? t.path : `${t.feature}/${t.number}`);
@@ -149,10 +153,14 @@ export async function runFrontier({
 			await state.removeWorker(ticket);
 		}
 	};
-	const frontierPage = async () =>
-		(await tracker.frontier())
+	const frontierPage = async () => {
+		const page = (await tracker.frontier())
 			.filter((t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature))
 			.filter((t) => !chosen || (t.feature === chosen.feature && t.number === chosen.number));
+		// A fresh runner takes the tracker's order (a started feature first, then name);
+		// once it has worked a ticket, its feature is worked before any other.
+		return currentFeature ? orderFrontier(page, await tracker.list(), { current: currentFeature }) : page;
+	};
 
 	await state.update({
 		pid: process.pid,
@@ -182,6 +190,7 @@ export async function runFrontier({
 
 			const claim = await tracker.claim(ticket);
 			if (!claim) continue;
+			currentFeature = ticket.feature;
 			let outcome;
 			try {
 				outcome = await workOne(ticket);
@@ -250,6 +259,7 @@ export async function runFrontier({
 				seen.add(seenKey(ticket));
 				const claim = await tracker.claim(ticket);
 				if (!claim) continue;
+				currentFeature = ticket.feature;
 				running.push(startWorker(ticket, claim));
 			}
 			if (running.length === 0) break;

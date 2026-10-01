@@ -87,6 +87,22 @@ export function frontier(tickets) {
 		.sort((a, b) => Number(a.number) - Number(b.number) || String(a.feature).localeCompare(String(b.feature)));
 }
 
+/**
+ * Order the frontier feature by feature: the feature of the ticket last worked
+ * (`current`) first, then started features (a `resolved` or `claimed` ticket)
+ * before not started ones, then feature name, then ticket number. Pure.
+ */
+export function orderFrontier(frontier, tickets, { current = null } = {}) {
+	const started = new Set(tickets.filter((t) => t.status === CLAIMED || t.status === RESOLVED).map((t) => t.feature));
+	return [...frontier].sort(
+		(a, b) =>
+			Number(b.feature === current) - Number(a.feature === current) ||
+			Number(started.has(b.feature)) - Number(started.has(a.feature)) ||
+			String(a.feature).localeCompare(String(b.feature)) ||
+			Number(a.number) - Number(b.number),
+	);
+}
+
 /** Read every `.scratch/<feature>/issues/*.md` under `root`. */
 export async function loadTickets(root = process.cwd()) {
 	const scratch = join(root, ".scratch");
