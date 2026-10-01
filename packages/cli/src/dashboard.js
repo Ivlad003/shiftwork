@@ -13,6 +13,20 @@ const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", l
 /** The keys every tab shares, the footer's second line. */
 export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · q quits";
 
+// Plain SGR codes, applied after fit() clips a line, so escapes are never cut and width counts visible columns.
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const CYAN = "\x1b[36m";
+const FG_OFF = "\x1b[39m";
+const DIM = "\x1b[2m";
+const DIM_OFF = "\x1b[22m";
+const BOLD = "\x1b[1m";
+const BOLD_OFF = "\x1b[22m";
+const REVERSE = "\x1b[7m";
+const REVERSE_OFF = "\x1b[27m";
+const STATUS_COLORS = { resolved: GREEN, claimed: CYAN, "needs-info": YELLOW };
+
 /** The keys of each tab, the footer's first line. */
 const TAB_KEYS = {
 	queue: "↑↓ move · ←→ fold · enter open · n run this · esc back",
@@ -142,11 +156,47 @@ function logDetail(event) {
  * It returns at most `height` lines, each at most `width` columns.
  * Without a `height` (`--once`, the plain-text fallback) the Queue and Agents tabs are
  * printed one after the other, unbounded, then Cooldowns, Log and the dry-run panel.
+ *
+ * With `color: true` (the interactive view, unless `NO_COLOR` is set) SGR codes are
+ * applied after clipping: the cursor row is reverse video across the width, ticket
+ * statuses are coloured (resolved green, claimed cyan, needs-info yellow, blocked dim),
+ * the `● model` worker marker is cyan, cooldown rows are red, the active tab label is
+ * bold and the `»` notice is yellow. `color` defaults to false, so `--once`, non-TTY
+ * output and the plain-text fallback stay colourless.
  */
-export function renderDashboard(state, { width, height } = {}) {
-	const lines = height == null ? renderPlain(state) : renderSized(state, height);
+export function renderDashboard(state, { width, height, color = false } = {}) {
+	const frame = height == null ? { lines: renderPlain(state), cursor: -1, redRows: [] } : renderSized(state, height);
 	const max = width ?? Infinity;
-	return max === Infinity ? lines : lines.map((line) => fit(line, max));
+	const lines = max === Infinity ? frame.lines : frame.lines.map((line) => fit(line, max));
+	return color ? paint(lines, frame, max) : lines;
+}
+
+/** Sprinkle SGR codes over an already-clipped frame: inline tokens, red cooldown rows, then reverse video over the cursor row, padded across the width. */
+function paint(lines, { cursor, redRows }, width) {
+	return lines.map((line, i) => {
+		let out = paintTokens(line, i === 0);
+		if (redRows.includes(i)) out = `${RED}${out}${FG_OFF}`;
+		if (i === cursor && Number.isFinite(width)) {
+			const pad = " ".repeat(Math.max(0, width - visibleColumns(out)));
+			out = `${REVERSE}${out}${pad}${REVERSE_OFF}`;
+		}
+		return out;
+	});
+}
+
+/** A line's width in visible columns: SGR sequences don't count. */
+function visibleColumns(line) {
+	return line.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/** The colourable tokens of one line: the notice, ticket statuses, blockers, worker markers, the active tab label. */
+function paintTokens(line, isHeader) {
+	let out = line.startsWith("»") ? `${YELLOW}${line}${FG_OFF}` : line;
+	out = out.replace(/ · (resolved|claimed|needs-info)(?=[ ·]|$)/g, (m, status) => ` · ${STATUS_COLORS[status]}${status}${FG_OFF}`);
+	out = out.replace(/ · blocked by [^·]*/g, (m) => ` · ${DIM}${m.slice(3)}${DIM_OFF}`);
+	out = out.replace(/ · ● [^·]*/g, (m) => ` · ${CYAN}${m.slice(3)}${FG_OFF}`);
+	if (isHeader) out = out.replace(/\[\d \w+\]/, (m) => `${BOLD}${m}${BOLD_OFF}`);
+	return out;
 }
 
 // --- The sized frame: one tab, scrolled to the cursor ---
@@ -160,47 +210,66 @@ function renderSized(state, height) {
 	const room = height - header.length - footer.length;
 	const blank = room >= 2 ? 1 : 0;
 	const body = tabBody(state, tab, Math.max(0, room - blank), now);
-	const lines = [...header, ...(blank ? [""] : []), ...body, ...footer];
-	return lines.length <= height ? lines : lines.slice(0, Math.max(0, height));
+	const lines = [...header, ...(blank ? [""] : []), ...body.lines, ...footer];
+	const cut = lines.length <= height ? lines : lines.slice(0, Math.max(0, height));
+	const offset = header.length + blank;
+	return {
+		lines: cut,
+		cursor: body.cursor >= 0 && offset + body.cursor < cut.length ? offset + body.cursor : -1,
+		redRows: body.redRows.filter((i) => offset + i < cut.length).map((i) => offset + i),
+	};
 }
 
-/** The body of one tab: the queue's rows or open details, the agents' rows, the cooldowns, the log. */
+/**
+ * The body of one tab: the queue's rows or open details, the agents' rows, the cooldowns,
+ * the log — as its lines plus where the cursor row and the red cooldown rows sit among them.
+ */
 function tabBody(state, tab, height, now) {
-	if (height <= 0) return [];
+	if (height <= 0) return { lines: [], cursor: -1, redRows: [] };
 	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, ...(state.cursor ?? {}) };
+	const plain = (lines) => ({ lines: lines.slice(0, height), cursor: -1, redRows: [] });
+	/** A tab whose rows sit under a one-line head: the cursor row index shifts by one. */
+	const underHead = (head, window) => ({
+		lines: [...head, ...window.lines].slice(0, height),
+		cursor: window.cursor >= 0 ? window.cursor + 1 : -1,
+		redRows: [],
+	});
 	switch (tab) {
 		case "queue": {
-			if (state.details) return renderDetails(state).slice(0, height);
+			if (state.details) return plain(renderDetails(state));
 			const rows = renderQueueRows(state, -1);
-			if (!rows.length) return ["Tickets: none (.scratch/<feature>/issues/*.md)"].slice(0, height);
+			if (!rows.length) return plain(["Tickets: none (.scratch/<feature>/issues/*.md)"]);
 			const at = clampCursor(cursor.queue, rows.length);
-			return scrollRows(renderQueueRows(state, at), at, height);
+			const window = scrolled(renderQueueRows(state, at), at, height);
+			return { lines: window.lines, cursor: window.cursor, redRows: [] };
 		}
 		case "agents": {
 			const workers = state.run?.workers ?? [];
 			const head = [agentsHead(state.run, state.cooldowns ?? [], now)];
-			if (!workers.length) return head.slice(0, height);
+			if (!workers.length) return plain(head);
 			const at = clampCursor(cursor.agents, workers.length);
 			const rows = workers.map((w, i) => `${i === at ? ">" : " "} ${agentRow(w, state.run, now)}`);
-			return [...head, ...scrollRows(rows, at, height - 1)].slice(0, height);
+			return underHead(head, scrolled(rows, at, height - 1));
 		}
 		case "cooldowns": {
 			const cooldowns = [...(state.cooldowns ?? [])].sort((a, b) => new Date(a.until) - new Date(b.until));
-			if (!cooldowns.length) return ["Cooldowns: none"].slice(0, height);
+			if (!cooldowns.length) return plain(["Cooldowns: none"]);
 			const at = clampCursor(cursor.cooldowns, cooldowns.length);
 			const rows = cooldowns.map((c, i) => `${i === at ? ">" : " "} ${c.provider} (${c.kind ?? "limit"})  ${formatAge(leftMs(c, now))} left`);
-			return ["Cooldowns:", ...scrollRows(rows, at, height - 1)].slice(0, height);
+			const window = scrolled(rows, at, height - 1);
+			const lines = ["Cooldowns:", ...window.lines].slice(0, height);
+			return { lines, cursor: window.cursor >= 0 ? window.cursor + 1 : -1, redRows: lines.slice(1).map((_, i) => i + 1) };
 		}
 		case "log": {
 			const log = state.log;
-			if (!log) return ["Log: no current shift log"].slice(0, height);
-			if (!log.lines.length) return [`Log: ${log.path} (no events yet)`].slice(0, height);
+			if (!log) return plain(["Log: no current shift log"]);
+			if (!log.lines.length) return plain([`Log: ${log.path} (no events yet)`]);
 			const at = clampCursor(cursor.log, log.lines.length);
 			const rows = log.lines.map((line, i) => `${i === at ? ">" : " "} ${line}`);
-			return [`Log: ${log.path}`, ...scrollRows(rows, at, height - 1)].slice(0, height);
+			return underHead([`Log: ${log.path}`], scrolled(rows, at, height - 1));
 		}
 		default:
-			return [];
+			return { lines: [], cursor: -1, redRows: [] };
 	}
 }
 
@@ -208,11 +277,12 @@ function clampCursor(cursor, length) {
 	return Math.max(0, Math.min(cursor ?? 0, length - 1));
 }
 
-/** The window of `rows` that keeps row `at` (the cursor) visible. */
-function scrollRows(rows, at, max) {
-	if (rows.length <= max) return rows;
+/** The window of `rows` that keeps row `at` (the cursor) visible, plus the cursor's index in that window. */
+function scrolled(rows, at, max) {
+	if (max <= 0) return { lines: [], cursor: -1 };
+	if (rows.length <= max) return { lines: rows, cursor: at };
 	const start = Math.min(Math.max(0, at - max + 1), rows.length - max);
-	return rows.slice(start, start + max);
+	return { lines: rows.slice(start, start + max), cursor: at - start };
 }
 
 // --- The plain frame: every tab's section, unbounded (--once, the fallback) ---

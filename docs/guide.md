@@ -311,7 +311,7 @@ Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`.
 
 ### What the TUI does
 
-Four full-screen tabs (`1`–`4`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**. A header shows the tabs and the last notice; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense.
+Four full-screen tabs (`1`–`4`, or `tab` to cycle): **Queue**, **Agents**, **Cooldowns**, **Log**. A header shows the tabs and the last notice; a footer shows the keys of the current tab. The interactive view uses the terminal's alternate screen, fits its height and redraws on resize. It is in colour: the cursor row is highlighted across the full width, ticket statuses are coloured (resolved green, claimed cyan, needs-info yellow, blocked dim), the `● model` marker of a live worker is cyan, cooldown rows are red, the active tab label is bold and the notice is yellow. Set `NO_COLOR` to turn colour off; `tui --once` and the plain-text fallback stay colourless. Without pi-tui, a plain-text fallback prints a frame every second; the same keys work there where they make sense.
 
 | Tab | It shows | Keys |
 |---|---|---|

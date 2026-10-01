@@ -18,8 +18,12 @@ Keys: 1–4 and tab switch tabs · ↑↓/j k move · ←→ fold · enter opens
 (a second r while one is live is refused) · s writes STOP so the runner hands
 off and stops · d shows a dry-run · f cycles the feature filter · q quits.
 The interactive view is built on @earendil-works/pi-tui (TuiAltScreen), resolved
-from the user's pi install. Without it a plain-text fallback prints a frame
-every second; the same keys work there where they make sense.`;
+from the user's pi install. It is in colour: the cursor row is highlighted
+across the width, statuses are coloured (resolved green, claimed cyan,
+needs-info yellow, blocked dim), live workers are cyan, cooldowns are red.
+Set NO_COLOR to turn colour off; --once and the plain-text fallback stay
+colourless. Without pi-tui a plain-text fallback prints a frame every second;
+the same keys work there where they make sense.`;
 
 /** The `shiftwork tui` command. `--once` prints one frame and exits (the tests drive this). */
 export async function tui(argv) {
@@ -104,9 +108,10 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 	if (typeof ui.setLayoutRoot === "function") ui.setLayoutRoot(text);
 	else ui.addChild(text);
 	let last = null;
+	const color = !process.env.NO_COLOR;
 	const paint = () => {
 		if (!last) return;
-		text.setText(renderDashboard({ ...last, ...controls.view }, terminalSize(terminal)).join("\n"));
+		text.setText(renderDashboard({ ...last, ...controls.view }, { ...terminalSize(terminal), color }).join("\n"));
 		ui.requestRender();
 	};
 	const controls = createTuiControls({ root, onChange: paint });

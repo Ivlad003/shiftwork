@@ -20,6 +20,9 @@ const exec = async (args, env = {}) => {
 
 const now = new Date("2026-10-01T12:00:00Z");
 
+/** SGR escape sequences stripped: what a line takes up in visible columns. */
+const stripSgr = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
+
 const ticket = (feature, number, title, status = "ready-for-agent") => ({
 	feature,
 	number,
@@ -284,6 +287,12 @@ test("renderDashboard: each tab fits height and width; a 40-ticket queue keeps t
 		for (const line of lines) {
 			assert.ok(line.length <= width, `${tab}: ${line.length} > ${width}: ${line}`);
 		}
+		// With colour on the escapes ride on top of the clipped line: the visible width still fits.
+		const colored = renderDashboard({ ...state, tab }, { width, height, color: true });
+		assert.ok(colored.length <= height, `${tab} color: ${colored.length} lines`);
+		for (const line of colored) {
+			assert.ok(stripSgr(line).length <= width, `${tab} color: ${stripSgr(line).length} > ${width}: ${line}`);
+		}
 	}
 
 	const queue = renderDashboard({ ...state, tab: "queue" }, { width, height });
@@ -293,6 +302,55 @@ test("renderDashboard: each tab fits height and width; a 40-ticket queue keeps t
 		renderDashboard({ ...state, tab: "queue" }, { width, height }).join("\n").includes("Ticket 01"),
 		false,
 	);
+});
+
+test("renderDashboard color: reverse-video cursor row, coloured statuses, markers, notice and cooldowns; off means no escapes", () => {
+	const tickets = [
+		ticket("f", "01", "Done", "resolved"),
+		ticket("f", "02", "Held", "claimed"),
+		ticket("f", "03", "Ask", "needs-info"),
+		{ ...ticket("f", "04", "Wait"), blockedBy: ["03"] },
+	];
+	const state = {
+		...base,
+		tickets,
+		frontier: [tickets[0]],
+		notice: "runner started (pid 4242)",
+		cursor: { queue: 1, cooldowns: 0 },
+		run: {
+			pid: 1,
+			live: true,
+			workers: [{ ticket: { feature: "f", number: "02", title: "Held" }, model: "claude:sonnet", attempt: 1, shift: 1 }],
+		},
+		cooldowns: [
+			{ provider: "xai", kind: "rate", until: "2026-10-01T12:05:00Z" },
+			{ provider: "grok", kind: "limit", until: "2026-10-01T12:07:00Z" },
+		],
+	};
+
+	const lines = renderDashboard({ ...state, tab: "queue" }, { width: 60, height: 24, color: true });
+	const text = lines.join("\n");
+
+	assert.match(lines[0], /\x1b\[1m\[1 Queue\]\x1b\[22m/); // the active tab label is bold
+	assert.match(text, /\x1b\[33m» runner started/); // the notice is yellow
+	const cursorRow = lines.find((line) => line.includes("\x1b[7m"));
+	assert.match(cursorRow, /01 Done/); // the cursor row, reverse video
+	assert.match(cursorRow, /\x1b\[32mresolved/); // resolved green
+	assert.equal(stripSgr(cursorRow).length, 60); // reverse video across the visible width
+	assert.match(text, /\x1b\[36mclaimed/); // claimed cyan
+	assert.match(text, /\x1b\[33mneeds-info/); // needs-info yellow
+	assert.match(text, /\x1b\[2mblocked by 03/); // blocked dim
+	assert.match(text, /\x1b\[36m● claude:sonnet/); // the worker marker is cyan
+
+	const cooldowns = renderDashboard({ ...state, tab: "cooldowns" }, { width: 60, height: 24, color: true });
+	assert.match(cooldowns.find((line) => line.includes("xai (rate)")), /\x1b\[7m/); // the cursor row is still reverse video
+	assert.match(cooldowns.find((line) => line.includes("grok (limit)")), /^\x1b\[31m/); // cooldown rows are red
+
+	for (const tab of ["queue", "agents", "cooldowns", "log"]) {
+		for (const line of renderDashboard({ ...state, tab }, { width: 60, height: 24 })) {
+			assert.equal(line.includes("\x1b["), false, `${tab}: ${line}`); // colour off: no escapes
+		}
+	}
 });
 
 test("collectDashboardState: an empty repo has no run, no log and no tickets", async () => {
@@ -454,6 +512,7 @@ test("shiftwork tui --once prints one frame and exits", async () => {
 	const { stdout, stderr } = await exec(["tui", "--once", "--dir", root]);
 
 	assert.equal(stderr, "");
+	assert.doesNotMatch(stdout, /\x1b\[/); // --once stays colourless
 	assert.match(stdout, /Runner: working f\/01 · First \(pid \d+\)/);
 	assert.match(stdout, /f\/01 First · fake\/m1 · shift 1 · attempt 1/);
 	assert.match(stdout, /120 tokens · \$0\.25 · 1 turns · ctx 12%/);
@@ -505,6 +564,8 @@ test("shiftwork tui --help describes the tabs and keys", async () => {
 	assert.match(stdout, /1–4/);
 	assert.match(stdout, /n runs the selected ticket/);
 	assert.match(stdout, /TuiAltScreen/);
+	assert.match(stdout, /colour/i);
+	assert.match(stdout, /NO_COLOR/);
 });
 
 async function waitFor(check, timeoutMs = 5_000) {
@@ -648,9 +709,10 @@ test("interactive: stub terminal size, one resize, a key chunk reaching handleKe
 	const firstLines = first.split("\n");
 	assert.ok(firstLines.length <= 24, `first frame ${firstLines.length} lines`);
 	for (const line of firstLines) {
-		assert.ok(line.length <= 80, `first frame line ${line.length} > 80`);
+		assert.ok(stripSgr(line).length <= 80, `first frame line ${stripSgr(line).length} > 80`);
 	}
 	assert.match(first, /\[1 Queue\]/);
+	assert.match(first, /\x1b\[7m/); // colour on by default
 
 	const before = text.frames.length;
 	terminal.resize(40, 10);
@@ -658,7 +720,7 @@ test("interactive: stub terminal size, one resize, a key chunk reaching handleKe
 	const resizedLines = resized.split("\n");
 	assert.ok(resizedLines.length <= 10, `resized frame ${resizedLines.length} lines`);
 	for (const line of resizedLines) {
-		assert.ok(line.length <= 40, `resized line ${line.length} > 40: ${line}`);
+		assert.ok(stripSgr(line).length <= 40, `resized line ${stripSgr(line).length} > 40: ${line}`);
 	}
 
 	terminal.send("\x1b[B\x1b[B2");
@@ -671,4 +733,41 @@ test("interactive: stub terminal size, one resize, a key chunk reaching handleKe
 	terminal.send("q");
 	assert.equal(await done, 0);
 	assert.equal(terminal.stopped, true);
+});
+
+test("interactive: NO_COLOR disables colour in the interactive view", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-nocolor-"));
+	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
+	await writeFile(
+		join(root, ".scratch", "demo", "issues", "01-first.md"),
+		"# 01: First\n\n**Blocked by:** None\n\n**Status:** claimed\n",
+	);
+
+	const frame = async () => {
+		const terminal = new StubTerminal({ columns: 80, rows: 24 });
+		let text;
+		const kit = {
+			ProcessTerminal: class {},
+			TuiAltScreen: StubTuiAltScreen,
+			Text: class extends StubText {
+				constructor(initial) {
+					super(initial);
+					text = this;
+				}
+			},
+		};
+		const done = interactive(root, kit, { terminal });
+		const first = await waitFor(() => (text?.frames.length ? text.text : false));
+		terminal.send("q");
+		assert.equal(await done, 0);
+		return first;
+	};
+
+	assert.match(await frame(), /\x1b\[7m/); // colour on without NO_COLOR
+	try {
+		process.env.NO_COLOR = "1";
+		assert.doesNotMatch(await frame(), /\x1b\[/); // NO_COLOR turns it off
+	} finally {
+		delete process.env.NO_COLOR;
+	}
 });
