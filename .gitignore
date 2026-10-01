@@ -3,6 +3,7 @@ node_modules/
 .DS_Store
 .pi/shiftwork-state.json
 .pi/shiftwork-run.json
+.pi/shiftwork-github.json
 STOP
 logs/
 .scratch/.claims/
