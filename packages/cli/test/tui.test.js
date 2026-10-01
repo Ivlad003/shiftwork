@@ -561,10 +561,12 @@ test("renderDashboard: a ticket-scoped search highlights the details' matches, a
 	assert.match(text, /done \[render\]ing/); // every match in the details is bracketed
 	assert.match(lines.at(-2), /enter next match/); // the footer's details-search keys while editing
 
-	// A kept search (enter stopped editing) brings the tab's keys back, the prompt line stays.
+	// A kept search (enter stopped editing) keeps its real keys in the footer — not the tab's (tui-polish/09).
 	const kept = renderDashboard({ ...state, search: { ...state.search, editing: false } }, { width: 80, height: 24 }).join("\n");
 	assert.match(kept, /^\/ render · ticket$/m);
-	assert.doesNotMatch(kept, /enter next match/);
+	assert.match(kept, /^enter next match · esc clear$/m); // enter jumps to the next match, esc clears the search
+	assert.doesNotMatch(kept, /esc back/); // the tab's keys leave while the kept details search stays
+	assert.doesNotMatch(kept, /letters add to the query/);
 
 	// enter's next match scrolls the details so that match's line is at the top.
 	const next = renderDashboard({ ...state, search: { ...state.search, match: 1 } }, { width: 160, height: 24 }).join("\n");

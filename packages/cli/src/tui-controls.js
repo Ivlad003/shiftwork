@@ -492,8 +492,12 @@ function featureUnderCursor(state, dashboard) {
 	return row?.feature ?? null;
 }
 
-/** A kept (not editing) ticket-scoped search with a query: `enter` scrolls to its next match. */
-function keptTicketSearch(state) {
+/**
+ * A kept (not editing) ticket-scoped search with a query: `enter` scrolls to its next match and
+ * `esc` clears the search — the keys the footer shows in its place (tui-polish/09). Exported for
+ * the footer, which swaps out the tab's keys while such a search is kept open.
+ */
+export function keptTicketSearch(state) {
 	const search = state.search;
 	return Boolean(search && !search.editing && search.scope === "ticket" && String(search.query ?? "").trim());
 }

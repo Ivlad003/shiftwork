@@ -4,7 +4,7 @@ import { CLAIMED, openCooldowns, openRepoTracker, openRunState, RESOLVED, VERSIO
 import { formatBudget } from "./dry-run.js";
 import { readIssueState } from "./github-import.js";
 import { parsePostKey } from "./github-post.js";
-import { githubRows, queueRows, TABS, ticketStatusColumn } from "./tui-controls.js";
+import { githubRows, keptTicketSearch, queueRows, TABS, ticketStatusColumn } from "./tui-controls.js";
 
 // queueRows' `resolved` option: "skip" is the Queue tab's view, "only" the Resolved tab's, null the plain frame's.
 
@@ -17,10 +17,11 @@ const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", l
 /** The keys every tab shares, the footer's second line. */
 export const GLOBAL_KEYS = "r run · s stop · d dry-run · f filter · g dark-factory · q quits";
 
-/** The footer's first line while a search is open (GitHub #3): the prompt's keys, list or details. */
+/** The footer's first line while a search is open (GitHub #3): the prompt's keys while it is being edited, list or details — and the keys a kept details search keeps (tui-polish/09). */
 const SEARCH_KEYS = {
 	list: "letters add to the query · backspace delete · tab scope · enter keep · esc clear",
 	ticket: "letters add to the query · backspace delete · enter next match · esc clear",
+	kept: "enter next match · esc clear",
 };
 
 // Plain SGR codes, applied after fit() clips a line, so escapes are never cut and width counts visible columns.
@@ -354,9 +355,15 @@ function renderSized(state, height) {
 	};
 }
 
-/** The footer's first line: the search prompt's keys while its query is being edited (`search.editing`), else the tab's — a kept search keeps the tab's keys, so `q` quits again (tui-polish/08). */
+/**
+ * The footer's first line: the search prompt's keys while its query is being edited
+ * (`search.editing`); a kept search then brings the tab's keys back, so `q` quits again
+ * (tui-polish/08) — except a kept details search, whose real keys stay instead of the tab's:
+ * `enter` jumps to the next match and `esc` clears the search (tui-polish/09).
+ */
 function footerKeys(state, tab) {
 	if (state.search?.editing) return state.search.scope === "ticket" ? SEARCH_KEYS.ticket : SEARCH_KEYS.list;
+	if (keptTicketSearch(state)) return SEARCH_KEYS.kept;
 	return TAB_KEYS[tab];
 }
 
