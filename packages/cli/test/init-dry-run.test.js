@@ -99,6 +99,11 @@ test("a dry run shows type (jev) for classified tickets", async () => {
 	assert.equal(formatDryRunLine({ feature: "f", number: "02", title: "Build it" }, { type: "git", typeSource: "jev", tier: "quick", model: "prov/model-a", thinking: "low" }), "f/02  type=git (jev)  tier=quick  model=prov/model-a  thinking=low  budget=-  Build it");
 });
 
+test("formatDryRunLine: a CLI model keeps its backend prefix", () => {
+	const route = { type: "code", tier: "standard", backend: "claude", model: "sonnet", ref: "claude:sonnet", thinking: "medium" };
+	assert.equal(formatDryRunLine({ feature: "f", number: "03", type: "code", title: "Build it" }, route), "f/03  type=code  tier=standard  model=claude:sonnet  thinking=medium  budget=-  Build it");
+});
+
 test("formatDryRunLine shows the effective budget", () => {
 	assert.equal(
 		formatDryRunLine(

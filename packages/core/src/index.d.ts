@@ -32,7 +32,10 @@ export interface Route {
 	type: string;
 	typeSource?: "ticket" | "jev" | "default";
 	tier?: string;
+	/** Model id as the backend takes it, without the `claude:`/`codex:`/… prefix. */
 	model: string;
+	/** The model as written in the config or ticket, prefix included: `claude:sonnet`, `anthropic/claude-sonnet-4-5`. */
+	ref: string;
 	thinking: string;
 	skills: { paths: string[]; preload: string[]; warnings: string[]; restricted: boolean };
 	budget: Budget;

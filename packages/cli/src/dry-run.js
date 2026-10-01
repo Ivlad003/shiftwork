@@ -36,7 +36,7 @@ export function formatDryRunLine(ticket, route, review) {
 	}
 	const source = ticket.type ? "" : route.typeSource === "jev" ? " (jev)" : " (default)";
 	const reviewPart = review === undefined ? "" : `  review=${review}`;
-	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}${reviewPart}  ${ticket.title ?? ""}`;
+	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.ref ?? route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}${reviewPart}  ${ticket.title ?? ""}`;
 }
 
 const BUDGET_PARTS = [

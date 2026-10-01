@@ -762,7 +762,7 @@ async function publishShift(runState, { ticket, attempt, shift, route }) {
 			ticket: { feature: ticket.feature, number: ticket.number, title: ticket.title, path: ticket.path },
 			attempt,
 			shift,
-			model: route.model,
+			model: route.ref ?? route.model,
 			thinking: route.thinking ?? null,
 			tier: route.tier ?? null,
 			budget: route.budget ?? null,
@@ -823,8 +823,9 @@ function accumulateUsage(target, shift) {
 const BLOCKING_KINDS = new Set(["stallTurns", "verifyFailed"]);
 
 function rememberBlocked(blockedModels, route, kind) {
-	if (!BLOCKING_KINDS.has(kind) || !route?.model) return;
-	if (!blockedModels.includes(route.model)) blockedModels.push(route.model);
+	const ref = route?.ref ?? route?.model;
+	if (!BLOCKING_KINDS.has(kind) || !ref) return;
+	if (!blockedModels.includes(ref)) blockedModels.push(ref);
 }
 
 function remainingTicketBudget(ticket, config, usage) {
@@ -1045,7 +1046,7 @@ async function runShift(backend, request, log) {
 }
 
 async function buildHandoffNote({ shiftNumber, from, to, reason, shift, verifyResult, getDiffStat }) {
-	const lines = [`### Handoff — shift ${shiftNumber}, ${from.model} → ${to?.model ?? "(no target)"}, reason: ${reason}`];
+	const lines = [`### Handoff — shift ${shiftNumber}, ${from.ref ?? from.model} → ${to ? (to.ref ?? to.model) : "(no target)"}, reason: ${reason}`];
 	if (shift.text?.trim()) {
 		const tail = shift.text.trim().split("\n").slice(-3).join("\n");
 		lines.push("- Last output:", "", "```", tail, "```");

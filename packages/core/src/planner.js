@@ -76,6 +76,7 @@ function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierNam
 	return {
 		backend: ref.backend,
 		model: ref.model,
+		ref: model,
 		provider: ref.provider,
 		type,
 		typeSource,
@@ -365,7 +366,7 @@ function chooseHandoffTarget({ previousRoute, kind, config, cooldowns = [], now 
 	if (!rule?.to) return undefined;
 	const tier = config.tiers?.[previousRoute.tier];
 	const chain = tier?.chain ?? [];
-	const idx = chain.indexOf(previousRoute.model);
+	const idx = chain.indexOf(previousRoute.ref ?? previousRoute.model);
 	if (rule.to === "next") {
 		if (idx < 0) return undefined;
 		return firstFree(chain.slice(idx + 1), cooldowns, now, blockedModels, fullProviders);

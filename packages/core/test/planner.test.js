@@ -609,3 +609,44 @@ test("planShift: a full provider writes no cooldown and an all-full chain waits 
 	const pinned = planShift({ ticket: t({ type: "docs" }), config, fullProviders: ["openrouter"], now });
 	assert.equal(pinned.wait?.getTime(), now.getTime() + 60_000, "a pinned model on a full provider waits too");
 });
+
+const cliConfig = validateConfig({
+	routing: { code: { tier: "standard" } },
+	tiers: {
+		standard: { chain: ["claude:sonnet", "codex:gpt-5", "fake/m2"] },
+		premium: { chain: ["claude:opus"] },
+	},
+	onExceed: {
+		maxTurns: { to: "next", mode: "new-process" },
+		maxContextPct: { to: "same-tier", mode: "new-process" },
+		stallTurns: { to: "same-tier", mode: "new-process" },
+	},
+});
+
+test("planShift: a route carries the full model ref, backend prefix included", () => {
+	const route = planShift({ ticket: t({ type: "code" }), config: cliConfig });
+	assert.equal(route.backend, "claude");
+	assert.equal(route.model, "sonnet");
+	assert.equal(route.ref, "claude:sonnet");
+	assert.equal(planShift({ ticket: t({ type: "code" }), config: budgetConfig }).ref, "fake/m1");
+});
+
+test("planShift: `next` and `same-tier` handoffs move along a chain of CLI models", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: cliConfig });
+	const next = planShift({ ticket: t({ type: "code" }), config: cliConfig, history: { previousRoute: first, exceededKind: "maxTurns" } });
+	assert.equal(next.ref, "codex:gpt-5");
+	const sameTier = planShift({ ticket: t({ type: "code" }), config: cliConfig, history: { previousRoute: next, exceededKind: "maxContextPct" } });
+	assert.equal(sameTier.ref, "fake/m2");
+});
+
+test("planShift: a stalled CLI model is not chosen again", () => {
+	const first = planShift({ ticket: t({ type: "code" }), config: cliConfig });
+	const plan = planShift({
+		ticket: t({ type: "code" }),
+		config: cliConfig,
+		history: { previousRoute: first, exceededKind: "stallTurns", blockedModels: [first.ref, "codex:gpt-5"] },
+	});
+	assert.equal(plan.ref, "fake/m2");
+	const fresh = planShift({ ticket: t({ type: "code" }), config: cliConfig, history: { blockedModels: [first.ref] } });
+	assert.equal(fresh.ref, "codex:gpt-5");
+});
