@@ -37,12 +37,15 @@ Work arrives as GitHub issues, but Shiftwork only reads `.scratch/`. Today an op
 <!-- shiftwork:tickets:start -->
 | NN | title | status | last route |
 | -- | ----- | ------ | ---------- |
-| 01 | `github` config block and an injectable `gh` wrapper | claimed |  |
-| 02 | `shiftwork tickets check <feature>` — the planning ticket's verify gate | ready-for-agent |  |
-| 03 | Import collaborators' GitHub issues into `.scratch/` | ready-for-agent |  |
-| 04 | Report ticket progress back to the GitHub issue | ready-for-agent |  |
-| 05 | `shiftwork run --dark-factory` | ready-for-agent |  |
-| 06 | TUI GitHub tab and dark-factory toggle | ready-for-agent |  |
-| 07 | ADR — GitHub is an import source, not a tracker | ready-for-agent |  |
-| 08 | Projects v2 board as an optional source | needs-info |  |
+| 01 | `github` config block and an injectable `gh` wrapper | resolved | opencode-go/glm-5.3 |
+| 02 | `shiftwork tickets check <feature>` — the planning ticket's verify gate | resolved | opencode-go/glm-5.3 |
+| 03 | Import collaborators' GitHub issues into `.scratch/` | resolved | opencode-go/glm-5.3 |
+| 04 | Report ticket progress back to the GitHub issue | resolved | opencode-go/glm-5.3 |
+| 05 | `shiftwork run --dark-factory` | resolved | opencode-go/glm-5.3 |
+| 06 | TUI GitHub tab and dark-factory toggle | resolved | opencode-go/glm-5.3 |
+| 07 | ADR — GitHub is an import source, not a tracker | resolved | opencode-go/space-bunny-free |
+| 09 | Labels — config, startup check with an error, setup command, guide | resolved | opencode-go/glm-5.3 |
+| 10 | Fix the review findings in GitHub sync, the gh wrapper and dark-factory | resolved | opencode-go/glm-5.3 |
+| 11 | Tidy the GitHub code — one exec helper, shared constants and defaults | resolved | xai/grok-4.7 |
+| 12 | Small fixes from the operator's review of ticket 10 | resolved | opencode-go/glm-5.3 |
 <!-- shiftwork:tickets:end -->
