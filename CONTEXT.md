@@ -37,7 +37,11 @@ A ticket that must be resolved before another ticket may start.
 _Avoid_: dependency, prerequisite
 
 **Frontier**:
-The tickets that are ready for an agent and whose blockers are all resolved.
+The tickets that are ready for an agent and whose blockers are all resolved, outside **paused features**. The runner works it feature by feature: it stays on the current feature while that feature has a ready ticket.
+
+**Paused feature**:
+A feature whose spec has `**Status:** paused` (`shiftwork feature pause`): none of its tickets is on the frontier until it is resumed.
+_Avoid_: frozen, disabled feature
 _Avoid_: queue, backlog, next tasks
 
 **Claim**:
@@ -63,7 +67,7 @@ The runner's short hold on `.pi/shiftwork.lock` around every read-modify-write o
 _Avoid_: mutex, semaphore, claim
 
 **Backend**:
-The agent program that carries out a shift, such as pi, Claude Code, Codex or OpenCode.
+The agent program that carries out a shift: pi, Claude Code, Codex, OpenCode, Grok Build or Cursor.
 _Avoid_: harness, engine, agent, provider
 
 **Shift**:
@@ -101,7 +105,7 @@ The vendor whose API serves a model, such as Anthropic, OpenAI, xAI, OpenRouter 
 _Avoid_: backend, vendor account
 
 **Tier**:
-A capability class of models: quick, standard or premium.
+A named capability class of models with its own chain, usually quick, standard and premium (any name works, e.g. `local`).
 _Avoid_: level, class, size
 
 **Route**:
@@ -123,7 +127,7 @@ _Avoid_: inlined skill, forced skill
 ### Limits
 
 **Budget**:
-A limit Shiftwork sets on a shift or a ticket: tokens, cost, turns, time or context fill. The **soft limit** asks the agent to write a handoff note; the **hard limit** ends the shift.
+A limit Shiftwork sets on a shift or a ticket: tokens, cost, turns, time, context fill or stalled turns. The **soft limit** asks the agent to write a handoff note; the **hard limit** ends the shift.
 _Avoid_: quota, cap
 
 **Provider limit**:

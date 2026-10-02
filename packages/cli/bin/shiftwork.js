@@ -23,8 +23,9 @@ Usage:
                                 Thaw a paused feature back to "ready-for-agent"
   shiftwork run [options]       Work the frontier until nothing is left
   shiftwork tui [--once] [--dir <path>]
-                                Full-screen dashboard (Queue, Agents, Cooldowns, Log);
-                                1–4 tabs, n runs the selected ticket, r runs, s stops, d dry-runs
+                                Full-screen dashboard: Queue, Agents, Cooldowns, Log, Resolved,
+                                GitHub (1–6, tab); n runs the selected ticket, r runs, s stops,
+                                d dry-runs, p pauses a feature, / searches, g dark-factory
   shiftwork tickets check <feature> [--min <n>] [--except NN] [--dir <path>]
                                 Planning gate: exit 0 when at least n (default 1) tickets
                                 besides the excepted ones (default 01) are ready-for-agent

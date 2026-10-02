@@ -7,7 +7,7 @@ CLI for [Shiftwork](https://github.com/Ivlad003/shiftwork) · [npm](https://www.
 ```bash
 npx shiftwork init --model anthropic/<model-id>   # .pi/shiftwork.json, worker prompt, pi compaction settings
 npx shiftwork status                              # tickets and the ready frontier
-npx shiftwork tui                                 # live dashboard: runner, budgets, cooldowns, logs — r run · s stop · d dry-run · f filter · q quit
+npx shiftwork tui                                 # live dashboard: queue, agents, cooldowns, logs — tabs 1–6, n run this, p pause, / search, r run, s stop, q quit
 npx shiftwork run --dry-run                       # which model/tier/thinking each ticket would get, and whether it gets a review (before or after it lands)
 npx shiftwork run --once                          # work one ticket
 npx shiftwork run                                 # work the frontier until nothing is left
@@ -23,6 +23,6 @@ Routing: the ticket's `**Model:**`, then `routing[Type]` → tier → first mode
 
 Review shifts, on by default: one review shift in a fresh context on the strongest configured tier (set `review.tier` to choose one) judges each ticket's change — on its unlanded branch, in its worktree, before anything lands (`review.when: "after-land"` reviews the landed commit after the landing instead). The reviewer reads the ticket, the spec and the diff, runs the verify gate, and ends with `<shiftwork:review verdict="accept|reopen|follow-up" reason="…"/>`. The verdict is recorded as `### Review` in the ticket's Comments: `accept` lands the branch, `reopen` sends the ticket back to ready-for-agent (nothing lands; the next shift continues on the same branch with the findings in its prompt, up to `review.maxRounds` reopens, default 2), `follow-up` lands the branch and files a new ticket in the feature. Restrict reviews with `features` (feature names) and `types` (ticket types); `run --dry-run` prints `review=<tier> (before land)` or `(after land)` for tickets that will be reviewed and `review=no` for the rest.
 
-Exit codes: `0` all resolved or nothing to do · `2` some tickets need info or a review reopened one · `1` error.
+Exit codes: `0` all resolved or nothing to do · `2` some tickets need info or a review reopened one · `3` stopped (STOP file or a signal) · `1` error.
 
-Status: early development. Worktrees, budgets with handoff, provider fallback, skill tiers and Jev are on the way.
+Status: early development (0.x): the config and the ticket lines may still change between minor versions. Full guide: [docs/guide.md](https://github.com/Ivlad003/shiftwork/blob/main/docs/guide.md).

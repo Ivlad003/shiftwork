@@ -99,6 +99,10 @@ A ticket without a `Type` gets `defaultType`, unless Jev (a small classifier mod
 | `cooldown` | How long a provider rests after a limit when it gives no reset time: `{ "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" }`. |
 | `maxAttempts` | Failed Verify runs before a ticket becomes `needs-info` (default 3). |
 | `verifyTimeoutMin` | Minutes one Verify command may run before it is killed, with everything it started, and the gate fails (default 10). E.g. `"verifyTimeoutMin": 20` for slow test suites. |
+| `probeEveryMin` | Minutes between checks of a guessed cooldown (one without a reset time from the provider): a cheap probe asks the provider whether it is back (default 15). |
+| `probeBeforeTicket` | Probe every guessed cooldown before each ticket, not only every `probeEveryMin` (default true). |
+| `allowInPlace` | Let a handoff keep the agent's session in the same process when the backend supports it and `onExceed` asks for `same-process`/`auto` (default false: every handoff is a fresh process, ADR-0005). |
+| `tracker` | `"scratch"` (`.scratch/<feature>/issues/`) or `"openspec"` (`openspec/changes/`). Detected when omitted: `.scratch/` wins when both exist. |
 | `landRetries` | While a parallel landing keeps moving the target, the runner rebases onto it, re-runs Verify and lands again, this many rounds (default 5). Past it the ticket goes to `needs-info`, the branch kept. |
 | `parallel` | How many frontier tickets the runner works at once (default 1). Above 1 needs `"worktree": { "enabled": true }`: every parallel ticket gets its own worktree. |
 | `concurrency` | Caps the shifts running at once per provider, e.g. `{ "ollama": 1 }` for a single GPU. A full provider is skipped like a cooling one. The keys are the cooldown keys: `ollama`, `claude`, `opencode:opencode-go`. |
@@ -348,7 +352,7 @@ Six full-screen tabs (`1`–`6`, or `tab` to cycle): **Queue**, **Agents**, **Co
 | Resolved | The features whose tickets are all resolved, with the same rows (folders, tickets), cursor, fold and `enter` → details as the Queue; `n` there is refused — the ticket's status is resolved | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `esc` back |
 | GitHub | The issues `run --dark-factory` imported (`.pi/shiftwork-github.json`): `#<N> <title> · <feature> · <state>`, where the state — planning, working, needs-info, done, closed — comes from the feature's tickets, plus the time of the last sync | `↑↓`/`j k` move · `enter` opens the issue's feature in the Queue tab |
 
-Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `g` toggle dark-factory (starts `shiftwork run --dark-factory` detached when no runner is live, writes STOP when one is) · `/` search · `q` quit. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live — and with `feature <feature> is paused (p resumes it)` while its feature is paused. `p` (Queue and Resolved) pauses or resumes the feature under the cursor — its folder row or one of its ticket rows: the notice says `⏸ <feature> paused` or `▶ <feature> resumed`, and the next frame (once a second) shows the frontier without the paused feature's tickets. It works while a runner is live: the current shift finishes and lands, the runner takes no further ticket of the feature. `tui --once` and the plain-text fallback keep listing every feature, resolved ones included, in the old all-in-one frame.
+Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `g` toggle dark-factory (starts `shiftwork run --dark-factory` detached when no runner is live, writes STOP when one is) · `q` quit. `/` searches on the Queue and Resolved tabs and inside an open ticket's details. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live — and with `feature <feature> is paused (p resumes it)` while its feature is paused. `p` (Queue and Resolved) pauses or resumes the feature under the cursor — its folder row or one of its ticket rows: the notice says `⏸ <feature> paused` or `▶ <feature> resumed`, and the next frame (once a second) shows the frontier without the paused feature's tickets. It works while a runner is live: the current shift finishes and lands, the runner takes no further ticket of the feature. `tui --once` and the plain-text fallback keep listing every feature, resolved ones included, in the old all-in-one frame.
 
 **The status column** — every Queue and Resolved ticket row starts with a fixed-width status column before the number and title, so on a narrow terminal the words stay whole and the title is what gets clipped. Its legend:
 
@@ -482,7 +486,7 @@ npx shiftwork run --dry-run
 
 ```
 f/04  type=code  tier=standard  model=claude:sonnet  thinking=medium  budget=$1.5 · 3000000 tok · 60 turns · 45 min · 8 stall  review=premium (before land)
-f/04  type=docs  tier=local  model=ollama/qwen2.5-coder:7b  thinking=off  budget=$8 · 60 turns · 45 min · 8 stall  review=no
+f/03  type=docs  tier=local  model=ollama/qwen2.5-coder:7b  thinking=off  budget=$8 · 60 turns · 45 min · 8 stall  review=no
 f/05  type=infra  tier=premium  model=claude:opus  thinking=high  budget=$4 · 120 turns · 45 min · 70% ctx · 8 stall  review=no
 ```
 
@@ -533,6 +537,7 @@ How it treats the issues:
 - **Collaborators only.** An issue is imported only when its author is a collaborator of the repo (plus the logins in `github.authors`) — issue text is untrusted input to an unattended agent, so anyone else's issue is ignored, and so is an issue without the `in` label. Each issue becomes a feature under `.scratch/`: a spec (the issue itself) and a planning ticket that splits it into implementation tickets.
 - **It reports back, never deletes.** A comment when work starts, a comment per resolved ticket with its shift report and links to the landed commits, a question when a ticket needs information — and a collaborator's answer to that question goes back into the ticket. See [`Dark-factory: labels`](#dark-factory-labels) for the labels it sets.
 - **Closing.** When every ticket of an issue is resolved, the issue is closed with a summary comment (`github.autoClose`, default true). Nothing on GitHub is ever deleted.
+- **Planning tier.** Each imported issue starts with a planning ticket (`**Type:** plan`) that writes the implementation tickets. `github.planTier` routes it to a tier (e.g. a cheap one), unless the config already routes `plan`.
 - **Push.** The runner lands on local `main`; the commit links in the comments resolve only once the commits are on GitHub. Set `"push": true` in the `github` block and dark-factory runs `git push origin HEAD` in the main checkout after every pass that landed commits. Without it the comments show the short shas only.
 
 At start, before anything is imported, dark-factory checks your `gh` and its labels: no GitHub CLI, no logged-in `gh`, or a missing label each ends it with an error and how to fix it. Set up all of it once in [`Dark-factory: labels`](#dark-factory-labels).

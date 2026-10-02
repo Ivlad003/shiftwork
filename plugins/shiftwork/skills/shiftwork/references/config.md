@@ -6,9 +6,10 @@
 
 - `model`, `defaultTier`, `routing.<type>` (`{ tier, model, thinking }`): routing order is the ticket's `**Model:**` → `routing[Type]` → the tier chain's first model → `defaultTier` → `model`.
 - `tiers.<name>`: `chain` — fallback order of `"provider/model"` entries — plus `thinking`, `skills`/`preload` (skill groups) and a per-tier `budget`.
-- `budgets` — `default`, `tiers.<name>`, `models.<provider/model>` and `ticket` (written by a `**Budget:**` line): token, cost, turn and context limits. Past a limit, Shiftwork hands the shift to another model.
+- `budgets` — `default`, `tiers.<name>`, `models.<provider/model>` and `ticket` (a ticket's `**Budget:**` line overrides it): token, cost, turn, time, context and stall limits. Past a limit, Shiftwork hands the shift to another model.
 - `unlimited` — `true` or a list of limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`), lifts every limit or only those. Also accepted on `tiers.<name>`, `models.<provider/model>` and `backends.<name>` (backend names: `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor`): a shift on that tier, model or backend runs with the union of the top-level, tier, model and backend lists lifted — every limit for that route, the ticket's own `Budget:` line included. Budgets stay global; the per-route lists are how chosen agents and models run without limits.
 - `maxAttempts`, `maxHandoffs`, `softLimitPct`, `crossTier`, `allowInPlace`: how hard the runner tries before giving up on a ticket and whether handoffs stay in-process.
+- `parallel` (frontier tickets at once, default 1; above 1 needs worktrees), `concurrency` (`{ "<provider>": n }` shift caps), `verifyTimeoutMin` (default 10), `paidProviders`, `preferWaitMin`, `probeEveryMin`/`probeBeforeTicket` (cooldown probes), `models.<provider/model>` profiles (`contextWindow`, `thinking`, `budget`), and per-backend blocks (`claude`, `codex`, `opencode`, `grok`, `cursor`: binary path and args) — see docs/guide.md.
 - `landRetries` (default 5): while a parallel landing keeps moving the target, the runner rebases onto it, re-runs Verify and lands again, this many rounds; past it the ticket goes to `needs-info` with the branch kept.
 - `cooldown`: `rate`/`usage`/`quota`/`server` durations. All workers share one provider's cooldown; a missing CLI or a stopped Ollama server makes a backend unavailable instead.
 - `skillGroups` / `skillSources`: named groups of skill paths. A tier's `skills` narrows the skills advertised to its models; `preload` forces some of them into context.
@@ -32,8 +33,8 @@
 | `npx shiftwork run --dark-factory` | poll the repo's GitHub issues (`github` block), report back and work the frontier; `--once` is one poll + one pass |
 | `npx shiftwork tickets check <feature> [--min <n>] [--except NN]` | planning gate: at least n tickets besides the excepted ones (default `01`) are ready with checkboxes and a Verify line, and every Blocked-by number exists |
 | `npx shiftwork github labels [--create]` | check the dark-factory labels exist in the GitHub repo (`✔ exists` / `✖ missing`, exit 1 when any is missing); `--create` creates the missing ones with a colour and a description, never edits or deletes one |
-| `npx shiftwork tui` | live dashboard: r run · s stop · d dry-run · f filter · q quit |
+| `npx shiftwork tui` | live dashboard, tabs `1`–`6` (Queue, Agents, Cooldowns, Log, Resolved, GitHub): ↑↓ · ←→ fold · enter details · n run this · p pause · `/` search · r run · s stop · d dry-run · f filter · g dark-factory · q quit; mouse clicks and wheel |
 
 In pi: `/shift` (frontier), `/shift run`, `/shift stop`.
 
-Exit codes: `0` all resolved or nothing to do · `2` some tickets need info or a review reopened one · `1` error. Shift events land in `logs/<feature>/<NN>/`.
+Exit codes: `0` all resolved or nothing to do · `2` some tickets need info or a review reopened one · `3` stopped (STOP file or a signal) · `1` error. Shift events land in `logs/<feature>/<NN>/`.

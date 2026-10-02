@@ -15,7 +15,7 @@ Reach for the references when the branch needs them:
 
 ## Write a ticket
 
-1. Read the feature's `spec.md` and the tickets under `.scratch/<feature>/issues/`: the frontier is the open tickets whose `**Blocked by:**` blockers are all `resolved`.
+1. Read the feature's `spec.md` and the tickets under `.scratch/<feature>/issues/`: the frontier is the `ready-for-agent` tickets whose `**Blocked by:**` blockers are all `resolved`, outside paused features; it is worked feature by feature.
 2. Write `.scratch/<feature>/issues/<NN>-<slug>.md` following `references/tickets.md`: a short statement of the slice, acceptance checkboxes, the Shiftwork lines, and `**Verify:**` commands you can run yourself.
 3. Keep one ticket one vertical slice, small enough to finish in a single fresh context; file anything larger as several tickets with blockers between them.
 4. The ticket is done when it is `ready-for-agent`, every checkbox is checkable from the ticket alone, and its `**Verify:**` commands fail before the work and pass after it.
@@ -24,7 +24,7 @@ Reach for the references when the branch needs them:
 
 1. Once per repo: `npx shiftwork init --model <provider>/<model-id>` (add `--ollama` to route to local models). Read `references/config.md` before changing what init wrote.
 2. See the frontier and the routing before spending anything: `npx shiftwork status`, then `npx shiftwork run --dry-run`.
-3. Run: `npx shiftwork run --once` works one ticket; `npx shiftwork run` works the frontier until nothing is left. Watch `npx shiftwork tui` (r run · s stop · d dry-run · f filter · q quit); in pi, `/shift`, `/shift run`, `/shift stop`.
+3. Run: `npx shiftwork run --once` works one ticket; `npx shiftwork run` works the frontier until nothing is left. Watch `npx shiftwork tui` (tabs `1`–`6` · enter details · n run this · p pause a feature · `/` search · r run · s stop · d dry-run · q quit); freeze a feature with `npx shiftwork feature pause <feature>`; in pi, `/shift`, `/shift run`, `/shift stop`.
 4. Stopping is graceful: a runner told to stop finishes its current shift first, so change the ticket or the config and let the shift land.
 5. Dark-factory takes work from GitHub issues instead: `npx shiftwork run --dark-factory` polls the repo (`github` block in `.pi/shiftwork.json`, collaborators only, labels required), imports and plans each issue, works the frontier and reports back on the issue; `--once` is one poll plus one pass. It needs the operator's `gh` CLI (`gh auth login`) — see docs/guide.md "Dark-factory mode".
 6. The run is done when every ticket is `resolved` and its Verify commands pass in a clean checkout, or when a ticket carries `<shiftwork:needs-info reason="…"/>` for what only the operator knows.
