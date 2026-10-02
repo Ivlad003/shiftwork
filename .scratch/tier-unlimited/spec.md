@@ -35,4 +35,5 @@ A shift on that tier or model runs with the union of the top-level, tier and mod
 | NN | title | status | last route |
 | -- | ----- | ------ | ---------- |
 | 01 | `unlimited` on tiers and model profiles | resolved | opencode-go/glm-5.3 |
+| 02 | Per-model/tier `unlimited` lifts the ticket budget too; `unlimited` per backend | resolved | opencode-go/glm-5.3 |
 <!-- shiftwork:tickets:end -->

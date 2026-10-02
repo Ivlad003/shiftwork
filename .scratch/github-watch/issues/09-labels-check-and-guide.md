@@ -4,13 +4,30 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** code
 **Verify:** `node --test packages/core/test/config.test.js packages/cli/test/github-labels.test.js` · `npm test` · `grep -q "Dark-factory: labels" docs/guide.md` · `grep -q "Dark-factory" docs/guide.uk.md`
 
-- [ ] Config tests: a `github` block without `labels.in` fails with the `github.labels.in` path and the guide pointer; defaults fill `working` / `needsInfo` / `done`; an empty string fails
-- [ ] `checkLabels` tests with a stub `exec`: all present → `missing: []`; two absent → those two names
-- [ ] `github labels` tests: prints ✔/✖ per label and exits 1 when one is missing; `--create` runs `gh label create` only for the missing ones and no edit/delete command
-- [ ] The dark-factory start-up error text names the repo, the missing labels, the `--create` command and the guide section (unit test on the message builder, exported for ticket 05)
-- [ ] Config test: `github.gh` accepts a string path; `createGitHub` with `gh: "/x/gh"` runs `/x/gh` (stub exec sees the binary)
-- [ ] Guides (en + uk) have the labels section with the setup steps, including installing and logging in to `gh`
+- [x] Config tests: a `github` block without `labels.in` fails with the `github.labels.in` path and the guide pointer; defaults fill `working` / `needsInfo` / `done`; an empty string fails
+- [x] `checkLabels` tests with a stub `exec`: all present → `missing: []`; two absent → those two names
+- [x] `github labels` tests: prints ✔/✖ per label and exits 1 when one is missing; `--create` runs `gh label create` only for the missing ones and no edit/delete command
+- [x] The dark-factory start-up error text names the repo, the missing labels, the `--create` command and the guide section (unit test on the message builder, exported for ticket 05)
+- [x] Config test: `github.gh` accepts a string path; `createGitHub` with `gh: "/x/gh"` runs `/x/gh` (stub exec sees the binary)
+- [x] Guides (en + uk) have the labels section with the setup steps, including installing and logging in to `gh`
+
+### Notes
+
+- `github` left `DEFAULTS` in `packages/core/src/config.js`: an absent block now yields no `github` config at all. Filling the absent-block defaults there made every `validateConfig` output carry a github block, and `run` re-validates the already-validated config (CLI overrides), so the required-`labels.in` check fired for repos with no github config. With the block absent, `checkGitHub` returns `undefined`; consumers (`github-import.js`, `github-labels.js`) already use optional chaining.
+- `missingLabelsMessage(repo, missing)` is exported from `packages/cli/src/github-labels.js` for ticket 05's `run --dark-factory` start-up check.
+- Fixed a latent bug in `createGitHub`: `exec = defaultExec` in the parameter list referenced a body-hoisted function, so the no-`exec` (real `gh`) path threw before this ticket ever exercised it.
+- The `--create` colours/descriptions live in `LABEL_META` in `packages/cli/src/github-labels.js`, keyed by label kind (`in` / `working` / `needsInfo` / `done`), so renamed labels still get them.
+
+## Comments
+
+### Shift 1 — pi opencode-go/glm-5.3 (medium)
+- Ended: stop, error: terminated
+- Usage: 70097 in / 34488 out tokens, $1.2310, 73 turns
+- Time: 14m 46s
+- Verify: passed
+- Outcome: resolved
+- Landed: merged shiftwork/github-watch-09 into main

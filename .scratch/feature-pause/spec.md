@@ -23,3 +23,10 @@ There is no way to freeze one feature's development. The runner never reads a fe
 - Pause/resume edits only the spec's Status line and keeps the rest of the file (including the runner's ticket table) byte-for-byte; the write goes through the repo's shared-state lock like other tracker writes.
 - OpenSpec tracker: out of scope; `feature pause` there exits 1 with `pause is supported for .scratch features only`.
 - Docs: `docs/guide.md` + `docs/guide.uk.md` (section 7: the commands and "How the runner picks the next ticket"), `docs/agents/issue-tracker.md` (the `paused` spec status), `skills/shiftwork/references/tickets.md` and `config.md` CLI list (then `npm run sync-skills`), `shiftwork --help`, `npm run llms`.
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | `shiftwork feature pause\|resume` and paused features off the frontier | resolved | opencode-go/glm-5.3 |
+| 02 | Pause and resume a feature from the TUI | resolved | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->

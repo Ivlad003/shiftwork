@@ -17,3 +17,9 @@ While `land` returns `rebase` (the target moved and the rebase was clean), the r
 - Loop in the runner's landing block instead of the single retry; same for the parallel landing path (`queue.then(() => workspace.land(ticket))`).
 - `landRetries` is a top-level config number (validated, ≥ 0), default 5; documented in the guide's config table.
 - When retries run out, the reason names the count: `the target kept moving (5 rebases); branch <b> kept — land it with shiftwork run --ticket <f>/<NN> or merge it by hand`.
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Keep re-verifying and landing while the target moves | resolved | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->

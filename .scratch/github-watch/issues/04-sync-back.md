@@ -4,11 +4,29 @@
 
 **Blocked by:** 03, 09
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** code
 **Verify:** `node --test packages/cli/test/github-sync.test.js` · `npm test`
 
-- [ ] Tests with a stub `github` and a temp repo: claimed → one "started" comment; resolved → one comment with the shift report and the commit link (push on) or short sha (push off); a second sync posts nothing
-- [ ] needs-info → question comment; a collaborator's reply is appended to the ticket and its status becomes `ready-for-agent`; a non-collaborator's reply is ignored
-- [ ] All tickets resolved → summary comment, the `done` label, issue closed once; with `autoClose: false` it stays open
-- [ ] No test calls a delete endpoint
+- [x] Tests with a stub `github` and a temp repo: claimed → one "started" comment; resolved → one comment with the shift report and the commit link (push on) or short sha (push off); a second sync posts nothing
+- [x] needs-info → question comment; a collaborator's reply is appended to the ticket and its status becomes `ready-for-agent`; a non-collaborator's reply is ignored
+- [x] All tickets resolved → summary comment, the `done` label, issue closed once; with `autoClose: false` it stays open
+- [x] No test calls a delete endpoint
+
+### Notes
+
+- `syncIssues({ root, github, config, tracker, git })` in `packages/cli/src/github-sync.js`; state keys on each issue's `posted` array: `working`, `started:<NN>`, `resolved:<NN>`, `needs-info:<NN>`, `replied:<NN>`, `done`. State is written after every post, so a crash re-posts at most one comment.
+- "Work started" is posted per first-claimed ticket; the `working` label only once per issue. The needs-info reason is read from the runner's last `- Outcome: needs-info: …` (or `- Stopped: …`) line in the ticket.
+- New issue comments are tracked by count (`commentsSeen` on the issue's state entry), recorded *before* the question comment is posted so the question itself is never treated as a reply; non-collaborator replies advance the count so they are never reconsidered.
+- The needs-info label is removed when a reply is handled (and `working` is dropped when `done` is added, only if we added it); labels are never created or otherwise removed, and no delete endpoint exists on the `github` wrapper or the stub.
+- `git` is injectable like `github`'s `exec` (default: real `git` in `root`); the tests use a real temp git repo for the landed-commit grep.
+
+## Comments
+
+### Shift 1 — pi opencode-go/glm-5.3 (medium)
+- Ended: stop
+- Usage: 51322 in / 27440 out tokens, $0.3284, 19 turns
+- Time: 8m 29s
+- Verify: passed
+- Outcome: resolved
+- Landed: merged shiftwork/github-watch-04 into main

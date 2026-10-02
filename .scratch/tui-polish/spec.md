@@ -33,3 +33,18 @@ Source: GitHub issues #1, #2, #3, #4, #5, #7 (Ivlad003/shiftwork, 2026-10-01). V
 
 - Themes or configurable colours.
 - Searching ticket bodies in global scope (titles and numbers only).
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Decode kitty keyboard-protocol keys (Esc, Ctrl-C) in the TUI | resolved | opencode-go/glm-5.3 |
+| 02 | Colours and a highlighted cursor row in the interactive TUI | resolved | opencode-go/glm-5.3 |
+| 03 | Move fully resolved features to a Resolved tab | resolved | opencode-go/glm-5.3 |
+| 04 | Mouse clicks and wheel in the interactive TUI | ready-for-agent | opencode-go/glm-5.3 |
+| 05 | Search tickets globally, within a feature, and inside a ticket | resolved | opencode-go/glm-5.3 |
+| 06 | Show live agents on the feature row, also when it is collapsed | resolved | opencode-go/glm-5.3 |
+| 07 | Readable ticket status in the Queue | resolved | opencode-go/glm-5.3 |
+| 08 | Follow-up to tui-polish/05: Show TUI search editing hints only while search.edi… | resolved | opencode-go/glm-5.3 |
+| 09 | Follow-up to tui-polish/08: Show a kept ticket search's real keys in the footer… | resolved | opencode-go/glm-5.3 |
+| 10 | Follow-up to tui-polish/09: Change the details-search editing footer from enter… | resolved | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->

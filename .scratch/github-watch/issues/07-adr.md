@@ -4,9 +4,24 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** resolved
 **Type:** docs
 **Verify:** `test -f docs/adr/0006-github-is-an-import-source.md` · `grep -qi "dark-factory" CONTEXT.md` · `npm test`
 
-- [ ] The ADR exists, names ADR-0001 and ADR-0004, and states the collaborators-only rule and the no-delete rule
-- [ ] `CONTEXT.md` defines dark-factory mode and planning ticket
+- [x] The ADR exists, names ADR-0001 and ADR-0004, and states the collaborators-only rule and the no-delete rule
+- [x] `CONTEXT.md` defines dark-factory mode and planning ticket
+
+### Notes
+
+- ADR written in the style of 0001/0004 (title, decision paragraph, `## Considered Options`, `## Consequences`). It names ADR-0001 (`.scratch/` tracker), ADR-0004 (no backend deps in core, `gh` in `packages/cli`), the collaborators-only rule and the no-delete rule, the needs-info reply as the only re-sync, and the Projects board not being a source yet.
+- `CONTEXT.md` gains a `### GitHub watch` language section: dark-factory mode, planning ticket, reconcile step.
+
+## Comments
+
+### Shift 1 — pi opencode-go/space-bunny-free (low)
+- Ended: stop
+- Usage: 10577 in / 1662 out tokens, $0.0000, 10 turns
+- Time: 57s
+- Verify: passed
+- Outcome: resolved
+- Landed: merged shiftwork/github-watch-07 into main

@@ -24,3 +24,9 @@ The runner takes whatever order `tracker.frontier()` returns. `frontier()` in `p
 - A pure `orderFrontier(frontier, tickets, { current })` in `packages/core/src/index.js` (exported, typed in `index.d.ts`): sorts by (feature == current first) → (started before not started) → feature name → ticket number. `tracker.frontier()` (and the OpenSpec tracker's) return `orderFrontier(…, { current: null })`; the runner's `frontierPage` re-orders with `current` = the feature of the ticket it last worked.
 - `docs/agents/issue-tracker.md` ("Frontier: … first by number wins") is updated to the feature-by-feature rule.
 - No config option for other orders.
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Work the frontier feature by feature | needs-info | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->

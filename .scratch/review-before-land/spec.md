@@ -26,3 +26,11 @@ Today a ticket lands first and is reviewed afterwards (`review.when: "resolve"`)
 - The workspace keeps the worktree across a `reopen` (like today's reuse after a failed Verify).
 - `--dry-run` shows `review=premium (before land)` / `(after land)`.
 - Docs: `docs/guide.md` + `docs/guide.uk.md` ("Reviews after each ticket" → "Reviews"), `CONTEXT.md` (review shift), `skills/shiftwork/SKILL.md` "Review landed work" → reviews a branch before it lands, `references/config.md`, then `npm run sync-skills` and `npm run llms`.
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Review on the branch before it lands (new default) | resolved | opencode-go/glm-5.3 |
+| 02 | Land only the work the review saw | resolved | opencode-go/glm-5.3 |
+| 03 | Follow-up to review-before-land/02: Discard worktree leftovers again after each… | resolved | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->

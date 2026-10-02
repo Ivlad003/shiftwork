@@ -25,3 +25,12 @@ Reviews are off unless `.pi/shiftwork.json` has `"review": { "enabled": true, "t
 ## Out of Scope
 
 - Reviewing tickets that already landed (the operator reviews those by hand).
+
+<!-- shiftwork:tickets:start -->
+| NN | title | status | last route |
+| -- | ----- | ------ | ---------- |
+| 01 | Review shifts on by default, on the strongest configured tier | resolved | opencode-go/glm-5.3 |
+| 02 | A review must give a verdict — no silent accept, its own budget, no handoff prompt, no network | resolved | opencode-go/glm-5.3 |
+| 03 | Follow-up to review-default/02: Treat a review as unfinished only when the last… | needs-info | opencode-go/glm-5.3 |
+| 04 | Follow-up to review-default/02: Resume a stopped before-land review in its work… | ready-for-agent | opencode-go/glm-5.3 |
+<!-- shiftwork:tickets:end -->
