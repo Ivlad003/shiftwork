@@ -1071,6 +1071,8 @@ class StubTuiAltScreen {
 	}
 	start() {
 		this.started = true;
+		// Like the real TuiAltScreen: every mounted root is a Component and gets invalidate().
+		for (const root of [this.layoutRoot, ...this.children].filter(Boolean)) root.invalidate();
 		this.terminal.start((data) => {
 			for (const listener of this.listeners) {
 				const result = listener(data);
@@ -1238,5 +1240,16 @@ test("interactive: NO_COLOR disables colour in the interactive view", async () =
 		assert.doesNotMatch(await frame(), /\x1b\[/); // NO_COLOR turns it off
 	} finally {
 		delete process.env.NO_COLOR;
+	}
+});
+
+test("dashboardLayout: a terminal shorter than the header and footer still yields a frame", () => {
+	const tickets = [ticket("demo", "01", "First")];
+	for (const notice of [null, "a notice"]) {
+		for (let height = 1; height <= 6; height++) {
+			const layout = dashboardLayout({ ...base, tickets, frontier: tickets, notice }, { width: 80, height });
+			assert.ok(layout.lines.length <= height, `height ${height}: ${layout.lines.length} lines`);
+			assert.ok(Array.isArray(layout.rows));
+		}
 	}
 });

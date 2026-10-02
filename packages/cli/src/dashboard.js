@@ -378,7 +378,7 @@ function footerKeys(state, tab) {
  * rows sit among them.
  */
 function tabBody(state, tab, height, now) {
-	if (height <= 0) return { lines: [], cursor: -1, redRows: [] };
+	if (height <= 0) return { lines: [], cursor: -1, redRows: [], rows: [] };
 	const cursor = { queue: 0, agents: 0, cooldowns: 0, log: 0, resolved: 0, github: 0, ...(state.cursor ?? {}) };
 	const plain = (lines) => ({ lines: lines.slice(0, height), cursor: -1, redRows: [], rows: [] });
 	/** The hit rows of a list window: each of its lines is one row of the tab's rows, from `start`. */

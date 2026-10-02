@@ -161,8 +161,11 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 	};
 	// The layout root: the Text wrapped so it can take mouse events — each one is
 	// mapped through the last layout to a reducer action and fed to the controls.
+	// It is a full pi-tui Component: TuiAltScreen calls `invalidate()` on its roots
+	// (at start on iTerm2, on the cell-size reply on Kitty, Ghostty, WezTerm, Warp).
 	const layoutRoot = {
 		render: (width) => text.render(width),
+		invalidate: () => text.invalidate(),
 		handleMouse: (event) => {
 			const action = mouseAction(event, layout);
 			if (!action) return undefined;
