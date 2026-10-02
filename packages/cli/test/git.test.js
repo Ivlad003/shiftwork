@@ -263,3 +263,39 @@ test("commit puts the work on the branch with the landing's message; land then m
 	assert.equal(git(root, "log", "--format=%s", "--grep", "shiftwork: f/01").split("\n").length, 1, "one commit, not an extra empty one");
 	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n");
 });
+
+test("discardAfterReview drops what the review round left; land merges exactly the committed work", async () => {
+	const root = await repo();
+	await writeFile(join(root, ".gitignore"), "junk.log\n");
+	git(root, "add", ".gitignore");
+	git(root, "commit", "-q", "-m", "ignore");
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root, setup: ["echo x > setup-out.txt"] });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	// The commit a before-land reviewer saw: this is all the branch carries.
+	assert.equal(await ws.commit(t), true);
+	// The review round leaves things behind: an edit to the committed work, an untracked file,
+	// an ignored file, and edits to the tracker copy and setup output.
+	await writeFile(join(cwd, "feature.txt"), "done\nreviewer edit\n");
+	await writeFile(join(cwd, "stray.txt"), "untracked stray\n");
+	await writeFile(join(cwd, "junk.log"), "ignored, stays\n");
+	await writeFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "edited tracker copy\n");
+	await writeFile(join(cwd, "setup-out.txt"), "y\n");
+
+	assert.deepEqual(await ws.discardAfterReview(t), ["feature.txt", "stray.txt"], "only the strays are discarded");
+
+	assert.equal(await readFile(join(cwd, "feature.txt"), "utf8"), "done\n", "the reviewer's edit is reverted");
+	assert.equal(existsSync(join(cwd, "stray.txt")), false, "the untracked file is removed");
+	assert.equal(existsSync(join(cwd, "junk.log")), true, "ignored files stay (no -x)");
+	assert.equal(await readFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "utf8"), "edited tracker copy\n", "the tracker copy is kept");
+	assert.equal(await readFile(join(cwd, "setup-out.txt"), "utf8"), "y\n", "setup output is kept");
+	assert.deepEqual(await ws.discardAfterReview(t), [], "nothing left to discard");
+
+	const result = await ws.land(t);
+
+	assert.equal(result.ok, true);
+	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n", "the landing carries the committed work, not the reviewer's edit");
+	assert.equal(existsSync(join(root, "stray.txt")), false, "the stray file never landed");
+	assert.equal(git(root, "log", "--format=%s", "--grep", "shiftwork: f/01").split("\n").length, 1, "one landing commit, no unseen second one");
+});

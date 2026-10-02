@@ -259,7 +259,7 @@ test("a shift error is reported and counts as a failed attempt", async () => {
 	assert.match(await ticketText(root, "f", "01-a.md"), /### Shift 1[\s\S]*error: boom/);
 });
 
-function fakeWorkspace({ landOk = true, land, changed = true, diffStat = "" } = {}) {
+function fakeWorkspace({ landOk = true, land, changed = true, diffStat = "", discarded = [] } = {}) {
 	const calls = [];
 	// One worktree per ticket, kept across rounds (a reopen) and dropped only by a redo,
 	// as the real git workspace keeps and drops them.
@@ -298,6 +298,10 @@ function fakeWorkspace({ landOk = true, land, changed = true, diffStat = "" } = 
 			calls.push(["land", t.number]);
 			if (land) return land(t);
 			return landOk ? { ok: true, message: "merged" } : { ok: false, message: "merge conflict in README.md" };
+		},
+		async discardAfterReview(t) {
+			calls.push(["discardAfterReview", t.number]);
+			return typeof discarded === "function" ? discarded() : discarded;
 		},
 		async keep(t) {
 			calls.push(["keep", t.number]);
@@ -2225,7 +2229,7 @@ test("with no review.when (before-land), the review runs on the branch in the wo
 	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
 
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
-	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"], ["land", "01"]], "committed before the review, landed once after it accepted");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"], ["discardAfterReview", "01"], ["land", "01"]], "committed before the review, discarded what it left, landed once after it accepted");
 	assert.equal(shiftsAtCommit, 1, "the commit comes after the worker shift and before the review shift");
 	assert.equal(backend.shifts.length, 2);
 	assert.equal(backend.shifts[0].request.cwd, workspace.cwd, "the worker shift runs in the worktree");
@@ -2244,6 +2248,41 @@ test("with no review.when (before-land), the review runs on the branch in the wo
 	assert.match(text, /\*\*Status:\*\* resolved[\s\S]*### Review[\s\S]*- Verdict: accept[\s\S]*- Landed: merged/, "the review is recorded before the landing note");
 	assert.match(text, /- Outcome: verify passed; review before landing/, "the shift report doesn't claim resolved before the review");
 	assert.doesNotMatch(text, /- Outcome: resolved/);
+});
+
+test("an accepted before-land review discards what it left in the worktree; the after-land path discards nothing", async () => {
+	// Before-land: the review round left files in the worktree — they are discarded before the
+	// landing, and the discarded paths land in the ticket as a landing note.
+	{
+		const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+		const backend = fakeBackend([
+			{ files: { "done.txt": "ok" } },
+			{ text: reviewMarker("accept", "matches the spec") },
+		]);
+		const workspace = fakeWorkspace({ discarded: ["src/stray.txt", "logs/run.log"] });
+
+		await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
+
+		const ops = workspace.calls.map((c) => c[0]);
+		assert.ok(ops.indexOf("discardAfterReview") < ops.indexOf("land"), "the discard runs before the landing");
+		const text = await ticketText(root, "f", "01-a.md");
+		assert.match(text, /- Discarded after review: src\/stray\.txt, logs\/run\.log/);
+		assert.match(text, /- Discarded after review[\s\S]*- Landed: merged/, "the note is a landing note, next to - Landed");
+	}
+	// After-land: the review runs in the main repo after the landing, so nothing is discarded.
+	{
+		const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+		const backend = fakeBackend([
+			{ files: { "done.txt": "ok" } },
+			{ text: reviewMarker("accept", "good") },
+		]);
+		const workspace = fakeWorkspace({ discarded: ["src/stray.txt"] });
+
+		await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig({ when: "after-land" }), workspace });
+
+		assert.ok(!workspace.calls.some(([op]) => op === "discardAfterReview"), "nothing is discarded after the landing");
+		assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /Discarded after review/);
+	}
 });
 
 test("a before-land follow-up whose landing fails files no follow-up", async () => {
@@ -2295,7 +2334,7 @@ test("a before-land reopen lands nothing: the next shift continues on the same b
 	]);
 	const second = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
 
-	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"], ["prepare", "01"], ["commit", "01"], ["land", "01"]], "the second run reuses the ticket's worktree, commits for its review, then lands it");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"], ["prepare", "01"], ["commit", "01"], ["discardAfterReview", "01"], ["land", "01"]], "the second run reuses the ticket's worktree, commits for its review, discards what it left, then lands it");
 	assert.equal(backend.shifts[0].request.cwd, workspace.cwd, "the next shift runs in the kept worktree");
 	assert.equal(backend.shifts[1].request.cwd, workspace.cwd, "the second review runs in the kept worktree too");
 	assert.match(backend.shifts[0].request.prompt, /- The last review of this work ended in reopen/);

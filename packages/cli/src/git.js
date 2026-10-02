@@ -60,6 +60,25 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		return true;
 	}
 
+	/** After an accepted before-land review, discard what the review round left in the worktree
+	 * (reviewer edits, verify strays): modified tracked files restored (`git checkout -- .`) and
+	 * untracked files removed (`git clean -fd`, no `-x`, so ignored files stay) — the tracker copy
+	 * and setup output untouched. Returns the discarded paths, for the landing notes: empty when
+	 * the review left nothing, so the landing commits only the work the review saw. */
+	async function discardAfterReview(t) {
+		const cwd = pathOf(t);
+		const setupPaths = await readFile(await setupPathsFile(cwd), "utf8").then(
+			(text) => text.split("\n").filter(Boolean),
+			() => [],
+		);
+		const discarded = (await changedPaths(cwd)).filter((p) => !p.startsWith(".scratch/") && !setupPaths.includes(p));
+		if (discarded.length === 0) return [];
+		const excluded = [TRACKER, ...setupPaths.map((p) => `:(exclude,literal)${p}`)];
+		await git(cwd, "checkout", "--", ".", ...excluded);
+		await git(cwd, "clean", "-fd", "--", ".", ...excluded);
+		return discarded;
+	}
+
 	/** The commit message of a ticket's work: `git log --grep "shiftwork: <feature>/<NN>"` finds it. */
 	function landMessage(t) {
 		return `shiftwork: ${t.feature}/${t.number} ${t.title ?? ""}`.trim();
@@ -165,6 +184,12 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		 * then has nothing left to commit and merges this commit. Returns whether a commit was made. */
 		async commit(t) {
 			return commitAll(t, landMessage(t));
+		},
+
+		/** After an accepted before-land review: drop what that round left in the worktree, so
+		 * `land` merges exactly the committed work the review saw. Returns the discarded paths. */
+		async discardAfterReview(t) {
+			return discardAfterReview(t);
 		},
 
 		/** The branch tickets land into: a before-land review's branch diff points at it. */

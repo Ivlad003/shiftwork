@@ -776,6 +776,13 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				}
 				// accept, follow-up (filed below, once landed) or skip (no reviewer free): land.
 				const landingNotes = [];
+				// What the review round left in the worktree (reviewer edits, verify strays) is
+				// discarded first, so the landing commits only the work the review saw; the
+				// discarded paths go into the landing notes.
+				if (typeof workspace.discardAfterReview === "function") {
+					const discarded = await workspace.discardAfterReview(ticket);
+					if (discarded.length) landingNotes.push(`- Discarded after review: ${discarded.join(", ")}`);
+				}
 				const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes: landingNotes, conflictRedone });
 				if (landing.outcome === "redo") {
 					// The landing conflicted with a parallel one: the work is redone in a fresh
