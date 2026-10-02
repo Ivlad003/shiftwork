@@ -400,9 +400,11 @@ function withLandingQueue(workspace) {
  * "redo" (a landing conflict: one fix-forward from the new target), or NEEDS_INFO (reason: the
  * target would not stand still, or the landing failed outright). In a parallel run every
  * `land` here goes through the queue in withLandingQueue, so the rounds stay
- * one-landing-at-a-time like any other landing.
+ * one-landing-at-a-time like any other landing. `discardAfterReview` (the before-land path):
+ * after each rebase re-verify, what that gate left in the worktree is discarded again before
+ * the next `land`, so a moved target cannot commit files the review never saw.
  */
-async function landResolvedBranch({ ticket, workspace, verify, config, cwd, notes, conflictRedone }) {
+async function landResolvedBranch({ ticket, workspace, verify, config, cwd, notes, conflictRedone, discardAfterReview = false }) {
 	let landed = await workspace.land(ticket);
 	let rebases = 0;
 	while (!landed.ok && landed.rebase) {
@@ -426,6 +428,13 @@ async function landResolvedBranch({ ticket, workspace, verify, config, cwd, note
 		);
 		if (!integrated.ok) {
 			return { outcome: NEEDS_INFO, reason: `verify gate failed on the branch rebased onto ${landed.rebase} (\`${failed?.cmd}\`)` };
+		}
+		// The re-verify itself may leave files in the worktree (test strays, a tool): after an
+		// accepted before-land review, discard them again before the next `land`, so it commits
+		// only the work the review saw; the discarded paths go into the notes.
+		if (discardAfterReview && typeof workspace.discardAfterReview === "function") {
+			const discarded = await workspace.discardAfterReview(ticket);
+			if (discarded.length) notes.push(`- Discarded after re-verify: ${discarded.join(", ")}`);
 		}
 		landed = await workspace.land(ticket);
 	}
@@ -783,7 +792,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					const discarded = await workspace.discardAfterReview(ticket);
 					if (discarded.length) landingNotes.push(`- Discarded after review: ${discarded.join(", ")}`);
 				}
-				const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes: landingNotes, conflictRedone });
+				const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes: landingNotes, conflictRedone, discardAfterReview: true });
 				if (landing.outcome === "redo") {
 					// The landing conflicted with a parallel one: the work is redone in a fresh
 					// worktree, and the redone work gets a fresh review after its gate passes.

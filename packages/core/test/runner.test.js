@@ -352,6 +352,7 @@ test("a landing whose target moved is rebased, re-verified and lands again", asy
 
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
 	assert.equal(gates.length, 2, "the gate runs again on the rebased worktree");
+	assert.ok(!workspace.calls.some(([op]) => op === "discardAfterReview"), "no review ran, so nothing is discarded in the rebase round");
 	const text = await ticketText(root, "f", "01-a.md");
 	assert.match(text, /- Target moved to abc1234: branch rebased onto it, verify gate re-run: passed/);
 	assert.match(text, /- Landed: merged shiftwork\/f-01 into main/);
@@ -2283,6 +2284,62 @@ test("an accepted before-land review discards what it left in the worktree; the 
 		assert.ok(!workspace.calls.some(([op]) => op === "discardAfterReview"), "nothing is discarded after the landing");
 		assert.doesNotMatch(await ticketText(root, "f", "01-a.md"), /Discarded after review/);
 	}
+});
+
+test("a before-land landing whose target moved discards what the re-verify left, before it lands again", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: reviewMarker("accept", "matches the spec") },
+	]);
+	// The first land finds the target moved; the gate re-runs on the rebased worktree and
+	// leaves a stray there, which is discarded again before the second land.
+	const lands = [
+		{ ok: false, rebase: "abc1234", message: "the target moved to abc1234: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: true, message: "merged shiftwork/f-01 into main" },
+	];
+	let discards = 0;
+	const workspace = fakeWorkspace({
+		land: () => lands.shift(),
+		discarded: () => (discards++ === 0 ? [] : ["stray.log"]),
+	});
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
+
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	assert.deepEqual(
+		workspace.calls,
+		[["prepare", "01"], ["commit", "01"], ["discardAfterReview", "01"], ["land", "01"], ["discardAfterReview", "01"], ["land", "01"]],
+		"the discard runs again after the re-verify, before the second land",
+	);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Target moved to abc1234: branch rebased onto it, verify gate re-run: passed/);
+	assert.match(text, /- Discarded after re-verify: stray\.log/);
+	assert.match(
+		text,
+		/- Target moved to abc1234[\s\S]*- Discarded after re-verify: stray\.log[\s\S]*- Landed: merged shiftwork\/f-01 into main/,
+		"the re-verify's discard is noted between the rebase and the landing",
+	);
+});
+
+test("an after-land landing whose target moved re-verifies and lands without discarding anything", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: reviewMarker("accept", "good") },
+	]);
+	const lands = [
+		{ ok: false, rebase: "abc1234", message: "the target moved to abc1234: branch shiftwork/f-01 rebased onto it; re-verify and land again" },
+		{ ok: true, message: "merged shiftwork/f-01 into main" },
+	];
+	const workspace = fakeWorkspace({ land: () => lands.shift(), discarded: ["stray.log"] });
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig({ when: "after-land" }), workspace });
+
+	assert.ok(!workspace.calls.some(([op]) => op === "discardAfterReview"), "after-land landings discard nothing, even across a rebase round");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.doesNotMatch(text, /Discarded after/);
+	assert.match(text, /- Landed: merged shiftwork\/f-01 into main/);
 });
 
 test("a before-land follow-up whose landing fails files no follow-up", async () => {

@@ -299,3 +299,41 @@ test("discardAfterReview drops what the review round left; land merges exactly t
 	assert.equal(existsSync(join(root, "stray.txt")), false, "the stray file never landed");
 	assert.equal(git(root, "log", "--format=%s", "--grep", "shiftwork: f/01").split("\n").length, 1, "one landing commit, no unseen second one");
 });
+
+test("after a rebase, discardAfterReview drops what the re-verify left; the next land merges only the reviewed commit", async () => {
+	const root = await repo();
+	await writeFile(join(root, ".gitignore"), "junk.log\n");
+	git(root, "add", ".gitignore");
+	git(root, "commit", "-q", "-m", "ignore");
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	// The commit a before-land review saw, and the first discard: nothing left to drop.
+	assert.equal(await ws.commit(t), true);
+	assert.deepEqual(await ws.discardAfterReview(t), []);
+	// A parallel landing moves the target: the first land rebases the branch onto it.
+	await writeFile(join(root, "other.txt"), "meanwhile\n");
+	git(root, "add", "other.txt");
+	git(root, "commit", "-q", "-m", "meanwhile");
+	const moved = await ws.land(t);
+	assert.equal(moved.ok, false);
+	assert.match(moved.rebase, /^[0-9a-f]{7,}$/);
+	// The re-verify runs on the rebased worktree and leaves strays behind: an edit to the
+	// committed work, an untracked file and an ignored file.
+	await writeFile(join(cwd, "feature.txt"), "done\nre-verify edit\n");
+	await writeFile(join(cwd, "stray.txt"), "re-verify stray\n");
+	await writeFile(join(cwd, "junk.log"), "ignored, stays\n");
+
+	assert.deepEqual(await ws.discardAfterReview(t), ["feature.txt", "stray.txt"], "what the re-verify left is discarded again");
+	assert.equal(await readFile(join(cwd, "feature.txt"), "utf8"), "done\n", "the re-verify's edit is reverted");
+	assert.equal(existsSync(join(cwd, "stray.txt")), false, "the re-verify's stray is removed");
+	assert.equal(existsSync(join(cwd, "junk.log")), true, "ignored files stay (no -x)");
+
+	const result = await ws.land(t);
+
+	assert.equal(result.ok, true);
+	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n", "the landing carries the reviewed commit, not the re-verify's edit");
+	assert.equal(existsSync(join(root, "stray.txt")), false, "the re-verify's stray never lands");
+	assert.equal(git(root, "log", "--format=%s", "--grep", "shiftwork: f/01").split("\n").length, 1, "one landing commit, no unseen second one");
+});
