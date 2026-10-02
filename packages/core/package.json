@@ -1,6 +1,6 @@
 {
   "name": "shiftwork-core",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Shiftwork core: parse markdown tickets (.scratch/<feature>/issues/NN-*.md) and compute the frontier of ready tickets. No pi/OpenCode dependencies.",
   "license": "MIT",
   "author": "ivlad003 <ivlad003@gmail.com>",
