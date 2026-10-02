@@ -301,15 +301,30 @@ export async function runFrontier({
 		return failure;
 	}
 
-	/** Re-review the resolved tickets whose last review never gave a verdict (a stop, or no
-	 * reviewer free), before any new work. A reopen puts the ticket back on the frontier — this
-	 * same run works it again; `none` goes to needs-info as ever; accept and follow-up only
-	 * complete the review, so the ticket stays resolved and nothing is re-worked; stopped
-	 * again, or no reviewer free, leaves the verdict owed to the next run. */
+	/** Re-review the tickets whose last review never gave a verdict (a stop, or no reviewer
+	 * free), before any new work. A resolved ticket owes an after-land review of the landed
+	 * change; a ready ticket owes a before-land one — its stopped review left it back on the
+	 * frontier with its branch committed in the worktree, and this run resumes the review
+	 * there instead of starting a new worker shift on it. A reopen puts the ticket back on
+	 * the frontier — this same run works it again; `none` goes to needs-info as ever; accept
+	 * and follow-up only complete the review — a before-land one lands the branch it just
+	 * accepted — so the ticket stays resolved and nothing is re-worked; stopped again, or no
+	 * reviewer free, leaves the verdict owed to the next run, with no worker shift in between. */
 	async function reviewUnfinishedReviews() {
 		if (!config.review?.enabled) return;
-		const owed = (await tracker.list()).filter(
-			(t) => t.status === RESOLVED && (!options.feature || t.feature === options.feature) && shouldReview(config, t),
+		const listed = await tracker.list();
+		// A file shared by several tickets (OpenSpec's one .shiftwork.md per change) can't say
+		// whose review is unfinished, or count one task's reopens: those are never resumed here.
+		const perPath = new Map();
+		for (const t of listed) perPath.set(t.path, (perPath.get(t.path) ?? 0) + 1);
+		const owed = listed.filter(
+			(t) =>
+				(t.status === RESOLVED || (t.status === READY && workspace)) &&
+				// A paused feature is off the frontier: no review is resumed, nothing of it lands.
+				!t.featurePaused &&
+				perPath.get(t.path) === 1 &&
+				(!options.feature || t.feature === options.feature) &&
+				shouldReview(config, t),
 		);
 		for (const t of owed) {
 			if (checkStop(root)) {
@@ -320,6 +335,11 @@ export async function runFrontier({
 			// Unfinished only on the last review section's own status line, with no verdict: a
 			// quoted not-finished line in findings is not a status line, so it never re-reviews.
 			if (!reviewUnfinished(text)) continue;
+			// Before-land: the stopped review was judging the ticket's unlanded branch in its
+			// worktree, so the resumed one runs there too, on the branch it left committed. After-land:
+			// the ticket is resolved, and the review reads the landed change in the repo.
+			const beforeLand = t.status === READY;
+			const cwd = beforeLand ? (await workspace.prepare(t)).cwd : undefined;
 			const outcome = await runReviewShift({
 				root,
 				ticket: t,
@@ -331,17 +351,80 @@ export async function runFrontier({
 				cooldowns: cooldownStore,
 				log,
 				type: t.type,
-				landed: lastLandedLine(text),
+				...(beforeLand
+					? {
+							cwd,
+							target: typeof workspace.target === "function" ? await workspace.target(t) : undefined,
+							// The branch has not landed yet: a follow-up is filed only once it does.
+							deferFollowUp: true,
+						}
+					: { landed: lastLandedLine(text) }),
 				resumed: true,
 				slots,
 			});
-			if (outcome.verdict === "skip") {
-				// The `Not run` note alone would end the obligation: the verdict stays owed to the next run.
-				await tracker.appendComment(t, "- Review: not finished (no reviewer free this run)");
+			if (outcome.verdict === "skip" || outcome.verdict === "stopped") {
+				// No worker shift on a ticket that owes a verdict: the frontier skips it this run,
+				// and the verdict stays owed to the next one (the `Not run` note alone would end it).
+				if (outcome.verdict === "skip") await tracker.appendComment(t, "- Review: not finished (no reviewer free this run)");
+				else summary.stoppedReason ??= "STOP file";
+				seen.add(seenKey(t));
 				continue;
 			}
-			if (outcome.verdict === "stopped") summary.stoppedReason ??= "STOP file";
-			if (outcome.verdict === "reopen") summary.reopened.push({ ...t, reason: outcome.reason, review: outcome });
+			if (beforeLand) {
+				// Accept (or a follow-up) on the resumed before-land review: land the branch it just
+				// judged. A landing that fails or conflicts is not reworked here — no worker shift —
+				// so the branch is kept and a human lands it.
+				if (outcome.verdict === "accept" || outcome.verdict === "follow-up") {
+					const landingNotes = [];
+					// As after the worker's own before-land review: land only the work the review saw.
+					if (typeof workspace.discardAfterReview === "function") {
+						const discarded = await workspace.discardAfterReview(t);
+						if (discarded.length) landingNotes.push(`- Discarded after review: ${discarded.join(", ")}`);
+					}
+					// No worker shift here, so a landing conflict is not redone (`conflictRedone`): it
+					// is reported as a failed landing, the branch kept for a human.
+					const landing = await landResolvedBranch({ ticket: t, workspace, verify, config, cwd, notes: landingNotes, conflictRedone: true, discardAfterReview: true });
+					if (landing.outcome === "landed") {
+						if (outcome.verdict === "follow-up") {
+							const followUp = await createFollowUp(tracker, t, { root, type: t.type, reason: outcome.reason, verify: t.verify });
+							landingNotes.push(followUpLine(followUp));
+						}
+						await tracker.appendComment(t, landingNotes.join("\n"));
+						await tracker.setStatus(t, RESOLVED);
+						summary.resolved.push({ ...t, reason: landing.message, review: outcome });
+					} else {
+						// "Branch kept" once: a landing that gave up on a moving target already kept it.
+						if (!/ kept\b/.test(landing.reason ?? "")) landingNotes.push(`- Branch kept: ${(await workspace.keep(t)).branch}`);
+						if (outcome.verdict === "follow-up") landingNotes.push("- Follow-up: not filed — the branch did not land");
+						await tracker.appendComment(t, landingNotes.join("\n"));
+						await tracker.setStatus(t, NEEDS_INFO);
+						summary.needsInfo.push({ ...t, reason: landing.reason ?? "the landing failed; the branch is kept for a human", review: outcome });
+					}
+					await state.update({ summary: counts() });
+					continue;
+				}
+				// A reopen on the resumed before-land review: bounded like the worker's own one —
+				// after review.maxRounds reopens a human takes over, the branch kept; before that
+				// the ticket is back on the frontier (runReviewShift put it there) and this same run
+				// fixes it forward. `none` hands the branch to a human, needs-info as ever.
+				if (outcome.verdict === "reopen") {
+					const reopens = countReopenVerdicts(await readFile(t.path, "utf8"));
+					if (reopens >= (config.review?.maxRounds ?? 2)) {
+						const branch = (await workspace.keep(t)).branch;
+						await tracker.appendComment(t, `- Review rejected it ${reopens} times; branch ${branch} kept`);
+						await tracker.setStatus(t, NEEDS_INFO);
+						summary.needsInfo.push({ ...t, reason: `review rejected it ${reopens} times; branch ${branch} kept`, review: outcome });
+						await state.update({ summary: counts() });
+						continue;
+					}
+					summary.reopened.push({ ...t, reason: outcome.reason, review: outcome });
+				} else if (outcome.verdict === "none") {
+					await tracker.appendComment(t, `- Branch kept: ${(await workspace.keep(t)).branch}`);
+					summary.needsInfo.push({ ...t, reason: outcome.reason });
+				} else {
+					summary.resolved.push({ ...t, reason: outcome.reason, review: outcome });
+				}
+			} else if (outcome.verdict === "reopen") summary.reopened.push({ ...t, reason: outcome.reason, review: outcome });
 			else if (outcome.verdict === "none") summary.needsInfo.push({ ...t, reason: outcome.reason });
 			else summary.resolved.push({ ...t, reason: outcome.reason, review: outcome });
 			await state.update({ summary: counts() });

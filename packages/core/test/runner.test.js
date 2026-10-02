@@ -2068,6 +2068,167 @@ test("a re-review with no reviewer free keeps the verdict owed to the next run",
 	assert.match(await ticketText(root, "f", "01-a.md"), /- Verdict: accept — fine/);
 });
 
+/** A ready ticket whose before-land review was stopped: back on the frontier with its branch
+ * committed in the worktree, it owes the verdict the next run resumes there, in its worktree,
+ * instead of starting a new worker shift on it. */
+function owedBeforeLandTicket({ feature = "f", number = "01" } = {}) {
+	const review = ["### Review — pi fake/r1 (high)", "- Review: not finished (stopped)", "- Time: 2m 0s"].join("\n");
+	return ticket(number, "A", {
+		status: "ready-for-agent",
+		extra: `**Type:** code\n**Verify:** \`done.txt\`\n\n## Comments\n\n${review}`,
+	});
+}
+
+/** A verify gate that passes wherever it runs: the resumed review's worktree has the branch, not the gate's files. */
+const passingVerify = async (commands) => ({ ok: true, results: commands.map((cmd) => ({ cmd, code: 0, outputTail: "" })) });
+
+test("a stopped before-land review is resumed in its worktree at the start of the next run: no worker shift, accept lands", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const backend = ticketScriptBackend({ "f/01": [{ text: reviewMarker("accept", "the branch is fine") }] });
+	const workspace = fakeWorkspace();
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: reviewConfig(), workspace });
+
+	// The run's only shift is the resumed review: no worker shift starts on the ticket.
+	assert.deepEqual(workedIds(backend), ["f/01"]);
+	assert.equal(backend.shifts[0].request.route.tier, "premium");
+	assert.equal(backend.shifts[0].request.cwd, workspace.cwd, "the resumed review runs in the ticket's worktree");
+	assert.match(backend.shifts[0].request.prompt, /Review the Shiftwork ticket f\/01 before it lands/);
+	assert.match(backend.shifts[0].request.prompt, /- Branch: .*`git diff main\.\.\.HEAD`/);
+	assert.match(backend.shifts[0].request.prompt, /This is a resumed review: the ticket's earlier review never finished/);
+	assert.doesNotMatch(backend.shifts[0].request.prompt, /- Landed:/);
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["discardAfterReview", "01"], ["land", "01"]], "the resumed review reuses the worktree; what it left is discarded; the accepted branch lands");
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/);
+	assert.match(text, /- Review: not finished \(stopped\)[\s\S]*### Review[\s\S]*- Verdict: accept — the branch is fine[\s\S]*- Landed: merged/);
+
+	// The verdict is given: no later run reviews or works it again.
+	const again = ticketScriptBackend({});
+	await runFrontier({ root, tracker: openTracker(root), backend: again, verify: passingVerify, config: reviewConfig(), workspace });
+	assert.equal(again.shifts.length, 0);
+});
+
+test("a resumed before-land review that reopens puts the ticket back on the frontier; the same run fixes it forward", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const workspace = fakeWorkspace();
+	const backend = ticketScriptBackend({
+		// The owed review reopens; the same run's worker shift fixes forward on the same branch, and its own review accepts.
+		"f/01": [
+			{ text: reviewMarker("reopen", "the branch misses the rule") },
+			{ files: { "done.txt": "ok" } },
+			{ text: reviewMarker("accept", "fixed now") },
+		],
+	});
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
+
+	assert.deepEqual(workedIds(backend), ["f/01", "f/01", "f/01"], "the resumed review, then the fix-forward shift and its own review");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["prepare", "01"], ["commit", "01"], ["discardAfterReview", "01"], ["land", "01"]], "nothing lands on the reopen; the fix-forward work lands");
+	assert.deepEqual(summary.reopened.map((t) => t.number), ["01"]);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/);
+	assert.match(text, /### Review[\s\S]*- Verdict: reopen — the branch misses the rule[\s\S]*### Shift 1 — pi fake\/m1/);
+	assert.match(text, /- Verdict: accept — fixed now[\s\S]*- Landed: merged/);
+});
+
+test("a resumed before-land review stopped again leaves the verdict owed to the next run, with no worker shift in between", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const turn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+	// The owed review is cut by a STOP file before any verdict: it lands in the repo root
+	// (not the worktree the review runs in) the moment the review shift starts.
+	const shifts = [];
+	const backend = {
+		name: "fake",
+		shifts,
+		async startShift(request) {
+			await writeFile(join(root, "STOP"), "stopped mid-review");
+			const inner = fakeBackend([{ events: [turn, { type: "text", text: "Still checking the branch." }, turn, turn] }]);
+			const shift = await inner.startShift(request);
+			shifts.push(...inner.shifts);
+			return shift;
+		},
+	};
+	const workspace = fakeWorkspace();
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: retryReviewConfig(), workspace });
+
+	assert.equal(summary.stoppedReason, "STOP file");
+	assert.equal(backend.shifts.length, 1, "no retry, and no worker shift starts on the ticket");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* ready-for-agent/, "the ticket stays as it was");
+	assert.match(text, /- Review: not finished \(stopped\)[\s\S]*### Review — pi fake\/r1 \(high\)\n- Review: not finished \(stopped\)/);
+	assert.doesNotMatch(text, /- Verdict:/);
+	assert.doesNotMatch(text, /- Landed:/);
+	assert.deepEqual(workspace.calls.filter((c) => c[0] === "land"), [], "nothing lands");
+
+	// The next run (the STOP file gone) resumes the review again, not a worker shift.
+	const { rm } = await import("node:fs/promises");
+	await rm(`${root}/STOP`);
+	const next = ticketScriptBackend({ "f/01": [{ text: reviewMarker("accept", "fine after all") }] });
+	await runFrontier({ root, tracker: openTracker(root), backend: next, verify: passingVerify, config: reviewConfig(), workspace });
+	assert.deepEqual(workedIds(next), ["f/01"]);
+	assert.match(await ticketText(root, "f", "01-a.md"), /- Verdict: accept — fine after all[\s\S]*- Landed: merged/);
+});
+
+test("a resumed before-land review with no reviewer free keeps the verdict owed, and no worker shift starts on the ticket", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const store = openCooldowns(root);
+	await store.add("fake", new Date(t0 + 3600_000), "rate", { at: new Date(t0) });
+	const backend = fakeBackend([]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: reviewConfig(), clock, cooldowns: store, workspace: fakeWorkspace() });
+
+	assert.equal(backend.shifts.length, 0, "no reviewer free, and no worker shift: the run leaves the ticket alone");
+	assert.deepEqual(summary.resolved, []);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Review\n- Not run: every premium model is cooling until 2026-01-01T01:00:00\.000Z/);
+	assert.match(text, /- Review: not finished \(no reviewer free this run\)/);
+	assert.match(text, /\*\*Status:\*\* ready-for-agent/, "the ticket stays on the frontier, owed a verdict before any worker shift");
+});
+
+test("a resumed before-land review with no verdict twice goes to needs-info: nothing lands, the branch is kept", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const backend = fakeBackend([{ text: "Still investigating, no verdict yet." }, { text: "Ran out of time, still no verdict." }]);
+	const workspace = fakeWorkspace();
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: retryReviewConfig(), workspace });
+
+	assert.deepEqual(summary.needsInfo.map((t) => t.number), ["01"]);
+	assert.equal(summary.needsInfo[0].reason, "review gave no verdict twice; review it by hand");
+	assert.equal(backend.shifts.length, 2, "the retry, but no worker shift");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["keep", "01"]], "the worktree is reused; nothing lands, the branch is kept");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+	assert.match(text, /- Verdict: none — review gave no verdict twice; review it by hand/);
+	assert.match(text, /- Branch kept: shiftwork\/f-01/);
+});
+
+test("the second reopen of a resumed before-land review (maxRounds) goes to needs-info: nothing lands, the branch is kept", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", {
+			status: "ready-for-agent",
+			extra:
+				"**Type:** code\n**Verify:** `done.txt`\n\n## Comments\n\n### Review — pi fake/r1 (high)\n- Verdict: reopen — the gate file is not asserted\n- Time: 2m 0s\n\n### Review — pi fake/r1 (high)\n- Review: not finished (stopped)\n- Time: 2m 0s",
+		}),
+	});
+	const backend = ticketScriptBackend({ "f/01": [{ text: reviewMarker("reopen", "the gate file is still not asserted") }] });
+	const workspace = fakeWorkspace();
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: reviewConfig(), workspace });
+
+	assert.deepEqual(summary.needsInfo.map((t) => t.number), ["01"]);
+	assert.equal(summary.needsInfo[0].reason, "review rejected it 2 times; branch shiftwork/f-01 kept");
+	assert.equal(backend.shifts.length, 1, "no worker shift on the rejected branch");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["keep", "01"]], "nothing lands; the branch is kept for a human");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+	assert.match(text, /- Review rejected it 2 times; branch shiftwork\/f-01 kept/);
+});
+
 test("a review that quotes the not-finished line in its findings is finished: no re-review", async () => {
 	const root = await makeRepo({
 		"f/01-a.md": ticket("01", "A", {
@@ -2890,4 +3051,54 @@ test("a review whose verify re-run fails records the failing output, like a shif
 	const review = (await ticketText(root, "f", "01-a.md")).split("### Review")[1];
 	assert.match(review, /- Verify: failed at `npm test` \(exit 1\)/);
 	assert.match(review, /flaky\.test\.js timed out/);
+});
+
+test("a stopped before-land review in a paused feature is not resumed: nothing of it lands", async () => {
+	const root = await makeRepo({ "f/spec.md": "# Spec: f\n\n**Status:** paused\n", "f/01-a.md": owedBeforeLandTicket() });
+	const backend = ticketScriptBackend({});
+	const workspace = fakeWorkspace();
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: reviewConfig(), workspace });
+
+	assert.equal(backend.shifts.length, 0, "no resumed review in a paused feature");
+	assert.ok(!workspace.calls.some(([op]) => op === "land"));
+	assert.match(await ticketText(root, "f", "01-a.md"), /\*\*Status:\*\* ready-for-agent/);
+});
+
+test("tickets sharing one file (OpenSpec) are never resumed: the file can't say whose review is unfinished", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const base = openTracker(root);
+	// Two tasks of one change, one .shiftwork.md: the second sees the first's unfinished review.
+	const tracker = {
+		...base,
+		async list() {
+			const listed = await base.list();
+			return [...listed, { ...listed[0], number: "02", title: "B" }];
+		},
+		async frontier() {
+			return [];
+		},
+	};
+	const backend = ticketScriptBackend({});
+	const workspace = fakeWorkspace();
+
+	await runFrontier({ root, tracker, backend, verify: passingVerify, config: reviewConfig(), workspace });
+
+	assert.equal(backend.shifts.length, 0);
+	assert.ok(!workspace.calls.some(([op]) => op === "land"));
+});
+
+test("a resumed before-land accept whose landing conflicts is kept for a human, not reported as redone", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedBeforeLandTicket() });
+	const backend = ticketScriptBackend({ "f/01": [{ text: reviewMarker("accept", "the branch is fine") }] });
+	const workspace = fakeWorkspace({ land: () => ({ ok: false, conflict: { files: ["README.md"], commit: "abc123" }, message: "merge conflict in README.md" }) });
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: passingVerify, config: reviewConfig(), workspace });
+
+	assert.deepEqual(summary.needsInfo.map((t) => t.number), ["01"]);
+	assert.match(summary.needsInfo[0].reason, /landing failed: merge conflict in README\.md/);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* needs-info/);
+	assert.match(text, /- Branch kept: shiftwork\/f-01/);
+	assert.doesNotMatch(text, /redone on top of/);
 });
