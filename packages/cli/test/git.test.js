@@ -243,3 +243,23 @@ test("hasChanges sees commits and uncommitted work, but not the tracker copy or 
 	git(cwd, "commit", "-q", "-m", "work");
 	assert.equal(await ws.hasChanges(t), true);
 });
+
+test("commit puts the work on the branch with the landing's message; land then merges that commit", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+
+	assert.equal(await ws.commit(t), true);
+	// A before-land reviewer's range: the shift's work is in it, new files included.
+	assert.equal(git(cwd, "diff", "--name-only", `${await ws.target()}...HEAD`), "feature.txt");
+	assert.match(git(cwd, "log", "-1", "--format=%s"), /shiftwork: f\/01 A/);
+	assert.equal(await ws.commit(t), false, "nothing left to commit");
+
+	const result = await ws.land(t);
+	assert.equal(result.ok, true);
+	assert.match(git(root, "log", "-1", "--format=%s"), /shiftwork: f\/01 A/);
+	assert.equal(git(root, "log", "--format=%s", "--grep", "shiftwork: f/01").split("\n").length, 1, "one commit, not an extra empty one");
+	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n");
+});

@@ -290,6 +290,10 @@ function fakeWorkspace({ landOk = true, land, changed = true, diffStat = "" } = 
 			this.cwd = worktrees.get(key);
 			return { cwd: this.cwd };
 		},
+		async commit(t) {
+			calls.push(["commit", t.number]);
+			return true;
+		},
 		async land(t) {
 			calls.push(["land", t.number]);
 			if (land) return land(t);
@@ -2042,11 +2046,19 @@ test("with no review.when (before-land), the review runs on the branch in the wo
 		{ text: `Looks good on the branch.\n\n${reviewMarker("accept", "matches the spec")}` },
 	]);
 	const workspace = fakeWorkspace();
+	// The branch is committed before the review shift starts: the reviewer's `git diff <target>...HEAD` sees the work.
+	let shiftsAtCommit;
+	const commit = workspace.commit.bind(workspace);
+	workspace.commit = async (t) => {
+		shiftsAtCommit = backend.shifts.length;
+		return commit(t);
+	};
 
 	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
 
 	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
-	assert.deepEqual(workspace.calls, [["prepare", "01"], ["land", "01"]], "land is called once, after the review accepted");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"], ["land", "01"]], "committed before the review, landed once after it accepted");
+	assert.equal(shiftsAtCommit, 1, "the commit comes after the worker shift and before the review shift");
 	assert.equal(backend.shifts.length, 2);
 	assert.equal(backend.shifts[0].request.cwd, workspace.cwd, "the worker shift runs in the worktree");
 	assert.equal(backend.shifts[1].request.cwd, workspace.cwd, "the review reads the unlanded branch in the worktree");
@@ -2062,6 +2074,26 @@ test("with no review.when (before-land), the review runs on the branch in the wo
 	assert.match(text, /> Looks good on the branch\./);
 	assert.match(text, /- Landed: merged/);
 	assert.match(text, /\*\*Status:\*\* resolved[\s\S]*### Review[\s\S]*- Verdict: accept[\s\S]*- Landed: merged/, "the review is recorded before the landing note");
+	assert.match(text, /- Outcome: verify passed; review before landing/, "the shift report doesn't claim resolved before the review");
+	assert.doesNotMatch(text, /- Outcome: resolved/);
+});
+
+test("a before-land follow-up whose landing fails files no follow-up", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A", { extra: "**Type:** code\n**Verify:** `done.txt`" }) });
+	const backend = fakeBackend([
+		{ files: { "done.txt": "ok" } },
+		{ text: reviewMarker("follow-up", "add integration tests") },
+	]);
+	const workspace = fakeWorkspace({ landOk: false });
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace, options: { once: true } });
+
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Verdict: follow-up — add integration tests/);
+	assert.match(text, /- Follow-up: not filed — the branch did not land/);
+	assert.doesNotMatch(text, /- Follow-up: f\//);
+	const { readdir } = await import("node:fs/promises");
+	assert.deepEqual((await readdir(`${root}/.scratch/f/issues`)).filter((f) => f.startsWith("02-")), [], "no follow-up for work that never landed");
 });
 
 test("a before-land reopen lands nothing: the next shift continues on the same branch, pointed at the findings", async () => {
@@ -2082,7 +2114,7 @@ test("a before-land reopen lands nothing: the next shift continues on the same b
 	});
 
 	assert.deepEqual(first.reopened.map((t) => t.number), ["01"]);
-	assert.deepEqual(workspace.calls, [["prepare", "01"]], "land is never called on a reopen");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"]], "committed for the review, but land is never called on a reopen");
 	const text1 = await ticketText(root, "f", "01-a.md");
 	assert.match(text1, /\*\*Status:\*\* ready-for-agent/);
 	assert.match(text1, /### Review[\s\S]*- Verdict: reopen — the helper hides the branch check/);
@@ -2095,7 +2127,7 @@ test("a before-land reopen lands nothing: the next shift continues on the same b
 	]);
 	const second = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), workspace });
 
-	assert.deepEqual(workspace.calls, [["prepare", "01"], ["prepare", "01"], ["land", "01"]], "the second run reuses the ticket's worktree, then lands it");
+	assert.deepEqual(workspace.calls, [["prepare", "01"], ["commit", "01"], ["prepare", "01"], ["commit", "01"], ["land", "01"]], "the second run reuses the ticket's worktree, commits for its review, then lands it");
 	assert.equal(backend.shifts[0].request.cwd, workspace.cwd, "the next shift runs in the kept worktree");
 	assert.equal(backend.shifts[1].request.cwd, workspace.cwd, "the second review runs in the kept worktree too");
 	assert.match(backend.shifts[0].request.prompt, /- The last review of this work ended in reopen/);

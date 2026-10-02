@@ -657,7 +657,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
 		}
 
-		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision, classificationNote, ticketUsage }), ...notes].join("\n"));
+		// Before-land, a passed gate is not resolved yet: the review decides whether the branch lands.
+		const reported = beforeLand && decision.action === "resolve" ? { ...decision, reviewNext: true } : decision;
+		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision: reported, classificationNote, ticketUsage }), ...notes].join("\n"));
 		shiftNumber++;
 
 		if (redoNext) {
@@ -674,6 +676,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			// the review.
 			let review = null;
 			if (beforeLand) {
+				// The reviewer judges `git diff <target>...HEAD`: commit the shift's work on the branch
+				// first (the landing's own commit), or that range is empty.
+				if (typeof workspace.commit === "function") await workspace.commit(ticket);
 				review = await runReviewShift({
 					root,
 					ticket,
@@ -688,6 +693,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					cwd,
 					target: typeof workspace.target === "function" ? await workspace.target(ticket) : undefined,
 					slots,
+					// A follow-up is filed only once the branch has landed: not for work that never lands.
+					deferFollowUp: true,
 				});
 				if (review.verdict === "reopen") {
 					// Reopen rounds are bounded: after review.maxRounds reopens on one ticket a human
@@ -714,7 +721,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					await tracker.setStatus(ticket, READY);
 					return { action: "stop", reason: "STOP file" };
 				}
-				// accept, follow-up (filed by the review itself) or skip (no reviewer free): land.
+				// accept, follow-up (filed below, once landed) or skip (no reviewer free): land.
 				const landingNotes = [];
 				const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes: landingNotes, conflictRedone });
 				if (landing.outcome === "redo") {
@@ -727,10 +734,15 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					continue;
 				}
 				if (landing.outcome === "landed") {
+					if (review.verdict === "follow-up") {
+						review.followUp = await createFollowUp(tracker, ticket, { root, type: route.type, reason: review.reason, verify: ticket.verify });
+						landingNotes.push(followUpLine(review.followUp));
+					}
 					await tracker.appendComment(ticket, landingNotes.join("\n"));
 					landedMessage = landing.message;
 				} else {
 					if (landingNotes.length === 0) landingNotes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+					if (review.verdict === "follow-up") landingNotes.push("- Follow-up: not filed — the branch did not land");
 					await tracker.appendComment(ticket, landingNotes.join("\n"));
 					await tracker.setStatus(ticket, NEEDS_INFO);
 					return { action: NEEDS_INFO, reason: landing.reason };
@@ -813,7 +825,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
  * branch and puts the ticket back on the frontier), recorded as not finished, for the next run.
  * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip" | "stopped", reason: string, warnings?: string[], followUp?: object }>}
  */
-async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target }) {
+async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target, deferFollowUp = false }) {
 	const review = config.review;
 	const now = clock.now();
 	// Plan on the review tier as if the ticket were untyped and unrouted: the review is its own job.
@@ -888,7 +900,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 
 	const verifyResult = ticket.verify.length ? await verify(ticket.verify, cwd ?? root) : null;
 	let followUp;
-	if (verdict === "follow-up") followUp = await createFollowUp(tracker, ticket, { root, type, reason, verify: ticket.verify });
+	if (verdict === "follow-up" && !deferFollowUp) followUp = await createFollowUp(tracker, ticket, { root, type, reason, verify: ticket.verify });
 	await tracker.appendComment(
 		ticket,
 		[
@@ -963,6 +975,13 @@ function nextReviewRoute(route, config, review) {
 	return { ...route, backend: ref.backend, model: ref.model, provider: ref.provider, ref: model };
 }
 
+/** The `- Follow-up:` line of a review comment or a landing note. */
+function followUpLine(followUp) {
+	return followUp.created
+		? `- Follow-up: ${followUp.feature}/${followUp.number} — ${followUp.title}`
+		: `- Follow-up: not filed — this tracker cannot create tickets; file it manually: ${followUp.title}`;
+}
+
 /** File the follow-up ticket: a new ticket in the feature, blocked by nothing, with the reviewed ticket's verify gate. */
 async function createFollowUp(tracker, ticket, { root, type, reason, verify }) {
 	const title = truncate(`Follow-up to ${ticket.feature}/${ticket.number}: ${reason}`, 80);
@@ -988,8 +1007,7 @@ function formatReviewComment({ route, retryRoute, verdict, reason, warnings = []
 	for (const w of warnings) lines.push(`- Warning: ${w}`);
 	const findings = reviewFindings(shift.text);
 	if (findings.length) lines.push("- Findings:", "", ...findings);
-	if (followUp?.created) lines.push(`- Follow-up: ${followUp.feature}/${followUp.number} — ${followUp.title}`);
-	else if (followUp) lines.push(`- Follow-up: not filed — this tracker cannot create tickets; file it manually: ${followUp.title}`);
+	if (followUp) lines.push(followUpLine(followUp));
 	return lines.join("\n");
 }
 
@@ -1391,7 +1409,9 @@ function shiftReport({ number, route, shift, verifyResult, decision, classificat
 	}
 	const outcome =
 		decision.action === "resolve"
-			? "resolved"
+			? decision.reviewNext
+				? "verify passed; review before landing"
+				: "resolved"
 			: decision.action === "redo"
 				? "redo on the new target (landing conflict)"
 				: decision.action === "retry"

@@ -60,6 +60,11 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		return true;
 	}
 
+	/** The commit message of a ticket's work: `git log --grep "shiftwork: <feature>/<NN>"` finds it. */
+	function landMessage(t) {
+		return `shiftwork: ${t.feature}/${t.number} ${t.title ?? ""}`.trim();
+	}
+
 	async function remove(t) {
 		await git(root, "worktree", "remove", "--force", pathOf(t)).catch(() => {});
 		await git(root, "worktree", "prune");
@@ -108,7 +113,7 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 		async land(t) {
 			const branch = branchOf(t);
 			const into = await resolveTarget();
-			await commitAll(t, `shiftwork: ${t.feature}/${t.number} ${t.title ?? ""}`.trim());
+			await commitAll(t, landMessage(t));
 			const current = await git(root, "rev-parse", "--abbrev-ref", "HEAD");
 			if (current !== into) {
 				return { ok: false, message: `main checkout is on "${current}", not the target "${into}"; branch ${branch} kept` };
@@ -153,6 +158,13 @@ export function createGitWorkspace({ root, target, setup = [], dir } = {}) {
 			}
 			await remove(t);
 			return { ok: true, message: `merged ${branch} into ${into}` };
+		},
+
+		/** Commit the ticket's work on its branch with the landing's own message (tracker and setup
+		 * output excluded), so a before-land review's `git diff <target>...HEAD` shows it; `land`
+		 * then has nothing left to commit and merges this commit. Returns whether a commit was made. */
+		async commit(t) {
+			return commitAll(t, landMessage(t));
 		},
 
 		/** The branch tickets land into: a before-land review's branch diff points at it. */
