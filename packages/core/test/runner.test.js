@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { openCooldowns, openRunState, openTracker, runFrontier, shouldReview, validateConfig } from "../src/index.js";
 import { REVIEWER_PROMPT, REVIEW_WRAP_UP_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "../src/prompt.js";
-import { formatDuration } from "../src/runner.js";
+import { formatDuration, reviewUnfinished } from "../src/runner.js";
 import { fakeBackend, fileVerify } from "./fake-backend.js";
 import { makeRepo, ticket } from "./helpers.js";
 
@@ -1908,6 +1908,174 @@ test("a review stopped mid-retry is recorded as not finished on the retried mode
 	assert.match(text, /### Review — pi fake\/r1 \(high\), retried on pi fake\/r2 \(high\)\n- Review: not finished \(stopped\)/);
 	assert.doesNotMatch(text, /- Verdict: none/);
 	assert.doesNotMatch(text, /<shiftwork:needs-info/);
+});
+
+/** A resolved ticket whose last review never finished (stopped, or no reviewer free): the
+ * verdict the next run owes, re-reviewed before any new work. */
+function owedReviewTicket({ verdict = null, feature = "f", number = "01" } = {}) {
+	const review = [
+		"### Review — pi fake/r1 (high)",
+		...(verdict ? [`- Verdict: ${verdict}`] : ["- Review: not finished (stopped)"]),
+		"- Time: 2m 0s",
+	].join("\n");
+	return ticket(number, "A", {
+		status: "resolved",
+		extra: `**Type:** code\n**Verify:** \`done.txt\`\n\n## Comments\n\n- Landed: merged shiftwork/${feature}-${number} into main\n\n${review}`,
+	});
+}
+
+test("reviewUnfinished: only the last review section's own status line, with no verdict", () => {
+	assert.equal(reviewUnfinished("### Review — pi fake/r1 (high)\n- Review: not finished (stopped)\n- Time: 2m 0s"), true);
+	assert.equal(reviewUnfinished("### Review\n- Not run: every premium model is cooling until later\n- Review: not finished (no reviewer free this run)"), true);
+	assert.equal(
+		reviewUnfinished("### Review — pi fake/r1 (high)\n- Review: not finished (stopped)\n\n### Review — pi fake/r1 (high)\n- Verdict: accept — fine\n- Time: 1m 0s"),
+		false,
+		"a later verdict ends the obligation",
+	);
+	assert.equal(
+		reviewUnfinished("### Review — pi fake/r1 (high)\n- Verdict: accept — fine\n- Findings:\n\n> The earlier `- Review: not finished (stopped)` line is not a verdict."),
+		false,
+		"a quoted not-finished line in findings is not the section's status line",
+	);
+	assert.equal(reviewUnfinished("### Review — pi fake/r1 (high)\n- Findings:\n\n> - Review: not finished (stopped)"), false);
+	assert.equal(reviewUnfinished(""), false, "no review section: nothing owed");
+});
+
+test("a resolved ticket whose last review never finished is re-reviewed before any new work; accept clears it", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": owedReviewTicket(),
+		"f/02-b.md": ticket("02", "B", { extra: "**Type:** code\n**Verify:** `done.txt`" }),
+	});
+	const backend = ticketScriptBackend({
+		"f/01": [{ text: reviewMarker("accept", "the landed change is fine") }],
+		"f/02": [{ files: { "done.txt": "ok" } }, { text: reviewMarker("accept", "fine") }],
+	});
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	// The owed review runs first, before the frontier's new work.
+	assert.deepEqual(workedIds(backend), ["f/01", "f/02", "f/02"]);
+	assert.equal(backend.shifts[0].request.route.tier, "premium");
+	assert.match(backend.shifts[0].request.prompt, /This is a resumed review: the ticket's earlier review never finished/);
+	assert.match(
+		backend.shifts[0].request.prompt,
+		/- The change under review is the ticket's last `- Landed:` line in its Comments: merged shiftwork\/f-01 into main/,
+	);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01", "02"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/, "accept only completes the review: the ticket stays resolved");
+	assert.match(text, /- Review: not finished \(stopped\)[\s\S]*### Review[\s\S]*- Verdict: accept — the landed change is fine/);
+
+	// The verdict is given: no later run reviews it again.
+	const again = ticketScriptBackend({});
+	await runFrontier({ root, tracker: openTracker(root), backend: again, verify: fileVerify(), config: reviewConfig() });
+	assert.equal(again.shifts.length, 0);
+});
+
+test("a re-review that reopens puts the ticket back on the frontier; the same run fixes it forward", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedReviewTicket() });
+	const backend = ticketScriptBackend({
+		// The owed review reopens; the same run's worker shift fixes forward, and its own review accepts.
+		"f/01": [
+			{ text: reviewMarker("reopen", "the landed change misses the rule") },
+			{ files: { "done.txt": "ok" } },
+			{ text: reviewMarker("accept", "fixed now") },
+		],
+	});
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	assert.deepEqual(workedIds(backend), ["f/01", "f/01", "f/01"]);
+	assert.deepEqual(summary.reopened.map((t) => t.number), ["01"]);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["01"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/);
+	assert.match(text, /### Review[\s\S]*- Verdict: reopen — the landed change misses the rule[\s\S]*### Shift 1 — pi fake\/m1/);
+	assert.match(text, /- Verdict: accept — fixed now/);
+});
+
+test("a re-review stopped again leaves the verdict owed to the next run", async () => {
+	const root = await makeRepo({ "f/01-a.md": owedReviewTicket() });
+	const turn = { type: "turn", usage: { input: 10, output: 0, totalTokens: 10 }, costUsd: 0.01 };
+	const backend = fakeBackend([
+		// The owed review is cut by a STOP file before any verdict.
+		{ files: { STOP: "stopped mid-review" }, events: [turn, { type: "text", text: "Still checking the diff." }, turn, turn] },
+	]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: retryReviewConfig() });
+
+	assert.equal(summary.stoppedReason, "STOP file");
+	assert.equal(backend.shifts.length, 1, "the stop is not a missing verdict: no retry");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /\*\*Status:\*\* resolved/, "the ticket stays as it was");
+	// The second not-finished section is the last one: the next run owes the verdict again.
+	assert.match(text, /- Review: not finished \(stopped\)[\s\S]*### Review — pi fake\/r1 \(high\)\n- Review: not finished \(stopped\)/);
+	assert.doesNotMatch(text, /- Verdict:/);
+});
+
+test("`--ticket` re-reviews nothing: it works exactly the chosen frontier ticket", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": owedReviewTicket(),
+		"f/02-b.md": ticket("02", "B", { extra: "**Type:** code\n**Verify:** `done.txt`" }),
+	});
+	const backend = ticketScriptBackend({
+		"f/02": [{ files: { "done.txt": "ok" } }, { text: reviewMarker("accept", "fine") }],
+	});
+
+	const summary = await runFrontier({
+		root,
+		tracker: openTracker(root),
+		backend,
+		verify: fileVerify(),
+		config: reviewConfig(),
+		options: { ticket: "f/02" },
+	});
+
+	assert.deepEqual(workedIds(backend), ["f/02", "f/02"]);
+	assert.deepEqual(summary.resolved.map((t) => t.number), ["02"]);
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /- Review: not finished \(stopped\)/, "the owed review is untouched");
+	assert.doesNotMatch(text, /- Verdict:/);
+});
+
+test("a re-review with no reviewer free keeps the verdict owed to the next run", async () => {
+	const t0 = Date.parse("2026-01-01T00:00:00Z");
+	const clock = fakeClock(t0);
+	const root = await makeRepo({ "f/01-a.md": owedReviewTicket() });
+	const store = openCooldowns(root);
+	await store.add("fake", new Date(t0 + 3600_000), "rate", { at: new Date(t0) });
+	const backend = fakeBackend([]);
+
+	const summary = await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig(), clock, cooldowns: store });
+
+	assert.equal(backend.shifts.length, 0, "no reviewer free: no review shift runs");
+	assert.deepEqual(summary.resolved, [], "nothing is resolved by a re-review that does not run");
+	const text = await ticketText(root, "f", "01-a.md");
+	assert.match(text, /### Review\n- Not run: every premium model is cooling until 2026-01-01T01:00:00\.000Z/);
+	assert.match(text, /- Review: not finished \(no reviewer free this run\)/);
+	assert.match(text, /\*\*Status:\*\* resolved/, "the ticket stays resolved");
+
+	// The Not run note alone would end the obligation: the next run reviews it again.
+	await store.remove("fake");
+	const next = fakeBackend([{ text: reviewMarker("accept", "fine") }]);
+	await runFrontier({ root, tracker: openTracker(root), backend: next, verify: fileVerify(), config: reviewConfig() });
+	assert.equal(next.shifts.length, 1);
+	assert.match(await ticketText(root, "f", "01-a.md"), /- Verdict: accept — fine/);
+});
+
+test("a review that quotes the not-finished line in its findings is finished: no re-review", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A", {
+			status: "resolved",
+			extra:
+			"**Type:** code\n**Verify:** `done.txt`\n\n## Comments\n\n### Review — pi fake/r1 (high)\n- Verdict: accept — fine\n- Time: 2m 0s\n- Findings:\n\n> The earlier `- Review: not finished (stopped)` line is not a verdict; the work is done.",
+		}),
+	});
+	const backend = ticketScriptBackend({});
+
+	await runFrontier({ root, tracker: openTracker(root), backend, verify: fileVerify(), config: reviewConfig() });
+
+	assert.equal(backend.shifts.length, 0, "a quoted not-finished line is not the section's own status line");
 });
 
 test("the review route's budget is review.budget, independent of ticket, tier and model budgets", async () => {

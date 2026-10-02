@@ -48,8 +48,10 @@ Rules:
 
 /** The user prompt that starts a review shift: pointers, not copies. `target` names the branch's
  * landing target for a before-land review (the change sits on the unlanded branch in the worktree);
- * without it the review reads the landed change in the repo. */
-export function buildReviewPrompt(ticket, { root, landed, target, absolute = false }) {
+ * without it the review reads the landed change in the repo. A resumed review (`resumed`) is one
+ * owed by an earlier review that never finished: its prompt says so and points at the ticket's
+ * last `- Landed:` line (`landed`), since `git log -3` no longer has to reach the landed commit. */
+export function buildReviewPrompt(ticket, { root, landed, target, absolute = false, resumed = false }) {
 	const spec = ticket.specPath ?? join(dirname(dirname(ticket.path)), "spec.md");
 	const ticketPath = absolute ? ticket.path : relative(root, ticket.path);
 	const specPath = absolute ? spec : relative(root, spec);
@@ -65,7 +67,16 @@ export function buildReviewPrompt(ticket, { root, landed, target, absolute = fal
 			? `- Branch: the ticket's unlanded change in this worktree — \`git diff ${target}...HEAD\` for the change and \`git log ${target}..HEAD\` for its commits; nothing has landed yet.`
 			: "- Diff: the ticket's landed change in this repo — `git log -3 --oneline` and `git show <sha>` for landed commits, or `git status` and `git diff` when the work is uncommitted.",
 	];
-	if (landed) lines.push(`- Landed: ${landed}`);
+	if (landed && !resumed) lines.push(`- Landed: ${landed}`);
+	if (resumed) {
+		lines.push(
+			'- This is a resumed review: the ticket\'s earlier review never finished (its "### Review" section carries `- Review: not finished`), so it still owes a verdict. Read that section first, then give one now.',
+		);
+		if (landed)
+			lines.push(
+				`- The change under review is the ticket's last \`- Landed:\` line in its Comments: ${landed} — \`git log -3\` no longer has to reach it.`,
+		);
+	}
 	if (ticket.verify.length) lines.push(`- Verify gate: ${ticket.verify.map((c) => `\`${c}\``).join(" · ")}`);
 	lines.push(`- End your final message with the review marker described in your instructions.`);
 	return lines.join("\n");

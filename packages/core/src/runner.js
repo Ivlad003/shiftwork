@@ -187,6 +187,11 @@ export async function runFrontier({
 		summary: { resolved: 0, needsInfo: 0, reopened: 0 },
 	});
 
+	// A resolved ticket whose last review never gave a verdict owes one: it is re-reviewed
+	// before any new work, every run, until a review gives it a verdict (`--ticket` names one
+	// frontier ticket and re-reviews nothing).
+	if (!chosen) await reviewUnfinishedReviews();
+
 	// `once` (and a chosen `ticket`) is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
 	// One worker failing is not the end of the run's bookkeeping: the pool lets the
 	// others settle, the run state is finished, and only then the error propagates.
@@ -294,6 +299,54 @@ export async function runFrontier({
 			}
 		}
 		return failure;
+	}
+
+	/** Re-review the resolved tickets whose last review never gave a verdict (a stop, or no
+	 * reviewer free), before any new work. A reopen puts the ticket back on the frontier — this
+	 * same run works it again; `none` goes to needs-info as ever; accept and follow-up only
+	 * complete the review, so the ticket stays resolved and nothing is re-worked; stopped
+	 * again, or no reviewer free, leaves the verdict owed to the next run. */
+	async function reviewUnfinishedReviews() {
+		if (!config.review?.enabled) return;
+		const owed = (await tracker.list()).filter(
+			(t) => t.status === RESOLVED && (!options.feature || t.feature === options.feature) && shouldReview(config, t),
+		);
+		for (const t of owed) {
+			if (checkStop(root)) {
+				summary.stoppedReason ??= "STOP file";
+				return;
+			}
+			const text = await readFile(t.path, "utf8");
+			// Unfinished only on the last review section's own status line, with no verdict: a
+			// quoted not-finished line in findings is not a status line, so it never re-reviews.
+			if (!reviewUnfinished(text)) continue;
+			const outcome = await runReviewShift({
+				root,
+				ticket: t,
+				tracker,
+				backend,
+				verify,
+				config,
+				clock: time,
+				cooldowns: cooldownStore,
+				log,
+				type: t.type,
+				landed: lastLandedLine(text),
+				resumed: true,
+				slots,
+			});
+			if (outcome.verdict === "skip") {
+				// The `Not run` note alone would end the obligation: the verdict stays owed to the next run.
+				await tracker.appendComment(t, "- Review: not finished (no reviewer free this run)");
+				continue;
+			}
+			if (outcome.verdict === "stopped") summary.stoppedReason ??= "STOP file";
+			if (outcome.verdict === "reopen") summary.reopened.push({ ...t, reason: outcome.reason, review: outcome });
+			else if (outcome.verdict === "none") summary.needsInfo.push({ ...t, reason: outcome.reason });
+			else summary.resolved.push({ ...t, reason: outcome.reason, review: outcome });
+			await state.update({ summary: counts() });
+			if (summary.stoppedReason) return;
+		}
 	}
 }
 
@@ -823,9 +876,12 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
  * not a missing verdict, so no retry and no needs-info — the ticket stays as it is
  * (after-land: resolved, the landed commit kept; before-land: the caller keeps the
  * branch and puts the ticket back on the frontier), recorded as not finished, for the next run.
+ * A resumed review (`resumed`, `reviewUnfinishedReviews`): the ticket's earlier review
+ * never finished, so this one owes its verdict; its prompt says so and points at the
+ * ticket's last `- Landed:` line (`landed`), since `git log -3` no longer has to reach it.
  * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip" | "stopped", reason: string, warnings?: string[], followUp?: object }>}
  */
-async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target, deferFollowUp = false }) {
+async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target, deferFollowUp = false, resumed = false }) {
 	const review = config.review;
 	const now = clock.now();
 	// Plan on the review tier as if the ticket were untyped and unrouted: the review is its own job.
@@ -848,7 +904,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 	// `unlimited` list lifts it — only `review.budget` itself does.
 	const route = { ...plan, budget: review.budget };
 
-	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target });
+	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target, resumed });
 	if (first.notRun) {
 		await tracker.appendComment(ticket, `### Review\n- Not run: ${first.notRun}`);
 		return { verdict: "skip", reason: first.notRun };
@@ -863,7 +919,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		// No verdict is not accept: once more, in a fresh context, on the next model of the chain.
 		warnings.push(outcome.why);
 		retryRoute = nextReviewRoute(route, config, review);
-		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots, cwd, target });
+		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots, cwd, target, resumed });
 		finalShift = second.shift ?? finalShift;
 		outcome = second.notRun
 			? { verdict: null, reason: null, why: `${retryRoute.model}: ${second.notRun}` }
@@ -913,7 +969,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 
 /** Run one review shift on `route`: its own provider slot, the reviewer prompt, no handoffs, the wrap-up steer at its soft limit.
  * `cwd` is where the review runs — the ticket's worktree for a before-land review, else the repo. */
-async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target }) {
+async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target, resumed }) {
 	const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
 	if (slots && !releaseSlot) return { notRun: `${route.provider} is at its concurrency cap` };
 	try {
@@ -923,7 +979,7 @@ async function runOneReviewShift({ root, ticket, backend, config, route, landed,
 				root,
 				cwd: cwd ?? root,
 				route,
-				prompt: buildReviewPrompt(ticket, { root, landed, target, absolute: Boolean(cwd && cwd !== root) }),
+				prompt: buildReviewPrompt(ticket, { root, landed, target, absolute: Boolean(cwd && cwd !== root), resumed }),
 				systemPrompt: config.reviewerPrompt ?? REVIEWER_PROMPT,
 				softLimitPct: config.softLimitPct ?? 80,
 				ticketPath: ticket.path,
@@ -943,6 +999,24 @@ async function runOneReviewShift({ root, ticket, backend, config, route, landed,
 /** A shift ended by the runner stopping (a STOP file, or a signal that wrote one): `stop` is its handoff kind. */
 function reviewStopped(shift) {
 	return shift?.handoff?.kind === "stop" || shift?.stopReason === "STOP file";
+}
+
+/** A review that never gave a verdict: the last `### Review` section's own status line is
+ * `- Review: not finished` and it carries no verdict. A quoted not-finished line in the
+ * findings (blockquoted, starting with `>`) is not a status line, so a review that quotes
+ * the note while giving its verdict is finished. */
+export function reviewUnfinished(text) {
+	const source = String(text ?? "");
+	let section = "";
+	for (const m of source.matchAll(/^### Review\b.*$/gm)) section = source.slice(m.index + m[0].length);
+	return /^- Review: not finished/m.test(section) && !/^- Verdict: /m.test(section);
+}
+
+/** The ticket's last `- Landed: …` line: the change a resumed review judges, since
+ * `git log -3` no longer has to reach the landed commit. */
+function lastLandedLine(text) {
+	const lines = String(text ?? "").match(/^- Landed: (.+)$/gm);
+	return lines ? lines[lines.length - 1].replace(/^- Landed: /, "") : undefined;
 }
 
 /** One review shift's verdict: the last marker in its text, or why there is none (an unknown verdict word counts as none). */

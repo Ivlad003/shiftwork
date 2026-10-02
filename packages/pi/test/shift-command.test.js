@@ -128,7 +128,12 @@ test("/shift run finds the shiftwork CLI and logs its output to a file", { timeo
 	const notify = await waitFor(() => ui.find((r) => r.method === "notify" && /runner started/.test(r.message)));
 	const logFile = notify.message.match(/logs: (\S+)/)[1];
 
-	const output = await waitFor(() => (existsSync(logFile) ? readFileSync(logFile, "utf8") : "") || false, 30_000);
+	// The log is read as soon as it contains the whole dry run, not as soon as its first line lands.
+	const output = await waitFor(() => {
+		if (!existsSync(logFile)) return false;
+		const text = readFileSync(logFile, "utf8");
+		return /frontier is empty/.test(text) ? text : false;
+	}, 30_000);
 	assert.match(output, /frontier is empty/);
 });
 
