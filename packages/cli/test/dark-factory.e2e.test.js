@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, symlinkSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -47,21 +47,28 @@ async function makeRoot({ issues = [], labels = [...LABELS], noAuth = false, gh 
 			issues: issues.map((issue) => ({ state: "open", comments: [], ...issue })),
 		}),
 	);
-	// `shiftwork` on PATH: the planning ticket's Verify runs `shiftwork tickets check <feature>`.
-	const pathDir = join(root, "path-bin");
-	await mkdir(pathDir, { recursive: true });
-	symlinkSync(bin, join(pathDir, "shiftwork"));
-	return { root, statePath, pathDir };
+	return { root, statePath };
+}
+
+/** PATH with no `shiftwork` binary, but still `node` (for the CLI shebang). */
+function pathWithoutShiftwork() {
+	const nodeDir = dirname(process.execPath);
+	const rest = (process.env.PATH ?? "")
+		.split(":")
+		.filter((dir) => dir && dir !== nodeDir && !existsSync(join(dir, "shiftwork")));
+	return [nodeDir, ...rest].join(":");
 }
 
 /** Run `shiftwork <args>` in `root` and collect stdout/stderr/exit code. */
-async function shiftwork(args, { root, statePath, pathDir, script }) {
+async function shiftwork(args, { root, statePath, script }) {
 	const home = await mkdtemp(join(tmpdir(), "sw-df-home-"));
+	const cache = await mkdtemp(join(tmpdir(), "sw-df-cache-"));
 	try {
 		const { stdout, stderr } = await promisify(execFile)(process.execPath, [bin, ...args], {
 			env: {
 				...process.env,
-				PATH: `${pathDir}:${process.env.PATH}`,
+				PATH: pathWithoutShiftwork(),
+				XDG_CACHE_HOME: cache,
 				PI_CODING_AGENT_DIR: home,
 				SHIFTWORK_GH_STATE: statePath,
 				...(script !== undefined && { SHIFTWORK_SCRIPT: JSON.stringify(script) }),
@@ -80,7 +87,7 @@ function runOnce(ctx) {
 
 test("run --dark-factory --once: an issue is imported, planned and built, its comments land, it is closed, exit 0", { timeout: 240_000 }, async () => {
 	const feature = "gh-5-add-a-greeting-file";
-	const { root, statePath, pathDir } = await makeRoot({
+	const { root, statePath } = await makeRoot({
 		issues: [
 			{
 				number: 5,
@@ -122,7 +129,7 @@ test("run --dark-factory --once: an issue is imported, planned and built, its co
 		{ text: "Wrote the implementation ticket and greeting.txt." },
 	];
 
-	const { code, stdout, stderr } = await runOnce({ root, statePath, pathDir, script });
+	const { code, stdout, stderr } = await runOnce({ root, statePath, script });
 	assert.equal(code, 0, `stdout:\n${stdout}\nstderr:\n${stderr}`);
 
 	// The import and the sync actions each print one line.
@@ -161,24 +168,24 @@ test("run --dark-factory --ticket exits 1 with the combination message", { timeo
 });
 
 test("gh auth status failing exits 1 with the login message", { timeout: 60_000 }, async () => {
-	const { root, statePath, pathDir } = await makeRoot({ noAuth: true });
-	const { code, stderr } = await runOnce({ root, statePath, pathDir });
+	const { root, statePath } = await makeRoot({ noAuth: true });
+	const { code, stderr } = await runOnce({ root, statePath });
 	assert.equal(code, 1);
 	assert.match(stderr, /dark-factory: needs an authenticated gh: run gh auth login/);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
 });
 
 test("a bad github.gh exits 1 with the install message", { timeout: 60_000 }, async () => {
-	const { root, statePath, pathDir } = await makeRoot({ gh: "/nonexistent/gh" });
-	const { code, stderr } = await runOnce({ root, statePath, pathDir });
+	const { root, statePath } = await makeRoot({ gh: "/nonexistent/gh" });
+	const { code, stderr } = await runOnce({ root, statePath });
 	assert.equal(code, 1);
 	assert.match(stderr, /dark-factory: needs the GitHub CLI: install it from https:\/\/cli\.github\.com, then run gh auth login/);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
 });
 
 test("a missing label exits 1 with the missing-labels error and imports nothing", { timeout: 60_000 }, async () => {
-	const { root, statePath, pathDir } = await makeRoot({ labels: [LABELS[0]] });
-	const { code, stderr } = await runOnce({ root, statePath, pathDir });
+	const { root, statePath } = await makeRoot({ labels: [LABELS[0]] });
+	const { code, stderr } = await runOnce({ root, statePath });
 	assert.equal(code, 1);
 	assert.match(stderr, new RegExp(`dark-factory: missing GitHub labels in owner/name: ${LABELS.slice(1).join(", ").replace(/:/g, "\\:")}`));
 	assert.match(stderr, /shiftwork github labels --create/);

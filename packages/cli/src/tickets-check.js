@@ -1,5 +1,8 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { loadTickets, READY } from "shiftwork-core";
+
+import { execIn } from "./exec.js";
 
 /** Statuses at or past ready-for-agent: once an agent may hold the ticket, it counts. */
 const READY_OR_LATER = new Set([READY, "claimed", "resolved"]);
@@ -8,6 +11,27 @@ const READY_OR_LATER = new Set([READY, "claimed", "resolved"]);
 const VERIFY_LINE = /^[ \t]*(?:\*\*)?Verify:(?:\*\*)?[ \t]*(.*?)[ \t]*$/m;
 
 const pad = (number) => String(Number(number)).padStart(2, "0");
+
+/**
+ * Tracker root for `tickets check` when `--dir` is omitted.
+ * A linked git worktree uses the primary worktree (the live `.scratch`); a
+ * non-git cwd and a normal clone keep `cwd`. `--dir` (passed as `dir`) wins.
+ */
+export async function resolveTrackerRoot({ cwd = process.cwd(), dir, exec } = {}) {
+	if (dir) return dir;
+	const run = exec ?? execIn(cwd);
+	try {
+		const gitDir = resolve(cwd, (await run(["git", "rev-parse", "--git-dir"])).trim());
+		const common = resolve(cwd, (await run(["git", "rev-parse", "--git-common-dir"])).trim());
+		if (gitDir === common) return cwd;
+		const list = await run(["git", "worktree", "list", "--porcelain"]);
+		const line = list.split("\n").find((row) => row.startsWith("worktree "));
+		if (line) return line.slice("worktree ".length);
+	} catch {
+		// not a git repo, or git missing
+	}
+	return cwd;
+}
 
 /** `--except 01,03` (repeatable) → `["01", "03"]`; bare numbers are padded like ticket numbers. */
 export function parseExcept(except) {

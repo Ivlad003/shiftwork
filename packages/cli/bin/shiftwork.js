@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { formatTicketsTable, LIMIT_NAMES, loadConfig, openCooldowns, openRepoTracker, openRunState, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { ensureShiftworkOnPath } from "../src/cli-path.js";
+
+ensureShiftworkOnPath();
 
 const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
@@ -207,10 +210,10 @@ async function tickets(argv) {
 	if (!feature) throw new Error("usage: shiftwork tickets check <feature> [--min <n>] [--except NN] [--dir <path>]");
 	const min = values.min === undefined ? 1 : Number(values.min);
 	if (!Number.isInteger(min) || min < 1) throw new Error(`--min must be a positive integer, got "${values.min}"`);
-	const { checkFeatureTickets, parseExcept } = await import("../src/tickets-check.js");
+	const { checkFeatureTickets, parseExcept, resolveTrackerRoot } = await import("../src/tickets-check.js");
 	const except = parseExcept(values.except ?? ["01"]);
 	const { ok, problems, ready } = await checkFeatureTickets({
-		root: values.dir ?? process.cwd(),
+		root: await resolveTrackerRoot({ dir: values.dir }),
 		feature,
 		min,
 		except,

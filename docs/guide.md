@@ -528,7 +528,7 @@ Shiftwork does all GitHub work with the GitHub CLI and its login — no token in
 
 ## Dark-factory mode
 
-`npx shiftwork run --dark-factory` runs the whole loop unattended: every `github.pollMin` minutes (default 5) it polls the repo's issues, imports the new ones, reports back, works the frontier until it is empty, reports back again, and waits for the next poll. It stops like any runner: a STOP file or a signal ends it after the current shift. `npx shiftwork run --dark-factory --once` does one poll plus one frontier pass, then exits.
+`npx shiftwork run --dark-factory` from a git clone is enough: the CLI puts `shiftwork` on PATH so the planning ticket's Verify (`shiftwork tickets check`) and agent shells find this same binary — no global `shiftwork` install. It runs the whole loop unattended: every `github.pollMin` minutes (default 5) it polls the repo's issues, imports the new ones, reports back, works the frontier until it is empty, reports back again, and waits for the next poll. It stops like any runner: a STOP file or a signal ends it after the current shift. `npx shiftwork run --dark-factory --once` does one poll plus one frontier pass, then exits.
 
 The TUI has a hand on it: the **GitHub** tab (`6`) lists the imported issues and the time of the last sync, and `g` starts `run --dark-factory` detached when no runner is live (a second `g`, like `s`, writes STOP); the header shows `dark-factory` while it runs.
 

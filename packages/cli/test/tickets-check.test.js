@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { checkFeatureTickets, parseExcept } from "../src/tickets-check.js";
+import { checkFeatureTickets, parseExcept, resolveTrackerRoot } from "../src/tickets-check.js";
 
 const bin = fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
 const exec = async (args) => {
@@ -44,7 +44,8 @@ test("passes with one good ticket besides the plan", async () => {
 	const result = await exec(["tickets", "check", "f", "--dir", root]);
 	const direct = await checkFeatureTickets({ root, feature: "f" });
 
-	assert.deepEqual(result, { code: 0, stdout: `f: 1 ready ticket besides 01 (need 1)\n`, stderr: "" });
+	assert.equal(result.code, 0);
+	assert.equal(result.stdout, `f: 1 ready ticket besides 01 (need 1)\n`);
 	assert.equal(direct.ok, true);
 	assert.equal(direct.ready, 1);
 });
@@ -201,4 +202,79 @@ test("an unknown github subcommand prints help and exits 1", async () => {
 	const result = await exec(["github", "nope"]);
 	assert.equal(result.code, 1);
 	assert.match(result.stdout, /shiftwork github labels \[--create\] \[--dir <path>\]/);
+});
+
+const execCwd = async (args, cwd) => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-agent-"));
+	const cache = await mkdtemp(join(tmpdir(), "sw-cache-"));
+	return promisify(execFile)(process.execPath, [bin, ...args], {
+		cwd,
+		env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, XDG_CACHE_HOME: cache },
+	}).then(
+		({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+		(error) => ({ code: error.code ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" }),
+	);
+};
+
+async function gitRepoWithTickets() {
+	const { execFileSync } = await import("node:child_process");
+	const main = await mkdtemp(join(tmpdir(), "sw-check-main-"));
+	const git = (...args) => execFileSync("git", args, { cwd: main, encoding: "utf8" });
+	git("init", "-q", "-b", "main");
+	git("config", "user.email", "t@example.com");
+	git("config", "user.name", "T");
+	await writeFile(join(main, "README.md"), "# t\n");
+	git("add", "README.md");
+	git("commit", "-q", "-m", "init");
+	await mkdir(join(main, ".scratch", "f", "issues"), { recursive: true });
+	await writeFile(join(main, ".scratch", "f", "issues", "01-plan.md"), plan());
+	await writeFile(join(main, ".scratch", "f", "issues", "02-build.md"), ticket());
+	return { main, git };
+}
+
+test("tickets check from a linked worktree reads the main checkout's .scratch", async () => {
+	const { main, git } = await gitRepoWithTickets();
+	const wt = await mkdtemp(join(tmpdir(), "sw-check-wt-"));
+	await rmdir(wt);
+	git("worktree", "add", "--detach", wt);
+
+	const result = await execCwd(["tickets", "check", "f"], wt);
+
+	assert.equal(result.code, 0, `${result.stdout}${result.stderr}`);
+	assert.match(result.stdout, /f: 1 ready ticket besides 01 \(need 1\)/);
+});
+
+test("--dir pointing at an empty directory does not fall back to the main checkout", async () => {
+	const { git } = await gitRepoWithTickets();
+	const wt = await mkdtemp(join(tmpdir(), "sw-check-wt-"));
+	await rmdir(wt);
+	git("worktree", "add", "--detach", wt);
+	const empty = await mkdtemp(join(tmpdir(), "sw-check-empty-"));
+
+	const result = await execCwd(["tickets", "check", "f", "--dir", empty], wt);
+
+	assert.equal(result.code, 1);
+	assert.match(result.stdout, /f: no tickets found in \.scratch\/f\/issues/);
+});
+
+test("resolveTrackerRoot keeps cwd for a non-git directory and a normal clone", async () => {
+	const { main } = await gitRepoWithTickets();
+	const plain = await mkdtemp(join(tmpdir(), "sw-check-plain-"));
+	assert.equal(await resolveTrackerRoot({ cwd: plain }), plain);
+	assert.equal(await resolveTrackerRoot({ cwd: main }), main);
+});
+
+test("resolveTrackerRoot honours dir without calling git", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "sw-check-dir-"));
+	let called = false;
+	const root = await resolveTrackerRoot({
+		cwd: "/tmp",
+		dir,
+		exec: async () => {
+			called = true;
+			return "";
+		},
+	});
+	assert.equal(root, dir);
+	assert.equal(called, false);
 });
