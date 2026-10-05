@@ -16,7 +16,7 @@ import { SHIFTWORK_MARKER } from "../src/github.js";
 const run = promisify(execFile);
 
 /** Every op a stub `github` may see: no test ever calls a delete endpoint. */
-const OPS = ["repo", "collaborators", "issueComments", "comment", "addLabels", "removeLabel", "close"];
+const OPS = ["repo", "collaborators", "issueComments", "comment", "addLabels", "removeLabel", "close", "issueBody", "editBody"];
 
 function assertNoDeletes(calls) {
 	const unknown = calls.map((c) => c.op).filter((op) => !OPS.includes(op));
@@ -28,8 +28,9 @@ function assertNoDeletes(calls) {
  * `comments` array. Posted comments land in it, like on GitHub, with an id
  * one above the newest — so a test's own pushes just use higher ids.
  */
-function stubGitHub({ collaborators = ["octocat"], comments = [] } = {}) {
+function stubGitHub({ collaborators = ["octocat"], comments = [], body = "" } = {}) {
 	const calls = [];
+	let issueText = body;
 	const nextId = () => 1 + comments.reduce((max, c) => Math.max(max, Number(c.id) || 0), 1000);
 	const github = {
 		async repo() {
@@ -62,8 +63,23 @@ function stubGitHub({ collaborators = ["octocat"], comments = [] } = {}) {
 			calls.push({ op: "close", args: [n, body] });
 			return "";
 		},
+		async issueBody(n) {
+			calls.push({ op: "issueBody", args: [n] });
+			return issueText;
+		},
+		async editBody(n, next) {
+			calls.push({ op: "editBody", args: [n, next] });
+			issueText = next;
+			return "";
+		},
 	};
-	return { github, calls };
+	return {
+		github,
+		calls,
+		setBody: (next) => {
+			issueText = next;
+		},
+	};
 }
 
 /** A temp repo root: a real git repo with one initial commit, pushed to a bare `origin` remote. */
@@ -103,8 +119,8 @@ async function writeTicket(root, feature, { number, title, status, comments = ""
 	return path;
 }
 
-/** One imported issue in `.pi/shiftwork-github.json`, as `importIssues` writes it (a legacy `commentsSeen` optional). */
-async function seedState(root, feature, { number = 8, posted = [], commentsSeen, lastCommentId = null } = {}) {
+/** One imported issue in `.shiftwork/shiftwork-github.json`, as `importIssues` writes it (a legacy `commentsSeen` optional). */
+async function seedState(root, feature, { number = 8, posted = [], commentsSeen, lastCommentId = null, bodySeen } = {}) {
 	await writeIssueState(root, {
 		issues: {
 			[String(number)]: {
@@ -115,6 +131,7 @@ async function seedState(root, feature, { number = 8, posted = [], commentsSeen,
 				lastCommentId,
 				ownComments: [],
 				posted,
+				...(bodySeen !== undefined && { bodySeen }),
 			},
 		},
 	});
@@ -317,6 +334,22 @@ test("a non-collaborator's reply is ignored; a collaborator's still lands after 
 	assert.doesNotMatch(ticket, /Also AWS\?/);
 	assert.equal(parseTicket(ticket).status, "ready-for-agent");
 	assertNoDeletes(calls);
+});
+
+test("logins are compared case-insensitively: a collaborator's reply under another case still lands", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-13-case-work";
+	await seedState(dir, feature, { number: 13 });
+	const path = await writeTicket(dir, feature, { number: "02", title: "Case work", status: "needs-info", comments: shiftReport("needs-info: Which cloud?") });
+	const comments = [];
+	const { github } = stubGitHub({ collaborators: ["OctoCat"], comments });
+	const config = { github: { repo: "owner/name", autoClose: false, authors: ["Hubot"] } };
+
+	await sync(dir, github, config);
+	comments.push({ id: 2001, author: "octocat", body: "#02: Use AWS.", createdAt: "2026-10-01T12:00:00Z" });
+	await sync(dir, github, config);
+	assert.match(await readFile(path, "utf8"), /^### Reply from @octocat$/m);
+	assert.equal(parseTicket(await readFile(path, "utf8")).status, "ready-for-agent");
 });
 
 test("a reply names one waiting ticket with #NN; a deleted comment does not hide a later reply", async () => {
@@ -724,4 +757,107 @@ test("latestShiftReport returns the last shift section and needsInfoReason the l
 
 	assert.equal(latestShiftReport("no reports here"), undefined);
 	assert.equal(needsInfoReason("no reason here"), undefined);
+});
+
+test("needs-info writes the question into the issue body and swaps working for the needs-info label", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-30-labels";
+	await seedState(dir, feature, { number: 30, bodySeen: "Do the thing." });
+	await writeTicket(dir, feature, { number: "02", title: "Do the thing", status: "claimed" });
+	await writeFile(join(dir, ".scratch", feature, "spec.md"), "# Spec: Do the thing\n\n**Status:** ready-for-agent\n\n## Issue\n\nDo the thing.\n");
+	const { github, calls, setBody } = stubGitHub({ body: "Do the thing." });
+	const config = { github: { repo: "owner/name", autoClose: false } };
+
+	await sync(dir, github, config);
+	assert.deepEqual(calls.filter((c) => c.op === "addLabels").map((c) => c.args[1]), [["shiftwork:working"]]);
+
+	await writeTicket(dir, feature, {
+		number: "02",
+		title: "Do the thing",
+		status: "needs-info",
+		comments: shiftReport("needs-info: Which database?"),
+	});
+	await sync(dir, github, config);
+
+	const edited = calls.filter((c) => c.op === "editBody").at(-1).args[1];
+	assert.match(edited, /<!-- shiftwork:questions:start -->/);
+	assert.match(edited, /Which database\?/);
+	assert.match(edited, /Do the thing\./);
+	assert.deepEqual(
+		calls.filter((c) => c.op === "addLabels").map((c) => c.args[1]),
+		[["shiftwork:working"], ["shiftwork:needs-info"]],
+	);
+	assert.deepEqual(calls.filter((c) => c.op === "removeLabel").map((c) => c.args[1]), ["shiftwork:working"]);
+
+	const section = edited.slice(edited.indexOf("<!-- shiftwork:questions:start -->"));
+	setBody(`Use Postgres.\n\n${section}`);
+	await sync(dir, github, config);
+
+	const ticket = parseTicket(await readFile(join(dir, ".scratch", feature, "issues", "02-ticket.md"), "utf8"));
+	assert.equal(ticket.status, "ready-for-agent");
+	const spec = await readFile(join(dir, ".scratch", feature, "spec.md"), "utf8");
+	assert.match(spec, /## Issue\n\nUse Postgres\./);
+	assert.doesNotMatch(calls.filter((c) => c.op === "editBody").at(-1).args[1], /shiftwork:questions:start/);
+	assert.deepEqual(calls.filter((c) => c.op === "removeLabel").map((c) => c.args[1]), ["shiftwork:working", "shiftwork:needs-info"]);
+
+	await writeTicket(dir, feature, { number: "02", title: "Do the thing", status: "claimed" });
+	await sync(dir, github, config);
+	assert.deepEqual(calls.filter((c) => c.op === "addLabels").map((c) => c.args[1]), [
+		["shiftwork:working"],
+		["shiftwork:needs-info"],
+		["shiftwork:working"],
+	]);
+	assertNoDeletes(calls);
+});
+
+test("a collaborator's reply is written into the spec and the questions block is removed", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-31-clarify";
+	await seedState(dir, feature, { number: 31, bodySeen: "Do the thing." });
+	await writeTicket(dir, feature, {
+		number: "02",
+		title: "Do the thing",
+		status: "needs-info",
+		comments: shiftReport("needs-info: Which database?"),
+	});
+	await writeFile(join(dir, ".scratch", feature, "spec.md"), "# Spec: Do the thing\n\n**Status:** needs-info\n\n## Issue\n\nDo the thing.\n");
+	const comments = [];
+	const { github, calls } = stubGitHub({ comments, body: "Do the thing." });
+	const config = { github: { repo: "owner/name", autoClose: false } };
+
+	await sync(dir, github, config);
+	comments.push({ id: 2001, author: "octocat", body: "Use Postgres.", createdAt: "2026-10-01T12:00:00Z" });
+	await sync(dir, github, config);
+
+	const spec = await readFile(join(dir, ".scratch", feature, "spec.md"), "utf8");
+	assert.match(spec, /\*\*Status:\*\* ready-for-agent/);
+	assert.match(spec, /## Clarifications/);
+	assert.match(spec, /### Reply from @octocat/);
+	assert.match(spec, /Use Postgres\./);
+	assert.match(spec, /<!-- shiftwork:tickets:start -->/);
+	assert.doesNotMatch(calls.filter((c) => c.op === "editBody").at(-1).args[1], /shiftwork:questions:start/);
+	assert.deepEqual(calls.filter((c) => c.op === "removeLabel").map((c) => c.args[1]), ["shiftwork:needs-info"]);
+	assertNoDeletes(calls);
+});
+
+test("the first sight of an issue body is recorded and is not treated as an answer", async () => {
+	const dir = await makeRoot();
+	const feature = "gh-32-seen";
+	await seedState(dir, feature, { number: 32 });
+	const path = await writeTicket(dir, feature, {
+		number: "02",
+		title: "Do the thing",
+		status: "needs-info",
+		comments: shiftReport("needs-info: Which database?"),
+	});
+	const { github, calls } = stubGitHub({ body: "Already written by a person." });
+	const config = { github: { repo: "owner/name", autoClose: false } };
+
+	await sync(dir, github, config);
+
+	assert.equal(parseTicket(await readFile(path, "utf8")).status, "needs-info");
+	const state = await readIssueState(dir);
+	assert.equal(state.issues["32"].bodySeen, "Already written by a person.");
+	assert.match(calls.find((c) => c.op === "editBody").args[1], /Already written by a person\./);
+	assertNoDeletes(calls);
 });

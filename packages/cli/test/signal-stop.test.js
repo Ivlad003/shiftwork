@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { installSignalStop, trackShifts } from "../src/signal-stop.js";
+import { installSignalStop, registerChild, trackShifts } from "../src/signal-stop.js";
 
 const bin = fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,6 +65,35 @@ test("dispose removes the handlers and only a STOP file it created", async () =>
 	assert.equal(await readFile(join(own, "STOP"), "utf8"), "the operator's\n");
 });
 
+test("a forced stop SIGKILLs every registered child process group, even when aborting hangs", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-sig-"));
+	// An agent in its own process group, with a grandchild: both must go.
+	const agent = spawn("sh", ["-c", "sleep 300 & echo $!; wait"], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+	const grandchild = Number(await new Promise((resolve) => agent.stdout.once("data", (d) => resolve(String(d).trim()))));
+	const unregister = registerChild(agent.pid);
+	const { proc, calls } = harness(root, { abortShifts: () => new Promise(() => {}), abortTimeoutMs: 50 });
+
+	proc.emit("SIGTERM");
+	proc.emit("SIGTERM");
+	for (let i = 0; i < 50 && (alive(agent.pid) || alive(grandchild)); i++) await tick(20);
+
+	assert.equal(alive(grandchild), false, "the agent's whole group is killed");
+	assert.deepEqual(calls.at(-1), ["exit", 143]);
+	unregister();
+});
+
+test("an unregistered child is left alone by a forced stop", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-sig-"));
+	const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+	registerChild(child.pid)();
+	const { proc } = harness(root);
+	proc.emit("SIGINT");
+	proc.emit("SIGINT");
+	await tick(50);
+	assert.equal(alive(child.pid), true);
+	process.kill(-child.pid, "SIGKILL");
+});
+
 test("trackShifts aborts only shifts that are still live", async () => {
 	const aborted = [];
 	const backend = trackShifts({
@@ -87,7 +116,7 @@ test("shiftwork run: SIGTERM twice kills the agent process instead of leaving it
 	const binDir = join(root, "fake-bin");
 	await mkdir(binDir);
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	const pidFile = join(root, "agent.pid");
 	// A fake Claude Code that records its pid and then works "forever".
 	await writeFile(join(binDir, "claude"), `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 300\n`);
@@ -96,7 +125,7 @@ test("shiftwork run: SIGTERM twice kills the agent process instead of leaving it
 		join(root, ".scratch", "demo", "issues", "01-hello.md"),
 		"# 01: Hello\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n",
 	);
-	await writeFile(join(root, ".pi", "shiftwork.json"), JSON.stringify({ model: "claude:sonnet", jev: { enabled: false } }));
+	await writeFile(join(root, ".shiftwork", "shiftwork.json"), JSON.stringify({ model: "claude:sonnet", jev: { enabled: false } }));
 
 	const child = execFile(process.execPath, [bin, "run", "--dir", root, "--no-worktree"], {
 		env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, PI_CODING_AGENT_DIR: await mkdtemp(join(tmpdir(), "sw-sig-home-")) },

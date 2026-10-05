@@ -1,9 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { lstat, mkdir, readFile, readlink, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { classifyError } from "shiftwork-core";
+import { execIn } from "./exec.js";
+import { runAgent, spawnAgent } from "./spawn-agent.js";
 
 /**
  * OpenCode backend: `opencode run -m <provider/model> --format json --auto <prompt>`.
@@ -22,28 +22,19 @@ export function createOpencodeBackend(options = {}) {
 
 		async probe(model, { timeoutMs = 60_000 } = {}) {
 			if (!(await isOnPath(command, options.env))) return false;
-			return new Promise((resolve) => {
-				const args = [
-					"run",
-					"-m",
-					model,
-					"--format",
-					"json",
-					"--auto",
-					...(options.args ?? []),
-					"Reply with exactly: OK",
-				];
-				const child = execFile(
-					command,
-					args,
-					{ env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-					(error, stdout, stderr) => {
-						const output = `${stdout}\n${stderr}`;
-						resolve(!error && classifyError(output) === null);
-					},
-				);
-				child.stdin?.end();
-			});
+			const args = [
+				"run",
+				"-m",
+				model,
+				"--format",
+				"json",
+				"--auto",
+				...(options.args ?? []),
+				"Reply with exactly: OK",
+			];
+			const result = await runAgent(command, args, { env: { ...process.env, ...options.env }, timeoutMs });
+			const output = `${result.stdout}\n${result.stderr}`;
+			return !result.error && result.code === 0 && classifyError(output) === null;
 		},
 
 		async startShift({ cwd, route, prompt, systemPrompt }) {
@@ -56,74 +47,57 @@ export function createOpencodeBackend(options = {}) {
 
 			const skillPaths = route.skills?.restricted ? route.skills.paths ?? [] : [];
 			const skillsDir = join(cwd, ".agents", "skills");
-			const skillLinks = [];
-			if (skillPaths.length) {
-				await mkdir(skillsDir, { recursive: true });
-				for (const skillPath of skillPaths) {
-					const target = join(skillsDir, basename(skillPath));
-					await rm(target, { force: true }).catch(() => {});
-					await symlink(skillPath, target).catch(() => {});
-					skillLinks.push(target);
-				}
-				await excludeSkillsFromGit(cwd);
-			}
+			const skillLinks = skillPaths.length ? await linkSkills(skillsDir, skillPaths) : [];
+			if (skillPaths.length) await excludeSkillsFromGit(cwd);
 
 			const args = ["run", "-m", route.model, "--format", "json", "--auto"];
 			args.push(...(options.args ?? []));
 			args.push(fullPrompt);
 
 			const queue = eventQueue();
-			let stderr = "";
-			let buffer = "";
+			let stopping = false;
+			const timeoutMs = options.timeoutMs ?? SAFETY_TIMEOUT_MS;
 			const map = createOpencodeMapper();
 			let ended = false;
 
 			const cleanup = async () => {
-				for (const link of skillLinks) await rm(link, { force: true }).catch(() => {});
+				for (const link of skillLinks) await unlink(link).catch(() => {});
 			};
 
+			// close() after the process already ended waits for that ending's cleanup.
+			let cleanupDone = null;
 			const finish = async (stopReason, errorMessage) => {
-				if (queue.closed) return;
+				if (queue.closed) return cleanupDone;
 				for (const mapped of map.flush()) queue.push(mapped);
 				if (errorMessage) queue.push({ type: "error", message: errorMessage });
 				if (!ended) queue.push({ type: "end", stopReason });
 				queue.close();
-				await cleanup();
+				cleanupDone = cleanup();
+				await cleanupDone;
 			};
 
-			const child = execFile(command, args, {
+			const agent = spawnAgent(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
 				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
-				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
-				maxBuffer: 256 * 1024 * 1024,
-			});
-			// CLIs such as `opencode run` read piped stdin as extra prompt and wait for EOF: close it.
-			child.stdin?.end();
-
-			child.stderr?.on("data", (chunk) => {
-				stderr += chunk;
-			});
-
-			child.stdout?.on("data", (chunk) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop();
-				for (const line of lines) {
-					if (!line.trim()) continue;
+				timeoutMs,
+				onLine(line) {
+					if (!line.trim()) return;
 					const event = parseJsonLine(line);
-					if (!event) continue;
+					if (!event) return;
 					for (const mapped of map(event)) {
 						if (mapped.type === "end") ended = true;
 						queue.push(mapped);
 					}
-				}
-			});
-
-			child.on("error", (error) => finish("error", error.message));
-			child.on("close", (code) => {
-				const message = code !== 0 ? stderr || `opencode exited with code ${code}` : undefined;
-				finish(code === 0 ? "stop" : "error", message);
+				},
+				onError: (error) => finish("error", error.message),
+				onClose: ({ code, timedOut }) => {
+					if (stopping) return;
+					const message = timedOut
+						? `opencode timed out after ${Math.round(timeoutMs / 60_000)} min (safety timeout)`
+						: code !== 0 ? agent.stderrTail() || `opencode exited with code ${code}` : undefined;
+					finish(code === 0 ? "stop" : "error", message);
+				},
 			});
 
 			return {
@@ -131,11 +105,13 @@ export function createOpencodeBackend(options = {}) {
 				events: queue.iterate(),
 				warnings: preload.warnings,
 				async abort() {
-					child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("aborted").catch(() => {});
 				},
 				async close() {
-					if (!child.killed) child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("stop").catch(() => {});
 				},
 			};
@@ -192,6 +168,8 @@ export function createOpencodeMapper() {
 				out.push({ type: "turn", model: undefined, usage: { input: 0, output: 0, totalTokens: 0 }, costUsd: 0 });
 			}
 			out.push({ type: "text", text: event.part.text });
+		} else if (event.type === "tool_use" && event.part) {
+			out.push(toolEvent(event.part.tool, event.part.state?.input));
 		} else if (event.type === "error") {
 			const message = event.error?.message ?? event.message ?? "opencode error";
 			out.push({ type: "error", message });
@@ -200,6 +178,18 @@ export function createOpencodeMapper() {
 	}
 	map.flush = () => [];
 	return map;
+}
+
+const TOOL_INPUT_CHARS = 500;
+
+/** A tool call for the shift log: the shell command, else the file path, else the arguments as
+ * JSON — at most 500 chars. `shiftwork reflect` mines these for repeated steps. */
+function toolEvent(name, args) {
+	const input =
+		typeof args === "string"
+			? args
+			: (args?.command ?? args?.cmd ?? args?.file_path ?? args?.filePath ?? args?.path ?? args?.pattern ?? args?.url ?? (args == null ? "" : JSON.stringify(args)));
+	return { type: "tool", name: String(name ?? "tool"), input: String(Array.isArray(input) ? input.join(" ") : input).slice(0, TOOL_INPUT_CHARS) };
 }
 
 /** Emit any pending state (currently none; kept for symmetry with other mappers). */
@@ -212,13 +202,44 @@ export function mapOpencodeEvent(event) {
 	return createOpencodeMapper()(event);
 }
 
+/**
+ * Link granted skills into `skillsDir`. A link of ours left by an earlier shift is reused; any other
+ * file already at the path belongs to the repo and is left alone and not recorded, so cleanup
+ * never removes it. Returns the links to remove when the shift ends.
+ */
+async function linkSkills(skillsDir, skillPaths) {
+	const links = [];
+	await mkdir(skillsDir, { recursive: true });
+	for (const skillPath of skillPaths) {
+		const target = join(skillsDir, basename(skillPath));
+		const existing = await lstat(target).catch(() => null);
+		if (existing) {
+			if (existing.isSymbolicLink() && (await readlink(target).catch(() => null)) === skillPath) links.push(target);
+			continue;
+		}
+		try {
+			await symlink(skillPath, target);
+			links.push(target);
+		} catch {
+			// EEXIST from a race or an unwritable dir: the skill is not delivered, nothing to clean up.
+		}
+	}
+	return links;
+}
+
 async function excludeSkillsFromGit(cwd) {
-	const excludeFile = join(cwd, ".git", "info", "exclude");
-	if (!existsSync(excludeFile)) return;
+	// In a linked worktree `.git` is a file: ask git where info/exclude really lives (the common dir).
+	let excludeFile;
+	try {
+		excludeFile = resolve(cwd, (await execIn(cwd)(["git", "rev-parse", "--git-path", "info/exclude"])).trim());
+	} catch {
+		return;
+	}
 	const pattern = ".agents/skills/";
 	const text = await readFile(excludeFile, "utf8").catch(() => "");
 	if (text.split("\n").some((line) => line.trim() === pattern)) return;
-	await writeFile(excludeFile, text.endsWith("\n") ? `${text}${pattern}\n` : `${text}\n${pattern}\n`);
+	await mkdir(dirname(excludeFile), { recursive: true });
+	await writeFile(excludeFile, !text || text.endsWith("\n") ? `${text}${pattern}\n` : `${text}\n${pattern}\n`);
 }
 
 async function isOnPath(command, env) {

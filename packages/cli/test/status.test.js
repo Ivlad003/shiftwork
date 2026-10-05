@@ -46,9 +46,9 @@ test("status shows the frontier, active claims and cooldowns", async () => {
 		join(root, ".scratch", ".claims", "f--01.lock"),
 		JSON.stringify({ pid: process.pid, token: "test", at: new Date().toISOString() }),
 	);
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	await writeFile(
-		join(root, ".pi", "shiftwork-state.json"),
+		join(root, ".shiftwork", "shiftwork-state.json"),
 		JSON.stringify({ cooldowns: [{ provider: "fake/provider", until: new Date(Date.now() + 5 * 60 * 1000).toISOString(), kind: "rate" }] }),
 	);
 
@@ -88,8 +88,8 @@ test("status lists every running shift of a parallel: 2 run (fixture from a real
 	// The fixture was captured while two shifts ran; this process stands in for the
 	// runner pid so the child `status` process sees the run as live.
 	for (const runner of fixture.runners) runner.pid = process.pid;
-	await mkdir(join(root, ".pi"), { recursive: true });
-	await writeFile(join(root, ".pi", "shiftwork-run.json"), JSON.stringify(fixture));
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
+	await writeFile(join(root, ".shiftwork", "shiftwork-run.json"), JSON.stringify(fixture));
 
 	const { stdout, stderr } = await exec(["status", "--dir", root]);
 

@@ -5,7 +5,8 @@
  * Untyped tickets with classification.complexity=complex raise the tier by one.
  * Skill groups come from the resolved tier, adjusted by `ticket.skills`, then
  * resolved to paths from `config.skillSources`. Preloaded skills are a subset.
- * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, the union of `unlimited` lists (top-level,
+ * Budgets merge default → tier → budgets.models (legacy) → models[ref].budget, capped by what is left of
+ * the ticket budget (`history.ticketUsage`) on every shift; the union of `unlimited` lists (top-level,
  * tier, model profile and backend) is lifted from the shift budget and from the ticket budget that caps the result.
  * Thinking: the ticket type's routing → the model profile → the tier → global. A profile's contextWindow is used for context fill.
  * A provider at its `concurrency` cap (`fullProviders`) is skipped like a cooling one, but no
@@ -33,7 +34,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 			blockedModels,
 			fullProviders,
 		});
-		if (nextModel) return buildRoute({ ticket, config, type, typeSource, model: nextModel, history, onExceed, capRemaining: true });
+		if (nextModel) return buildRoute({ ticket, config, type, typeSource, model: nextModel, history, onExceed });
 	}
 
 	const picked = pickModel({ ticket, config, routing, tierName, cooldowns, now: at, blockedModels, fullProviders });
@@ -58,7 +59,7 @@ export function planShift({ ticket, config, history = {}, cooldowns = [], now = 
 	});
 }
 
-function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierName, thinking, history, onExceed, capRemaining = false }) {
+function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierName, thinking, history, onExceed }) {
 	const ref = modelRef ?? parseModelRef(model);
 	const tier = tierName ?? tierForModel(model, config);
 	const profile = config.models?.[model];
@@ -72,10 +73,12 @@ function buildRoute({ ticket, config, type, typeSource, model, modelRef, tierNam
 	const ticketBudget = resolveTicketBudget(ticket, config);
 	// Lift the union of the top-level, tier, profile and backend `unlimited` lists from the
 	// shift budget and from the ticket budget that caps it: that route runs without them.
+	// The ticket budget is a total across shifts: every shift (a retry, a handoff, a limit
+	// retry) is capped by what the earlier ones left of it (`history.ticketUsage`).
 	const lifted = liftedFor({ model, tier }, config);
 	const budget = capBudget(
 		liftLimits(mergeBudgets(config.budgets?.default, config.tiers?.[tier]?.budget, config.budgets?.models?.[model], profile?.budget), lifted),
-		liftLimits(capRemaining ? capBudgetRemaining(ticketBudget, history.ticketUsage) : ticketBudget, lifted),
+		liftLimits(capBudgetRemaining(ticketBudget, history?.ticketUsage), lifted),
 	);
 	return {
 		backend: ref.backend,

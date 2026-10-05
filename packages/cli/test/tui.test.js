@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,9 +8,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { openRunState } from "shiftwork-core";
-import { collectDashboardState, dashboardLayout, formatLogLine, renderDashboard, tailShiftLog } from "../src/dashboard.js";
+import { collectDashboardState, createShiftLogger, currentShiftLogName, dashboardLayout, formatLogLine, LOG_TAIL_BYTES, renderDashboard, tailShiftLog } from "../src/dashboard.js";
 import { queueRows } from "../src/tui-controls.js";
-import { interactive, loadPiTui } from "../src/tui.js";
+import { interactive, loadPiTui, RESTORE_TERMINAL, restoreTerminalOnExit, tui, tuiScreen } from "../src/tui.js";
 
 const parallelRunState = fileURLToPath(new URL("./fixtures/parallel-run-state.json", import.meta.url));
 
@@ -89,8 +90,8 @@ test("dashboard: a parallel: 2 run state lists every worker (fixture from a real
 	// The fixture was captured from a live parallel: 2 run; its runner pid is long
 	// gone, so this process stands in to keep the run live for the reader.
 	for (const runner of fixture.runners) runner.pid = process.pid;
-	await mkdir(join(root, ".pi"), { recursive: true });
-	await writeFile(join(root, ".pi", "shiftwork-run.json"), JSON.stringify(fixture));
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
+	await writeFile(join(root, ".shiftwork", "shiftwork-run.json"), JSON.stringify(fixture));
 
 	const run = await openRunState(root).read();
 	const frame = renderDashboard({ ...base, run }).join("\n");
@@ -666,9 +667,9 @@ test("collectDashboardState: tails the selected worker's log, else the first", a
 	await mkdir(join(root, ".scratch", "f", "issues"), { recursive: true });
 	await writeFile(join(root, ".scratch", "f", "issues", "01-first.md"), "# 01: First\n\n**Status:** claimed\n");
 	await writeFile(join(root, ".scratch", "f", "issues", "02-second.md"), "# 02: Second\n\n**Status:** claimed\n");
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	await writeFile(
-		join(root, ".pi", "shiftwork-run.json"),
+		join(root, ".shiftwork", "shiftwork-run.json"),
 		JSON.stringify({
 			runners: [
 				{
@@ -779,7 +780,7 @@ test("collectDashboardState: open details read the ticket body and the latest sh
 	assert.match(askFrame, /Reason: need the prod API key before anything else/);
 });
 
-test("collectDashboardState: the GitHub tab's rows come from .pi/shiftwork-github.json, the state from the tickets", async () => {
+test("collectDashboardState: the GitHub tab's rows come from .shiftwork/shiftwork-github.json, the state from the tickets", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-tui-gh-"));
 	const body = (title, status) => `# ${title}\n\n**Blocked by:** None\n\n**Status:** ${status}\n\n**Type:** code\n`;
 	const feature = async (name, tickets) => {
@@ -791,10 +792,10 @@ test("collectDashboardState: the GitHub tab's rows come from .pi/shiftwork-githu
 	await feature("gh-10-question", [["02-thing.md", "Thing", "needs-info"]]);
 	await feature("gh-11-done", [["02-thing.md", "Thing", "resolved"]]);
 	await feature("gh-12-closed", [["02-thing.md", "Thing", "resolved"]]);
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	const entry = (number, feature, title, posted) => ({ number, feature, title, importedAt: "2026-10-01T10:00:00Z", lastCommentId: null, posted });
 	await writeFile(
-		join(root, ".pi", "shiftwork-github.json"),
+		join(root, ".shiftwork", "shiftwork-github.json"),
 		JSON.stringify({
 			syncedAt: "2026-10-01T11:55:00Z",
 			issues: {
@@ -828,7 +829,7 @@ test("collectDashboardState: the GitHub tab's rows come from .pi/shiftwork-githu
 	assert.match(renderDashboard({ ...state }).join("\n"), /GitHub: 5 issues · last sync 5m ago/); // the plain frame keeps the section
 
 	// An unreadable state file yields no rows, never a crash.
-	await writeFile(join(root, ".pi", "shiftwork-github.json"), "not json");
+	await writeFile(join(root, ".shiftwork", "shiftwork-github.json"), "not json");
 	const broken = await collectDashboardState(root, { now });
 	assert.deepEqual(broken.github, { issues: [], syncedAt: null });
 });
@@ -850,6 +851,118 @@ test("tailShiftLog: a missing log file gives an empty tail, not a crash", async 
 	assert.equal(await tailShiftLog(root, null), null);
 });
 
+test("tailShiftLog: reads only the log's last bytes, starting at a whole line", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-bigl-"));
+	await mkdir(join(root, "logs", "f", "01"), { recursive: true });
+	const line = (n) => JSON.stringify({ at: "2026-10-01T11:00:00Z", type: "turn", usage: { totalTokens: n }, pad: "x".repeat(200) });
+	const count = Math.ceil((LOG_TAIL_BYTES * 3) / line(0).length);
+	await writeFile(join(root, "logs", "f", "01", "attempt-1.jsonl"), `${Array.from({ length: count }, (_, i) => line(i)).join("\n")}\n`);
+	const log = await tailShiftLog(root, { workers: [{ ticket: { feature: "f", number: "01" }, attempt: 1 }] }, 3);
+	assert.deepEqual(log.lines, [count - 3, count - 2, count - 1].map((n) => `11:00:00 turn · ${n} tokens`));
+});
+
+test("tailShiftLog: tails the newest file of the worker's attempt, attempt-<n>.<k>.jsonl included", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-logk-"));
+	const dir = join(root, "logs", "f", "01");
+	await mkdir(dir, { recursive: true });
+	const turn = (n) => `${JSON.stringify({ at: "2026-10-01T11:00:00Z", type: "turn", usage: { totalTokens: n } })}\n`;
+	await writeFile(join(dir, "attempt-1.jsonl"), turn(1));
+	await writeFile(join(dir, "attempt-1.2.jsonl"), turn(2));
+	await writeFile(join(dir, "attempt-1.10.jsonl"), turn(10));
+	await writeFile(join(dir, "attempt-11.jsonl"), turn(11));
+	assert.equal(await currentShiftLogName(dir, 1), "attempt-1.10.jsonl");
+	assert.equal(await currentShiftLogName(dir, 2), "attempt-2.jsonl");
+	const log = await tailShiftLog(root, { workers: [{ ticket: { feature: "f", number: "01" }, attempt: 1 }] });
+	assert.equal(log.path, join("logs", "f", "01", "attempt-1.10.jsonl"));
+	assert.deepEqual(log.lines, ["11:00:00 turn · 10 tokens"]);
+});
+
+test("createShiftLogger: a file per shift, never an earlier run's; a start event names backend, model and tier; extension UI requests dropped", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-shiftlog-"));
+	const dir = join(root, "logs", "f", "01");
+	await mkdir(dir, { recursive: true });
+	await writeFile(join(dir, "attempt-1.jsonl"), '{"type":"turn","from":"an earlier run"}\n');
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
+	const runState = (model, shift) =>
+		writeFile(
+			join(root, ".shiftwork", "shiftwork-run.json"),
+			JSON.stringify({ runners: [{ pid: 4242, workers: [{ ticket: { feature: "f", number: "01" }, attempt: 1, shift, model, tier: "smart" }] }] }),
+		);
+	const ticket = { feature: "f", number: "01" };
+	const log = createShiftLogger(root, { pid: 4242, now: () => new Date("2026-10-01T12:00:00Z") });
+
+	log({ ticket, attempt: 1, event: { type: "probe", provider: "grok", ok: true } });
+	await runState("grok:grok-4.6", 1);
+	log({ ticket, attempt: 1, event: { type: "raw", event: { type: "extension_ui_request", id: "x" } } });
+	log({ ticket, attempt: 1, event: { type: "turn", usage: { totalTokens: 5 } } });
+	log({ ticket, attempt: 1, event: { type: "end", stopReason: "stop" } });
+	await runState("glm-5.3", 2);
+	log({ ticket, attempt: 1, event: { type: "turn", usage: { totalTokens: 7 } } });
+
+	const read = async (name) => (await readFile(join(dir, name), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+	assert.deepEqual(await read("attempt-1.jsonl"), [{ type: "turn", from: "an earlier run" }]);
+	const first = await read("attempt-1.2.jsonl");
+	assert.deepEqual(first.map((e) => e.type), ["probe", "start", "turn", "end"]);
+	assert.deepEqual(first[1], {
+		at: "2026-10-01T12:00:00.000Z",
+		type: "start",
+		backend: "grok",
+		model: "grok:grok-4.6",
+		tier: "smart",
+		attempt: 1,
+		shift: 1,
+		runId: "2026-10-01T12:00:00.000Z",
+		pid: 4242,
+	});
+	const second = await read("attempt-1.3.jsonl");
+	assert.deepEqual(second.map((e) => e.type), ["start", "turn"]);
+	assert.equal(second[0].backend, "pi");
+	assert.equal(second[0].model, "glm-5.3");
+	assert.equal(await currentShiftLogName(dir, 1), "attempt-1.3.jsonl");
+	assert.equal(formatLogLine(JSON.stringify(first[1])), "12:00:00 start · grok:grok-4.6 · smart · attempt 1");
+});
+
+test("createShiftLogger: dual candidates running at once get their own files and their own start events", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-shiftlog-dual-"));
+	const dir = join(root, "logs", "f", "01");
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
+	await writeFile(
+		join(root, ".shiftwork", "shiftwork-run.json"),
+		JSON.stringify({
+			runners: [
+				{
+					pid: 4242,
+					workers: [
+						{ ticket: { feature: "f", number: "01" }, attempt: 1, shift: "A", model: "grok:grok-4.6", tier: "standard" },
+						{ ticket: { feature: "f", number: "01" }, attempt: 1, shift: "B", model: "claude:claude-haiku-4-5", tier: "standard" },
+					],
+				},
+			],
+		}),
+	);
+	const ticket = { feature: "f", number: "01" };
+	const log = createShiftLogger(root, { pid: 4242, now: () => new Date("2026-10-01T12:00:00Z") });
+	// Interleaved, as two parallel candidates write them.
+	log({ ticket, attempt: 1, dual: "A", event: { type: "tool", name: "read_file", input: "a" } });
+	log({ ticket, attempt: 1, dual: "B", event: { type: "tool", name: "Read", input: "b" } });
+	log({ ticket, attempt: 1, dual: "A", event: { type: "end", stopReason: "stop" } });
+	log({ ticket, attempt: 1, dual: "B", event: { type: "end", stopReason: "stop" } });
+
+	const read = async (name) => (await readFile(join(dir, name), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+	const a = await read("attempt-1-a.jsonl");
+	const b = await read("attempt-1-b.jsonl");
+	assert.deepEqual(a.map((e) => e.type), ["start", "tool", "end"]);
+	assert.deepEqual(b.map((e) => e.type), ["start", "tool", "end"]);
+	assert.equal(a[0].model, "grok:grok-4.6");
+	assert.equal(a[0].shift, "A");
+	assert.equal(b[0].model, "claude:claude-haiku-4-5");
+	assert.equal(b[0].backend, "claude");
+	assert.equal(b[0].shift, "B");
+	assert.equal(a[1].input, "a");
+	assert.equal(b[1].input, "b");
+	assert.equal(existsSync(join(dir, "attempt-1.jsonl")), false, "no shared file");
+});
+
 test("formatLogLine: known events are compact, junk passes through", () => {
 	assert.equal(formatLogLine(JSON.stringify({ at: "2026-10-01T11:59:58.123Z", type: "turn", usage: { totalTokens: 120 } })), "11:59:58 turn · 120 tokens");
 	assert.equal(formatLogLine(JSON.stringify({ at: "2026-10-01T11:59:59Z", type: "wait", until: "2026-10-01T12:05:00Z" })), "11:59:59 wait · until 12:05:00");
@@ -869,9 +982,9 @@ test("shiftwork tui --once prints one frame and exits", async () => {
 		join(root, ".scratch", "shipped", "issues", "01-old.md"),
 		"# 01: Old\n\n**Blocked by:** None\n\n**Status:** resolved\n",
 	);
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	await writeFile(
-		join(root, ".pi", "shiftwork-run.json"),
+		join(root, ".shiftwork", "shiftwork-run.json"),
 		JSON.stringify({
 			runners: [
 				{
@@ -1086,6 +1199,29 @@ class StubTuiAltScreen {
 	}
 }
 
+/** Colour assertions must not depend on the parent shell's NO_COLOR. */
+async function withNoColorUnset(body) {
+	const previous = process.env.NO_COLOR;
+	delete process.env.NO_COLOR;
+	try {
+		return await body();
+	} finally {
+		if (previous === undefined) delete process.env.NO_COLOR;
+		else process.env.NO_COLOR = previous;
+	}
+}
+
+/** Quit a session even when an assertion already failed, so its timer cannot outlive the test. */
+async function finishInteractive(terminal, done) {
+	if (!done) return;
+	terminal.send("q");
+	try {
+		await done;
+	} catch {
+		// Stopping is what matters; the test already recorded the failure.
+	}
+}
+
 test("interactive: stub terminal size, one resize, a key chunk reaching handleKey", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-tui-stub-"));
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
@@ -1112,36 +1248,41 @@ test("interactive: stub terminal size, one resize, a key chunk reaching handleKe
 		},
 	};
 
-	const done = interactive(root, kit, { terminal, onKey: (key) => keys.push(key) });
+	await withNoColorUnset(async () => {
+		const done = interactive(root, kit, { terminal, onKey: (key) => keys.push(key) });
+		try {
+			const first = await waitFor(() => (text?.frames.length ? text.text : false));
+			const firstLines = first.split("\n");
+			assert.ok(firstLines.length <= 24, `first frame ${firstLines.length} lines`);
+			for (const line of firstLines) {
+				assert.ok(stripSgr(line).length <= 80, `first frame line ${stripSgr(line).length} > 80`);
+			}
+			assert.match(first, /\[1 Queue\]/);
+			assert.match(first, /\x1b\[7m/); // colour on when NO_COLOR is unset, whatever the parent shell set
 
-	const first = await waitFor(() => (text?.frames.length ? text.text : false));
-	const firstLines = first.split("\n");
-	assert.ok(firstLines.length <= 24, `first frame ${firstLines.length} lines`);
-	for (const line of firstLines) {
-		assert.ok(stripSgr(line).length <= 80, `first frame line ${stripSgr(line).length} > 80`);
-	}
-	assert.match(first, /\[1 Queue\]/);
-	assert.match(first, /\x1b\[7m/); // colour on by default
+			const before = text.frames.length;
+			terminal.resize(40, 10);
+			const resized = await waitFor(() => (text.frames.length > before ? text.text : false));
+			const resizedLines = resized.split("\n");
+			assert.ok(resizedLines.length <= 10, `resized frame ${resizedLines.length} lines`);
+			for (const line of resizedLines) {
+				assert.ok(stripSgr(line).length <= 40, `resized line ${stripSgr(line).length} > 40: ${line}`);
+			}
 
-	const before = text.frames.length;
-	terminal.resize(40, 10);
-	const resized = await waitFor(() => (text.frames.length > before ? text.text : false));
-	const resizedLines = resized.split("\n");
-	assert.ok(resizedLines.length <= 10, `resized frame ${resizedLines.length} lines`);
-	for (const line of resizedLines) {
-		assert.ok(stripSgr(line).length <= 40, `resized line ${stripSgr(line).length} > 40: ${line}`);
-	}
+			terminal.send("\x1b[B\x1b[B2");
+			await waitFor(() => keys.includes("2"));
+			assert.deepEqual(
+				keys.filter((k) => k === "down" || k === "2"),
+				["down", "down", "2"],
+			);
 
-	terminal.send("\x1b[B\x1b[B2");
-	await waitFor(() => keys.includes("2"));
-	assert.deepEqual(
-		keys.filter((k) => k === "down" || k === "2"),
-		["down", "down", "2"],
-	);
-
-	terminal.send("q");
-	assert.equal(await done, 0);
-	assert.equal(terminal.stopped, true);
+			terminal.send("q");
+			assert.equal(await done, 0);
+			assert.equal(terminal.stopped, true);
+		} finally {
+			await finishInteractive(terminal, done);
+		}
+	});
 });
 
 test("interactive: a click event delivered to the layout root's handleMouse changes the view", async () => {
@@ -1175,35 +1316,39 @@ test("interactive: a click event delivered to the layout root's handleMouse chan
 		},
 	};
 	const done = interactive(root, kit, { terminal });
-	const first = await waitFor(() => (text?.frames.length ? text.text : false));
-	const header = () => stripSgr(text.text.split("\n")[0]);
+	try {
+		const first = await waitFor(() => (text?.frames.length ? text.text : false));
+		const header = () => stripSgr(text.text.split("\n")[0]);
 
-	// A click on a tab label (line 0) switches tabs.
-	const agentsX = header().indexOf("2 Agents");
-	assert.ok(agentsX >= 0, header());
-	assert.deepEqual(ui.layoutRoot.handleMouse({ type: "click", button: "left", x: agentsX + 1, y: 0 }), { handled: true });
-	await waitFor(() => header().includes("[2 Agents]"));
+		// A click on a tab label (line 0) switches tabs.
+		const agentsX = header().indexOf("2 Agents");
+		assert.ok(agentsX >= 0, header());
+		assert.deepEqual(ui.layoutRoot.handleMouse({ type: "click", button: "left", x: agentsX + 1, y: 0 }), { handled: true });
+		await waitFor(() => header().includes("[2 Agents]"));
 
-	// And a click on the Queue label switches back.
-	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: header().indexOf("1 Queue") + 1, y: 0 });
-	await waitFor(() => header().includes("[1 Queue]"));
+		// And a click on the Queue label switches back.
+		ui.layoutRoot.handleMouse({ type: "click", button: "left", x: header().indexOf("1 Queue") + 1, y: 0 });
+		await waitFor(() => header().includes("[1 Queue]"));
 
-	// A click on a list row moves the cursor there; a second click on it opens the details.
-	const rowY = text.text.split("\n").findIndex((line) => /02 Second/.test(stripSgr(line)));
-	assert.ok(rowY > 0, text.text);
-	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
-	await waitFor(() => stripSgr(text.text.split("\n")[rowY]).startsWith(">")); // the cursor row
-	ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
-	await waitFor(() => /demo\/02 · Second · ● next #2/.test(stripSgr(text.text))); // the details view, its first line carrying the status column
+		// A click on a list row moves the cursor there; a second click on it opens the details.
+		const rowY = text.text.split("\n").findIndex((line) => /02 Second/.test(stripSgr(line)));
+		assert.ok(rowY > 0, text.text);
+		ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
+		await waitFor(() => stripSgr(text.text.split("\n")[rowY]).startsWith(">")); // the cursor row
+		ui.layoutRoot.handleMouse({ type: "click", button: "left", x: 10, y: rowY });
+		await waitFor(() => /demo\/02 · Second · ● next #2/.test(stripSgr(text.text))); // the details view, its first line carrying the status column
 
-	// The wheel moves the cursor too: esc closes the details, then the wheel scrolls up.
-	terminal.send("\x1b");
-	await waitFor(() => !/demo\/02 · Second/.test(stripSgr(text.text)));
-	ui.layoutRoot.handleMouse({ type: "wheel", button: "none", x: 10, y: rowY, wheelDelta: -1 });
-	await waitFor(() => stripSgr(text.text.split("\n")[rowY - 1]).startsWith(">"));
+		// The wheel moves the cursor too: esc closes the details, then the wheel scrolls up.
+		terminal.send("\x1b");
+		await waitFor(() => !/demo\/02 · Second/.test(stripSgr(text.text)));
+		ui.layoutRoot.handleMouse({ type: "wheel", button: "none", x: 10, y: rowY, wheelDelta: -1 });
+		await waitFor(() => stripSgr(text.text.split("\n")[rowY - 1]).startsWith(">"));
 
-	terminal.send("q");
-	assert.equal(await done, 0);
+		terminal.send("q");
+		assert.equal(await done, 0);
+	} finally {
+		await finishInteractive(terminal, done);
+	}
 });
 
 test("interactive: NO_COLOR disables colour in the interactive view", async () => {
@@ -1228,18 +1373,50 @@ test("interactive: NO_COLOR disables colour in the interactive view", async () =
 			},
 		};
 		const done = interactive(root, kit, { terminal });
-		const first = await waitFor(() => (text?.frames.length ? text.text : false));
-		terminal.send("q");
-		assert.equal(await done, 0);
-		return first;
+		try {
+			const first = await waitFor(() => (text?.frames.length ? text.text : false));
+			terminal.send("q");
+			assert.equal(await done, 0);
+			return first;
+		} finally {
+			await finishInteractive(terminal, done);
+		}
 	};
 
-	assert.match(await frame(), /\x1b\[7m/); // colour on without NO_COLOR
+	const previous = process.env.NO_COLOR;
+	delete process.env.NO_COLOR;
 	try {
+		assert.match(await frame(), /\x1b\[7m/); // colour on when this test clears NO_COLOR
 		process.env.NO_COLOR = "1";
 		assert.doesNotMatch(await frame(), /\x1b\[/); // NO_COLOR turns it off
 	} finally {
-		delete process.env.NO_COLOR;
+		if (previous === undefined) delete process.env.NO_COLOR;
+		else process.env.NO_COLOR = previous;
+	}
+});
+
+test("interactive's refresh timer does not keep the process alive", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-timer-"));
+	const terminal = new StubTerminal({ columns: 80, rows: 24 });
+	let text;
+	const kit = {
+		ProcessTerminal: class {},
+		TuiAltScreen: StubTuiAltScreen,
+		Text: class extends StubText {
+			constructor(initial) {
+				super(initial);
+				text = this;
+			}
+		},
+	};
+	const before = process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
+	const done = interactive(root, kit, { terminal });
+	try {
+		await waitFor(() => (text?.frames.length ? text.text : false));
+		const after = process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
+		assert.equal(after, before);
+	} finally {
+		await finishInteractive(terminal, done);
 	}
 });
 
@@ -1252,4 +1429,139 @@ test("dashboardLayout: a terminal shorter than the header and footer still yield
 			assert.ok(Array.isArray(layout.rows));
 		}
 	}
+});
+
+/** A kit with the stub terminal's Text; `screen` overrides which screen class names it exports. */
+function stubKit(screens, onText) {
+	return {
+		ProcessTerminal: class {},
+		...screens,
+		Text: class extends StubText {
+			constructor(initial) {
+				super(initial);
+				onText(this);
+			}
+		},
+	};
+}
+
+test("tuiScreen: TuiAltScreen, then TUI, then TuiMainScreen when the export is a function", () => {
+	class A {}
+	class B {}
+	class C {}
+	assert.equal(tuiScreen({ TuiAltScreen: A, TUI: B, TuiMainScreen: C }), A);
+	assert.equal(tuiScreen({ TUI: B, TuiMainScreen: C }), B);
+	assert.equal(tuiScreen({ TuiAltScreen: "nope", TuiMainScreen: C }), C);
+	assert.equal(tuiScreen({ ProcessTerminal: A, Text: B }), undefined);
+	assert.equal(tuiScreen(undefined), undefined);
+});
+
+test("interactive: a kit with TUI and no TuiAltScreen (pi-tui 0.80, github#16) opens the dashboard", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-080-"));
+	const terminal = new StubTerminal({ columns: 80, rows: 24 });
+	let text;
+	let constructed;
+	class StubTUI extends StubTuiAltScreen {
+		constructor(t, showHardwareCursor) {
+			super(t);
+			constructed = { showHardwareCursor };
+		}
+	}
+	// pi-tui 0.80's TUI has no setLayoutRoot: the root goes in through addChild.
+	StubTUI.prototype.setLayoutRoot = undefined;
+	const kit = stubKit({ TUI: StubTUI }, (t) => (text = t));
+	const done = interactive(root, kit, { terminal });
+	try {
+		await waitFor(() => (text?.frames.length ? text.text : false));
+		assert.deepEqual(constructed, { showHardwareCursor: false });
+		terminal.send("q");
+		assert.equal(await done, 0);
+		assert.equal(terminal.stopped, true);
+	} finally {
+		await finishInteractive(terminal, done);
+	}
+});
+
+test("tui: a loaded kit with no function screen class uses the plain-text fallback", async () => {
+	const calls = [];
+	const code = await tui([], {
+		tty: true,
+		loaded: { kit: { ProcessTerminal: class {}, Text: class {}, TuiAltScreen: undefined } },
+		interactive: async () => calls.push("interactive"),
+		fallback: async (_root, error) => {
+			calls.push(`fallback: ${error.message}`);
+			return 0;
+		},
+	});
+	assert.equal(code, 0);
+	assert.deepEqual(calls, ["fallback: pi-tui exports no screen class (TuiAltScreen, TUI or TuiMainScreen)"]);
+});
+
+test("interactive: SIGTERM restores the terminal (stop, mouse off, main screen) and exits 143; q removes the handlers", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-tui-signal-"));
+	const listeners = () => ["SIGTERM", "SIGHUP", "exit", "uncaughtExceptionMonitor"].map((e) => process.listenerCount(e));
+	const before = listeners();
+
+	// A kill mid-session.
+	{
+		const terminal = new StubTerminal({ columns: 80, rows: 24 });
+		let text;
+		let ui;
+		const kit = stubKit(
+			{
+				TuiAltScreen: class extends StubTuiAltScreen {
+					constructor(t) {
+						super(t);
+						ui = this;
+					}
+				},
+			},
+			(t) => (text = t),
+		);
+		const exits = [];
+		const done = interactive(root, kit, { terminal, exit: (code) => exits.push(code) });
+		try {
+			await waitFor(() => (text?.frames.length ? text.text : false));
+			assert.notDeepEqual(listeners(), before);
+			process.emit("SIGTERM", "SIGTERM");
+			assert.deepEqual(exits, [143]);
+			assert.equal(ui.stopped, true);
+			assert.ok(terminal.writes.includes(RESTORE_TERMINAL));
+			assert.deepEqual(listeners(), before);
+		} finally {
+			await finishInteractive(terminal, done);
+		}
+	}
+
+	// A normal q: stopped once, handlers gone, nothing written by hand.
+	{
+		const terminal = new StubTerminal({ columns: 80, rows: 24 });
+		let text;
+		const kit = stubKit({ TuiAltScreen: StubTuiAltScreen }, (t) => (text = t));
+		const done = interactive(root, kit, { terminal, exit: () => assert.fail("no exit on q") });
+		try {
+			await waitFor(() => (text?.frames.length ? text.text : false));
+			terminal.send("q");
+			assert.equal(await done, 0);
+			assert.deepEqual(listeners(), before);
+			assert.ok(!terminal.writes.includes(RESTORE_TERMINAL));
+		} finally {
+			await finishInteractive(terminal, done);
+		}
+	}
+});
+
+test("restoreTerminalOnExit: restores once on an uncaught exception, hooks exit; detach removes the handlers", () => {
+	let restored = 0;
+	const exitHandlers = process.listenerCount("exit");
+	const detach = restoreTerminalOnExit(() => restored++, () => assert.fail("no exit"));
+	try {
+		assert.equal(process.listenerCount("exit"), exitHandlers + 1);
+		process.emit("uncaughtExceptionMonitor", new Error("boom"), "uncaughtException");
+		process.emit("uncaughtExceptionMonitor", new Error("again"), "uncaughtException");
+		assert.equal(restored, 1);
+	} finally {
+		detach();
+	}
+	assert.equal(process.listenerCount("exit"), exitHandlers);
 });

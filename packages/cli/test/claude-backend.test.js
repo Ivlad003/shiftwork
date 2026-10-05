@@ -60,9 +60,11 @@ test("a recorded real Claude Code transcript maps to two turns, the reply text, 
 });
 
 test("a usage-limit error cools claude and is reported as an error event", { timeout: 30_000 }, async () => {
+	// A reset time in the future: one in the past is no reset hint.
+	const resetsAt = Math.floor(Date.now() / 1000) + 3600;
 	const { events } = await shiftWith({
 		script: [
-			{ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1790812800 } },
+			{ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt } },
 			{ type: "result", subtype: "error_during_execution", is_error: true, result: "Claude AI usage limit reached", num_turns: 0 },
 		],
 	});
@@ -73,7 +75,7 @@ test("a usage-limit error cools claude and is reported as an error event", { tim
 	const { classifyError } = await import("shiftwork-core");
 	const classified = classifyError(error.message);
 	assert.equal(classified?.kind, "usage");
-	assert.equal(classified?.resetAt?.toISOString(), "2026-10-01T00:00:00.000Z");
+	assert.equal(classified?.resetAt?.toISOString(), new Date(resetsAt * 1000).toISOString());
 	assert.equal(events.at(-1).type, "end");
 });
 
@@ -98,7 +100,7 @@ test("a missing claude binary returns an error shift that ends immediately", { t
 	assert.ok(shift.warnings.some((w) => /not available/.test(w)));
 });
 
-test("preloaded skills are prepended to the system prompt passed to claude", { timeout: 30_000 }, async () => {
+test("the worker prompt and preloaded skills go to claude as --append-system-prompt-file <file>", { timeout: 30_000 }, async () => {
 	const skill = await mkdtemp(join(tmpdir(), "sw-claude-skill-"));
 	await mkdir(skill, { recursive: true });
 	await writeFile(join(skill, "SKILL.md"), "---\nname: alpha\n---\nAlpha preloaded body.");
@@ -111,7 +113,9 @@ test("preloaded skills are prepended to the system prompt passed to claude", { t
 		`#!/usr/bin/env node
 const fs = require("fs");
 const args = process.argv.slice(2);
-const idx = args.indexOf("--append-system-prompt");
+// --append-system-prompt takes the prompt text itself; a file path goes to --append-system-prompt-file.
+if (args.includes("--append-system-prompt")) throw new Error("--append-system-prompt was given a file path");
+const idx = args.indexOf("--append-system-prompt-file");
 const workerFile = args[idx + 1];
 const worker = fs.readFileSync(workerFile, "utf8");
 fs.writeFileSync(process.env.SHIFTWORK_RECORD_SYSTEM ?? "missing", worker);
@@ -190,4 +194,73 @@ test("the Claude mapper counts an assistant message once across its lines and ig
 	]);
 	assert.deepEqual(second, [{ type: "text", text: "hi" }]);
 	assert.deepEqual(map({ type: "rate_limit_event", rate_limit_info: { status: "allowed" } }), []);
+});
+
+test("a rate-limit warning is not an error: only a blocking status such as rejected is", () => {
+	const map = createClaudeMapper();
+	const event = (status) => ({ type: "rate_limit_event", rate_limit_info: { status, rateLimitType: "five_hour", resetsAt: 1790812800 } });
+	assert.deepEqual(map(event("allowed_warning")), []);
+	assert.deepEqual(map(event("warning")), []);
+	const [rejected] = map(event("rejected"));
+	assert.equal(rejected.type, "error");
+	assert.match(rejected.message, /usage limit reached \(rejected\)/);
+});
+
+test("a failing claude reports its exit code and the tail of its stderr", { timeout: 30_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-claude-fail-"));
+	const binDir = await mkdtemp(join(tmpdir(), "sw-claude-bin-"));
+	await writeFile(join(binDir, "claude"), `#!/bin/sh\necho "boom: something broke" >&2\nexit 7\n`);
+	await chmod(join(binDir, "claude"), 0o755);
+	const backend = createClaudeBackend({ command: "claude", env: { PATH: `${binDir}:${process.env.PATH}` } });
+	const shift = await backend.startShift({ cwd, route: { model: "sonnet", skills: { paths: [], preload: [], restricted: false } }, prompt: "p", systemPrompt: "s" });
+	const events = [];
+	for await (const event of shift.events) events.push(event);
+	assert.ok(events.some((e) => e.type === "error" && /boom: something broke/.test(e.message)));
+	assert.deepEqual(events.at(-1), { type: "end", stopReason: "error" });
+});
+
+test("abort stops claude and everything it started (its process group)", { timeout: 30_000 }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "sw-claude-abort-"));
+	const binDir = await mkdtemp(join(tmpdir(), "sw-claude-bin-"));
+	const pidFile = join(cwd, "grandchild.pid");
+	await writeFile(join(binDir, "claude"), `#!/bin/sh\nsleep 60 &\necho $! > "${pidFile}"\nwait\n`);
+	await chmod(join(binDir, "claude"), 0o755);
+	const backend = createClaudeBackend({ command: "claude", env: { PATH: `${binDir}:${process.env.PATH}` } });
+	const shift = await backend.startShift({ cwd, route: { model: "sonnet", skills: { paths: [], preload: [], restricted: false } }, prompt: "p", systemPrompt: "s" });
+	let grandchild;
+	for (let i = 0; i < 100 && !grandchild; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		grandchild = Number(await readFile(pidFile, "utf8").catch(() => "")) || undefined;
+	}
+	assert.ok(grandchild);
+	await shift.abort();
+	const alive = () => {
+		try {
+			process.kill(grandchild, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	for (let i = 0; i < 100 && alive(); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+	assert.equal(alive(), false);
+	const events = [];
+	for await (const event of shift.events) events.push(event);
+	assert.deepEqual(events.at(-1), { type: "end", stopReason: "aborted" });
+});
+
+test("the Claude mapper turns tool_use blocks into tool events: the path for file tools, the command for Bash", () => {
+	const map = createClaudeMapper();
+	const lines = readFileSync(new URL("./fixtures/claude-stream.jsonl", import.meta.url), "utf8").split("\n").filter(Boolean);
+	const tools = lines.flatMap((line) => map(JSON.parse(line))).filter((e) => e.type === "tool");
+	assert.deepEqual(tools, [{ type: "tool", name: "Write", input: "/work/hi.txt" }]);
+
+	const bash = createClaudeMapper()({
+		type: "assistant",
+		message: { id: "m2", usage: {}, content: [{ type: "tool_use", id: "t", name: "Bash", input: { command: `npm test ${"x".repeat(600)}` } }] },
+	});
+	const tool = bash.find((e) => e.type === "tool");
+	assert.equal(tool.name, "Bash");
+	assert.equal(tool.input.length, 500, "inputs are truncated to 500 chars");
+	assert.ok(tool.input.startsWith("npm test x"));
 });

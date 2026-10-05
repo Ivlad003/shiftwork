@@ -282,3 +282,66 @@ test("the spec table ignores markers mentioned in prose and fills the block on i
 	assert.ok(text.includes("The table lives between `<!-- shiftwork:tickets:start -->` and `<!-- shiftwork:tickets:end -->`."));
 	assert.match(text, /<!-- shiftwork:tickets:start -->\n\| NN \|[\s\S]*\| 01 \| A \| claimed \|[\s\S]*\n<!-- shiftwork:tickets:end -->\n$/);
 });
+
+test("parallel claims of a stale claim: exactly one takes it over", async () => {
+	// Staggered starts interleave check → unlink → create across claimants; repeat to hit the window.
+	for (let round = 0; round < 10; round++) {
+		const root = await makeRepo({ "f/01-a.md": ticket("01", "A") });
+		const tracker = openTracker(root);
+		const [first] = await tracker.frontier();
+		await tracker.claim(first, { pid: await deadPid() });
+		const [orphan] = await tracker.frontier();
+
+		const claims = await Promise.all(
+			Array.from({ length: 8 }, (_, k) => new Promise((resolve) => setTimeout(resolve, k % 4)).then(() => tracker.claim(orphan))),
+		);
+
+		const won = claims.filter(Boolean);
+		assert.equal(won.length, 1, `round ${round}: ${won.length} claimants won`);
+		const owner = JSON.parse(await readFile(won[0].path, "utf8"));
+		assert.equal(owner.token, won[0].token);
+	}
+});
+
+test("parallel createTicket calls in one feature get distinct numbers", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A"), "f/02-b.md": ticket("02", "B") });
+	const tracker = openTracker(root);
+
+	const created = await Promise.all(
+		["x", "y", "z"].map((title) => tracker.createTicket("f", { title, what: "follow-up" })),
+	);
+
+	assert.deepEqual(created.map((t) => t.number).sort(), ["03", "04", "05"]);
+	const files = (await readdir(join(root, ".scratch", "f", "issues"))).filter((f) => f.endsWith(".md")).sort();
+	assert.equal(files.length, 5);
+	assert.deepEqual(files.map((f) => f.slice(0, 2)), ["01", "02", "03", "04", "05"]);
+});
+
+
+test("addBlocker adds a number to the Blocked by line: a None line is replaced, a list extended, a repeat ignored", async () => {
+	const root = await makeRepo({
+		"f/01-a.md": ticket("01", "A"),
+		"f/02-b.md": ticket("02", "B", { blockedBy: "01" }),
+	});
+	const tracker = openTracker(root);
+	const [a, b] = await tracker.list();
+
+	await tracker.addBlocker(a, "03");
+	await tracker.addBlocker(b, "03");
+	await tracker.addBlocker(b, "03");
+
+	const [a2, b2] = await tracker.list();
+	assert.deepEqual(a2.blockedBy, ["03"]);
+	assert.deepEqual(b2.blockedBy, ["01", "03"]);
+	assert.match(await readFile(a.path, "utf8"), /^\*\*Blocked by:\*\* 03$/m);
+	assert.match(await readFile(b.path, "utf8"), /^\*\*Blocked by:\*\* 01, 03$/m);
+	assert.match(await readFile(a.path, "utf8"), /\*\*Status:\*\* ready-for-agent/, "only the Blocked by line changes");
+});
+
+test("createTicket writes the acceptance checkboxes it is given", async () => {
+	const root = await makeRepo({ "f/01-a.md": ticket("01", "A") });
+	const created = await openTracker(root).createTicket("f", { title: "R", what: "read", type: "research", checkboxes: ["the findings answer it"] });
+	const text = await readFile(created.path, "utf8");
+	assert.match(text, /^- \[ \] the findings answer it$/m);
+	assert.doesNotMatch(text, /It works/);
+});

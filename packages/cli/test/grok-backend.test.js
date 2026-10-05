@@ -194,6 +194,7 @@ test("restricted skills are delivered as symlinks in .agents/skills and excluded
 	await writeFile(
 		grokPath,
 		`#!/usr/bin/env node
+for (const n of require("fs").readdirSync(".agents/skills")) require("fs").copyFileSync(".agents/skills/" + n + "/SKILL.md", "seen-skill.md");
 console.log(JSON.stringify({ type: "usage", usage: { input_tokens: 1, output_tokens: 1 } }));
 `,
 	);
@@ -217,8 +218,8 @@ console.log(JSON.stringify({ type: "usage", usage: { input_tokens: 1, output_tok
 	await shift.close?.();
 
 	const symlinkPath = join(cwd, ".agents", "skills", basename(skill));
-	assert.ok(existsSync(symlinkPath), "symlink exists in .agents/skills");
-	assert.equal(await readFile(join(symlinkPath, "SKILL.md"), "utf8"), "Skill body.");
+	assert.equal(await readFile(join(cwd, "seen-skill.md"), "utf8"), "Skill body.", "the agent saw the skill through the link");
+	assert.ok(!existsSync(symlinkPath), "the link is removed when the shift ends");
 	const exclude = await readFile(join(cwd, ".git", "info", "exclude"), "utf8");
 	assert.match(exclude, /^\.agents\/skills\/$/m);
 });
@@ -226,7 +227,7 @@ console.log(JSON.stringify({ type: "usage", usage: { input_tokens: 1, output_tok
 test("the Grok mapper counts one turn per usage event, flushes text and ignores noise", () => {
 	const map = createGrokMapper();
 	assert.deepEqual(map({ type: "available_commands", tools: ["write"], commands: [] }), []);
-	assert.deepEqual(map({ type: "tool_call", toolCallId: "t1", toolName: "write" }), []);
+	assert.deepEqual(map({ type: "tool_call", toolCallId: "t1", toolName: "write" }), [{ type: "tool", name: "write", input: "" }]);
 	assert.deepEqual(map({ type: "text", data: "Hel" }), []);
 	assert.deepEqual(map({ type: "text", data: "lo" }), []);
 	assert.deepEqual(map({ type: "usage", usage: { input_tokens: 100, output_tokens: 5, cache_read_input_tokens: 50, cache_creation_input_tokens: 10, reasoning_tokens: 2 } }), [
@@ -300,3 +301,56 @@ live(
 		assert.deepEqual(events.at(-1), { type: "end", stopReason: "stop" });
 	},
 );
+
+test("in a git worktree, skill links are excluded through git's real exclude file, and a repo-owned path is left alone", { timeout: 30_000 }, async () => {
+	const { execFileSync } = await import("node:child_process");
+	const git = (args, cwd) => execFileSync("git", args, { cwd, stdio: "ignore" });
+	const skills = await mkdtemp(join(tmpdir(), "sw-grok-wt-skills-"));
+	const granted = join(skills, "granted");
+	await mkdir(granted, { recursive: true });
+	await writeFile(join(granted, "SKILL.md"), "Granted body.");
+	// A granted skill whose name collides with a file the repo itself tracks.
+	const owned = join(skills, "owned");
+	await mkdir(owned, { recursive: true });
+	await writeFile(join(owned, "SKILL.md"), "Shiftwork's copy.");
+
+	const repo = await mkdtemp(join(tmpdir(), "sw-grok-wt-repo-"));
+	git(["init", "-q"], repo);
+	git(["config", "user.email", "test@example.com"], repo);
+	git(["config", "user.name", "Test"], repo);
+	await mkdir(join(repo, ".agents", "skills"), { recursive: true });
+	await writeFile(join(repo, ".agents", "skills", "owned"), "repo-owned\n");
+	git(["add", "."], repo);
+	git(["commit", "-q", "-m", "init"], repo);
+	const cwd = join(repo, "..", `${basename(repo)}-wt`);
+	git(["worktree", "add", "-q", cwd, "-b", "wt"], repo);
+
+	const binDir = await mkdtemp(join(tmpdir(), "sw-grok-bin-"));
+	await writeFile(join(binDir, "grok"), "#!/bin/sh\ncp .agents/skills/granted/SKILL.md seen-granted.md\nexit 0\n");
+	await chmod(join(binDir, "grok"), 0o755);
+	const backend = createGrokBackend({ command: "grok", env: { PATH: `${binDir}:${process.env.PATH}` } });
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "grok-4.7", skills: { paths: [granted, owned], preload: [], restricted: true } },
+		prompt: "Do the ticket.",
+		systemPrompt: "sys",
+	});
+	for await (const event of shift.events) {
+		if (event.type === "end") break;
+	}
+	await shift.close?.();
+
+	const exclude = await readFile(join(repo, ".git", "info", "exclude"), "utf8");
+	assert.match(exclude, /^\.agents\/skills\/$/m, "the worktree's exclude lives in the common git dir");
+	assert.equal(await readFile(join(cwd, ".agents", "skills", "owned"), "utf8"), "repo-owned\n", "the repo's file is neither replaced nor removed");
+	assert.equal(await readFile(join(cwd, "seen-granted.md"), "utf8"), "Granted body.", "the agent saw the granted skill");
+});
+
+test("the Grok mapper turns tool_call events into tool events; updates are not new calls", () => {
+	const map = createGrokMapper();
+	const tools = recorded.flatMap((event) => map(event)).filter((e) => e.type === "tool");
+	assert.deepEqual(tools, [{ type: "tool", name: "write", input: "/work/hello.txt" }]);
+
+	const bash = createGrokMapper()({ type: "tool_call", toolCallId: "c1", toolName: "bash", rawInput: { command: "git status" } });
+	assert.deepEqual(bash, [{ type: "tool", name: "bash", input: "git status" }]);
+});

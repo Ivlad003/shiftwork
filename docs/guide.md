@@ -22,9 +22,11 @@ Shiftwork finds pi by itself: the npm package, the `pi` on PATH, and an install 
 
 | File | What it is |
 |---|---|
-| `.pi/shiftwork.json` | Your config: models, tiers, routing, budgets. Everything below goes here. |
-| `.pi/shiftwork-worker.md` | The instructions every agent gets. Edit it to add house rules. |
+| `.shiftwork/shiftwork.json` | Your config: models, tiers, routing, budgets. Everything below goes here. |
+| `.shiftwork/shiftwork-worker.md` | The instructions every agent gets. Edit it to add house rules. |
 | `.pi/settings.json` | pi compaction settings. |
+
+Shiftwork keeps its own files in `.shiftwork/`: the config and worker prompt above, plus the run state (`shiftwork-run.json`), cooldowns (`shiftwork-state.json`), the GitHub import state (`shiftwork-github.json`) and its locks. `.pi/` holds only pi's own files. A repo set up by an earlier version still has these files in `.pi/`: Shiftwork keeps reading them there, prints `shiftwork: using legacy .pi/ — run "shiftwork migrate" to move to .shiftwork/` once, and `shiftwork migrate [--dry-run]` moves them (refused while a runner is live; files already in `.shiftwork/` are skipped; pi's files stay). Once `.shiftwork/` exists, it wins.
 
 A second config at `~/.pi/agent/shiftwork.json` (or `$PI_CODING_AGENT_DIR/shiftwork.json`) applies to every repo; the project file wins field by field.
 
@@ -98,6 +100,7 @@ A ticket without a `Type` gets `defaultType`, unless Jev (a small classifier mod
 | `preferWaitMin` | If a free model will be back within this many minutes, wait for it instead of using a paid one. |
 | `cooldown` | How long a provider rests after a limit when it gives no reset time: `{ "rate": "15m", "usage": "5h", "quota": "24h", "server": "5m" }`. |
 | `maxAttempts` | Failed Verify runs before a ticket becomes `needs-info` (default 3). |
+| `frozen` | Globs of **frozen paths** for every ticket, added to each ticket's own `Frozen` line (default `[]`; section 4). |
 | `verifyTimeoutMin` | Minutes one Verify command may run before it is killed, with everything it started, and the gate fails (default 10). E.g. `"verifyTimeoutMin": 20` for slow test suites. |
 | `probeEveryMin` | Minutes between checks of a guessed cooldown (one without a reset time from the provider): a cheap probe asks the provider whether it is back (default 15). |
 | `probeBeforeTicket` | Probe every guessed cooldown before each ticket, not only every `probeEveryMin` (default true). |
@@ -130,14 +133,14 @@ The `models` section sets options for one model, whichever tier it sits in. The 
 ## 3. Local models (Ollama)
 
 1. Install [Ollama](https://ollama.com), start it (`ollama serve` or the desktop app) and pull a model: `ollama pull qwen2.5-coder:7b`.
-2. Run `npx shiftwork init --ollama`. It finds your models (on `OLLAMA_HOST`, default `http://localhost:11434`), adds an `ollama` provider to `~/.pi/agent/models.json` (your other providers stay) and adds a `local` tier to `.pi/shiftwork.json`.
+2. Run `npx shiftwork init --ollama`. It finds your models (on `OLLAMA_HOST`, default `http://localhost:11434`), adds an `ollama` provider to `~/.pi/agent/models.json` (your other providers stay) and adds a `local` tier to `.shiftwork/shiftwork.json`.
 3. Send some tasks to it: `"routing": { "docs": { "tier": "local" } }`. Or add `ollama/…` models to an existing tier's chain.
 
 Re-run `init --ollama` after pulling new models. If Ollama isn't running, `init` tells you how to start it and changes nothing.
 
 Good to know:
 - Local models are free, so money budgets don't apply to them.
-- If Ollama stops mid-run, the ticket moves to the next model, and the `ollama` provider rests for the `usage` cooldown (5 h by default). After restarting Ollama, delete its entry from `.pi/shiftwork-state.json` to use it right away.
+- If Ollama stops mid-run, the ticket moves to the next model, and the `ollama` provider rests for the `usage` cooldown (5 h by default). After restarting Ollama, delete its entry from `.shiftwork/shiftwork-state.json` to use it right away.
 - `onExceed` `escalate` and `downgrade` only know `quick < standard < premium`. From the `local` tier, use `next` or `same-tier` instead.
 
 ## 4. Writing tickets
@@ -170,8 +173,15 @@ A ticket is `.scratch/<feature>/issues/NN-short-name.md`:
 | `Model` | no | Forces one model, skipping routing. |
 | `Skills` | no | Adds (`+group`) or removes (`-group`) skill groups for this ticket. |
 | `Budget` | no | Limits for this ticket (section 5). |
+| `Frozen` | no | Globs (`*`, `**`, `?`; backtick-quoted, separated by `·` or `,`) of **frozen paths** that no shift of this ticket may change. Added to the config's top-level `"frozen": [...]` list (default empty). |
+
+**Frozen paths.** A shift could make its gate pass by weakening the gate itself: editing the tests, the fixtures or the scripts that `Verify` runs. A `Frozen` line (for example `` **Frozen:** `packages/*/test/fixtures/**` · `package.json` ``), or the config's `frozen` list for every ticket, pins those paths. When the gate passes but the ticket's branch changed a frozen path (committed or not, against the target), the runner does not resolve: the attempt fails like a failed gate, the report says `- Frozen paths changed: <files>`, and the next shift's prompt lists the frozen globs as paths not to change. After `maxAttempts` the ticket goes to `needs-info` with its branch kept. Every shift's prompt names the frozen globs. Without worktrees the check is skipped, and plan and research tickets are never checked. A ticket meant to change its tests simply does not freeze them.
 
 After each shift, Shiftwork appends a report to the ticket's `## Comments`: the model, usage, Verify result and outcome. Agents leave `### Handoff` notes there for the next shift.
+
+**Research first, when needed.** If the work needs reading before coding — an unfamiliar API, an external repo or doc, unclear existing code — write a `Type: research` ticket ahead of the implementation tickets and list it in their `Blocked by`. Its shift investigates and writes the findings (sources, facts, decisions, open questions) to `.scratch/<feature>/research.md`, changing no product code; its Verify is `` `test -s .scratch/<feature>/research.md` ``. Once that file exists, every later shift's prompt carries `- Research: <path>` and the agent reads it if it needs background. A plan ticket from a GitHub issue writes this research ticket as `02` when the issue needs it, and skips it otherwise. A research ticket's gate runs against the repo's tracker, not the worktree's copy of `.scratch/`.
+
+**Research found missing mid-shift.** An implementation shift that finds the missing piece is reading (code, docs, an external API), not a human's answer, ends with `<shiftwork:needs-research reason="…"/>` instead of needs-info. The runner then files the next-numbered `Type: research` ticket in the same feature (`Research: <reason>`, Verify `` `test -s .scratch/<feature>/research.md` ``), adds its number to the ticket's `Blocked by`, and keeps the ticket `ready-for-agent` with its branch: the frontier works the research ticket first, then the ticket again, in the same run, with no human in between. The report says `- Outcome: needs-research: <reason> → <feature>/<NN>`, and it is not a failed attempt. One research rollback per ticket: a second marker is needs-info with its reason, as is the marker under the OpenSpec tracker, which cannot file tickets. When both markers are present, needs-info wins.
 
 You can write tickets by hand, or have an agent write them with the mattpocock skills `/to-spec` and `/to-tickets`. OpenSpec changes (`openspec/changes/`) work too; see the [core README](../packages/core/README.md#openspec-tracker).
 
@@ -203,7 +213,7 @@ Yes, all of these exist. There are two levels:
 
 Shorthands work: `200k tokens`, `1.5M tokens`, `1h`, `1h 30min`, `1h30m`, `1.5h`, and Ukrainian units (`30 хв`, `1 год`, `10 ходів`). A part Shiftwork doesn't understand is ignored, so check with `shiftwork run --dry-run`, which prints each ticket's budget.
 
-Where to set them in `.pi/shiftwork.json`:
+Where to set them in `.shiftwork/shiftwork.json`:
 
 ```json
 "budgets": {
@@ -232,7 +242,7 @@ What happens near and at a limit:
 }
 ```
 
-`to`: `next` (next model in the chain), `same-tier` (another model of the tier), `escalate` / `downgrade` (a tier up or down). `maxHandoffs` (default 3) caps handoffs per ticket.
+`to`: `next` (next model in the chain), `same-tier` (another model of the tier), `escalate` / `downgrade` (a tier up or down). `maxHandoffs` (default 3) caps handoffs per ticket. `maxLimitRetries` (default 10) caps provider-limit shifts in a row on one ticket; at the cap the ticket goes to needs-info. A model whose provider has no key (`No API key found`, 401) is skipped for the rest of the run without spending an attempt.
 
 ### No limits
 
@@ -243,7 +253,7 @@ npx shiftwork run --no-budget              # every limit: turns, tokens, cost, t
 npx shiftwork run --no-limit tokens,time   # only these: tokens, cost, turns, time, context, stall
 ```
 
-Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.pi/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window. The review shift's own budget (`review.budget`, section 7) is never lifted by any of these — only `review.budget` itself does.
+Both shift and ticket limits are lifted, tickets' `Budget:` lines included. The same in `.shiftwork/shiftwork.json`: `"unlimited": true` or `"unlimited": ["tokens", "time"]`; `--no-limit` adds to the config's list. `--dry-run` shows what is left (`budget=-` when nothing is), and the runner says at start which limits are lifted. Without `cost`, paid models spend whatever they spend; without `stall`, a stuck agent keeps going; without `context`, the agent itself handles a full window. The review shift's own budget (`review.budget`, section 7) is never lifted by any of these — only `review.budget` itself does.
 
 Per tier, per model and per backend, `unlimited` takes the same values and lifts **every limit for that route, the ticket's `Budget:` line included**:
 
@@ -267,6 +277,7 @@ Every backend, pi included, has an optional top-level block named like its prefi
 | `timeoutMs` | A safety timeout for the process. Normal limits are budgets (section 5). |
 | `sandbox` | `codex` only, see below. |
 | `root` | `pi` only: pi's package folder, when Shiftwork can't find it by itself (section 1). |
+| `isolateExtensions` | `pi` only. `"auto"` (default): a shift runs without your global pi extensions (widgets, MCP, add-ons) when pi lists its model without them, and with them otherwise, e.g. for a provider an extension registers. `true` always isolates, `false` never does. |
 
 ```json
 "pi":     { "env": { "PI_CODING_AGENT_DIR": "/home/me/.pi/agent-work" } },
@@ -301,7 +312,7 @@ Two things to keep in mind:
 - Agents work in a git worktree, which only has **committed** files. An uncommitted or gitignored `AGENTS.md` (or `CLAUDE.local.md`) isn't there.
 - The worktree is under `~/.cache/shiftwork/worktrees/`, so instruction files in the **parent folders** of your repo aren't picked up. Global ones (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`) work as usual.
 
-On top of these, every agent gets Shiftwork's own `.pi/shiftwork-worker.md`.
+On top of these, every agent gets Shiftwork's own `.shiftwork/shiftwork-worker.md`.
 
 ## 7. Running and watching
 
@@ -316,14 +327,36 @@ npx shiftwork run --parallel 3         # up to three tickets at once
 npx shiftwork feature pause signup     # freeze a feature: its tickets leave the frontier
 npx shiftwork feature resume signup    # thaw it: its tickets return to the frontier
 npx shiftwork tui                      # live dashboard
+npx shiftwork logs -f                  # follow what the live agents are doing
+npx shiftwork stop                     # the live runner hands off and exits (writes STOP)
+npx shiftwork stop --dark-factory --wait   # stop only a dark-factory runner and wait until it has
 npx shiftwork tickets check signup     # planning gate: are this feature's tickets workable?
+npx shiftwork graph signup             # the feature's tickets and Blocked-by edges as a Mermaid flowchart
 ```
 
-`shiftwork tickets check <feature> [--min N] [--except NN]` is the Verify gate for a planning ticket: it exits 0 when at least `N` (default 1) tickets besides the excepted ones (default `01`, the plan itself) are `ready-for-agent` or later, each with an acceptance checkbox and a `Verify` line, and every `Blocked by:` number exists in the feature. Otherwise it exits 1 with one line per problem (`signup/03: no Verify line`).
+`shiftwork tickets check <feature> [--min N] [--except NN]` is the Verify gate for a planning ticket: it exits 0 when at least `N` (default 1) tickets besides the excepted ones (default `01`, the plan itself) are `ready-for-agent` or later, each with an acceptance checkbox and a `Verify` line, and every `Blocked by:` number exists in the feature. No ticket of the feature, the plan included, may block itself or sit on a blocker cycle: those tickets never count, and the cycle is named once (`signup: blocker cycle 03 → 04 → 03`, `signup/05: blocked by itself`). Otherwise it exits 1 with one line per problem (`signup/03: no Verify line`).
+
+`shiftwork graph <feature> [--dir <path>]` prints the feature's tickets as a Mermaid flowchart (`flowchart TD`): one node per ticket with its status in the label and a colour per status, one edge from each blocker to the ticket it blocks, a missing blocker as a dashed node, and the edges of a blocker cycle dashed and labelled `cycle` (the cycle lines also go to stderr). Paste it into a GitHub comment or a ```` ```mermaid ```` block to see the plan. Read-only; an unknown feature exits 1 with `<feature>: no tickets found`.
 
 `shiftwork feature pause <feature>` freezes one feature: it sets `**Status:** paused` in `.scratch/<feature>/spec.md` (inserting the line under the `#` title when the spec has none) and prints `⏸ <feature> paused: its tickets leave the frontier` — the tickets themselves are untouched. While a feature is paused, none of its tickets is on the frontier: `run`, `run --once`, `--parallel`, dark-factory and the TUI skip it, and `run --ticket <feature>/<NN>` and `run --feature <feature>` are refused with `feature <feature> is paused (shiftwork feature resume <feature>)`. `shiftwork feature resume <feature>` sets the spec back to `ready-for-agent` and its tickets return to the frontier. Pausing the feature a shift is working lets that shift finish and land; the runner takes no further ticket of it — to stop at once, STOP (or `s` in the TUI) is still the way. `status` prints `⏸ paused` after a paused feature's name; `run --dry-run` prints `<feature>: paused, skipped` once per paused feature with ready tickets. A spec status other than `paused` keeps today's meaning: it doesn't gate tickets. Pause is `.scratch` only: under the OpenSpec tracker both commands exit 1 with `pause is supported for .scratch features only`.
 
-Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, create a file named `STOP` in the repo root (or press `s` in the TUI): the running shift writes a handoff and the runner exits. `Ctrl-C`, `kill` (SIGTERM) and a closed terminal (SIGHUP) do the same; a second signal, or 60 s without the runner finishing, stops the agents and Verify commands at once, so no agent process outlives the runner. Shift logs are in `logs/<feature>/<NN>/`.
+Every ticket runs in its own git worktree under `~/.cache/shiftwork/worktrees/`. Install dependencies there with `"worktree": { "setup": ["npm ci --ignore-scripts"] }`. With `parallel` above 1 (or `run --parallel N`) the runner works several frontier tickets at once, one worktree each; `concurrency` keeps a provider from being oversubscribed. A ticket whose landing conflicts with one that landed first is rebased onto it and its Verify gate re-run; if the rebase conflicts too, the work is redone on top of it in a fresh worktree, with one more shift (`- Landing conflict with …; redone on top of …` in the ticket). To stop gracefully, run `shiftwork stop`, create a file named `STOP` in the repo root, or press `s` in the TUI: the running shift writes a handoff and the runner exits. `Ctrl-C`, `kill` (SIGTERM) and a closed terminal (SIGHUP) do the same; a second signal, or 60 s without the runner finishing, stops the agents and Verify commands at once, so no agent process outlives the runner. Shift logs are in `logs/<feature>/<NN>/`.
+
+### Stopping: `shiftwork stop`
+
+`shiftwork stop [--dark-factory] [--wait [sec]] [--force] [--dir <path>]` reads `.shiftwork/shiftwork-run.json`. When a runner is live it writes `STOP` (`Stopped from shiftwork stop at <time>`; an existing `STOP` is kept) and prints `STOP file written · runner pid N (<mode>) hands off and stops` — the mode is `run` or `dark-factory` — and exits 0. When no runner is live it prints `No runner is running: nothing to stop (STOP not written)` and exits 0: a stale `STOP` would end the next run at once. `STOP` stops every runner of the repo, so `--dark-factory` stops only a dark-factory runner: while a plain run is live (alone, or next to the dark-factory one) it writes nothing and exits 1. `--wait [sec]` polls the run state until no runner is live (default 120 s), prints `Runner stopped`, and removes the `STOP` file it wrote, so the next run can start; still live at the timeout it exits 1 and leaves `STOP`. Without `--wait`, delete `STOP` before the next run. `--force` also sends SIGTERM to the runner pid, which, like `kill`, stops the agents at once if the runner has not finished 60 s later.
+
+### Reading shift logs: `shiftwork logs`
+
+`shiftwork logs [<feature>/<NN>] [-f|--follow] [--raw] [--all] [--dir <path>]` prints the shift logs in `logs/<feature>/<NN>/` as readable lines, one per event, each with its `HH:MM:SS`: the `▶ start` header (backend, model, tier, attempt), the agent's text wrapped to the terminal, tool calls as `$ npm test` or `✎ src/a.js`, dim `· turn 25,489 tokens` lines, `✖ error` in red and `■ end · <stop reason>`. Context updates and unknown events are hidden; `--raw` shows them (unknown ones as JSON). Colour is off under `NO_COLOR` or when piped.
+
+With no ticket it shows the live runner's workers, each at its current shift log (lines prefixed `feature/NN` when there are several); with no live runner, the most recent shift log. With a ticket it shows that ticket's current attempt; `--all` prints every attempt, oldest first, each after a `── feature/NN · attempt-N.jsonl ──` header. `-f` keeps following: a new attempt file gets its own header, and following the live runner moves on with it from ticket to ticket and exits 0 when no runner is live. `Ctrl-C` stops it.
+
+### Finding repeated steps: `shiftwork reflect`
+
+Every backend logs its agent's tool calls as `{ "type": "tool", "name", "input" }` events (the shell command, or the file path, at most 500 characters). `shiftwork reflect [--since <days>] [--min <n>] [--write] [--dir <path>]` reads the shift logs, turns each shell command into a template (paths become `<path>`, quoted arguments `<str>`, numbers `<n>`, commit hashes `<sha>`; a leading `cd <dir> &&` and a `bash -lc '…'` wrapper are dropped) and lists the commands, and runs of 2–4 consecutive commands, seen in at least `--min` (default 3) different shifts. Each comes with its occurrences, tickets, examples and a suggested `scripts/<name>.sh` skeleton whose varying parts are arguments, ranked by occurrences × shifts. Plain lookups (`ls`, `cat`, `grep`, `sed`, …) are not suggested on their own. The report also lists verify commands that failed again and again (`Verify: failed at …` in the tickets' comments). `--since 7` keeps the last seven days of logs.
+
+`--write` saves the report to `.scratch/reflections/<YYYY-MM-DD>.md` and files a ready-for-agent feature `.scratch/automate-<name>/`: a spec and one ticket per top suggestion (up to five), "Write script X", whose gate is `bash -n` and `test -x` on the script. Without `--write` nothing is written.
 
 ### How the runner picks the next ticket
 
@@ -332,7 +365,7 @@ The runner is the orchestrator: plain code, not a model. No orchestrator agent a
 1. **Ready tickets only.** A ticket can run when its status is `ready-for-agent` and every ticket in its `Blocked by` line is `resolved`. These tickets are the **frontier**. `needs-info`, `ready-for-human`, `wontfix` and tickets claimed by another runner are skipped — and so is every ticket of a **paused feature** (`shiftwork feature pause <feature>`), until `shiftwork feature resume <feature>`.
 2. **Feature by feature.** The runner finishes one feature before it opens the next. It stays on the current feature while that feature has a ready ticket, taking its tickets by number (`01`, `02`, …). It moves on only when the feature has nothing ready: everything resolved, or the rest blocked or waiting for you.
 3. **Which feature next.** A feature already started (some ticket resolved or claimed) goes before a new one; among equals, alphabetical feature name. To force an order, prefix feature names with numbers (`01-auth`, `02-billing`).
-4. **For each ticket:** pick the model by routing and tier (skipping providers on cooldown), run the shift in its own worktree, run `Verify`. Passed → run the review shift on the branch if reviews are on (the default: the branch merges into the main branch only after it accepts), take the next ticket. Failed → another attempt (up to `maxAttempts`, then `needs-info`), or a handoff to the next model when a budget or provider limit runs out.
+4. **For each ticket:** pick the model by routing and tier (skipping providers on cooldown), run the shift in its own worktree, run `Verify`. Passed → run the review shift on the branch if reviews are on (the default: the branch merges into the main branch only after it accepts), take the next ticket. Failed, or passed on a branch that changed a frozen path → another attempt (up to `maxAttempts`, then `needs-info`), or a handoff to the next model when a budget or provider limit runs out. A shift that ends with `<shiftwork:needs-research …/>` files a research ticket and blocks the ticket on it (section 4): the research ticket is next on the frontier.
 5. **The run ends** when the frontier is empty, or on STOP. When every model of a ticket's route is cooling, the runner waits until one is back; a ticket with no usable model at all becomes `needs-info`.
 
 With `--parallel N`, the N slots are filled in the same order: the current feature's ready tickets first, then the next feature's. `shiftwork status`, `run --dry-run` and the TUI Queue's "Frontier:" line show the frontier in this order.
@@ -350,7 +383,7 @@ Six full-screen tabs (`1`–`6`, or `tab` to cycle): **Queue**, **Agents**, **Co
 | Cooldowns | Active provider cooldowns and time left | `↑↓`/`j k` move |
 | Log | Tail of the selected agent's shift log (else the first live worker's) | `↑↓`/`j k` move |
 | Resolved | The features whose tickets are all resolved, with the same rows (folders, tickets), cursor, fold and `enter` → details as the Queue; `n` there is refused — the ticket's status is resolved | `↑↓`/`j k` move · `←→` collapse/expand · `enter` details · `esc` back |
-| GitHub | The issues `run --dark-factory` imported (`.pi/shiftwork-github.json`): `#<N> <title> · <feature> · <state>`, where the state — planning, working, needs-info, done, closed — comes from the feature's tickets, plus the time of the last sync | `↑↓`/`j k` move · `enter` opens the issue's feature in the Queue tab |
+| GitHub | The issues `run --dark-factory` imported (`.shiftwork/shiftwork-github.json`): `#<N> <title> · <feature> · <state>`, where the state — planning, working, needs-info, done, closed — comes from the feature's tickets, plus the time of the last sync | `↑↓`/`j k` move · `enter` opens the issue's feature in the Queue tab |
 
 Every tab also: `r` start a detached runner (a second `r` while one is live is refused) · `s` stop with handoff · `d` dry-run · `f` filter by feature · `g` toggle dark-factory (starts `shiftwork run --dark-factory` detached when no runner is live, writes STOP when one is) · `q` quit. `/` searches on the Queue and Resolved tabs and inside an open ticket's details. `n` starts `shiftwork run --ticket <feature>/<NN>` detached, like `r`; it is refused when the cursor is not on a ready frontier ticket or a runner is already live — and with `feature <feature> is paused (p resumes it)` while its feature is paused. `p` (Queue and Resolved) pauses or resumes the feature under the cursor — its folder row or one of its ticket rows: the notice says `⏸ <feature> paused` or `▶ <feature> resumed`, and the next frame (once a second) shows the frontier without the paused feature's tickets. It works while a runner is live: the current shift finishes and lands, the runner takes no further ticket of the feature. `tui --once` and the plain-text fallback keep listing every feature, resolved ones included, in the old all-in-one frame.
 
@@ -372,7 +405,7 @@ The details view opens with the same label on its first line, plus a `Reason:` l
 
 `/` opens a **search prompt** (the header shows it on its own line as `/ <query> · <scope>`, and the footer swaps in the search keys while you type — a kept list filter brings the tab's keys back, a kept details search keeps its own: `enter next match · esc clear`). On the Queue or Resolved tab it filters the list to tickets whose number or title contains the query — case-insensitive — keeping their feature rows and clamping the cursor to what is left; `tab` toggles the scope between all features and the feature under the cursor when the prompt opened, `enter` stops typing and keeps the filter, `esc` clears it. With a ticket's details open, `/` searches inside the details instead: every match is highlighted (`[…]` brackets, reverse video in colour); `enter` first stops typing and keeps the search (the footer says `enter keep` while you type), and `enter` again scrolls to the next match. While you type, letters — `n`, `r`, `s`, `d`, `f`, `p`, `q` and digits included — go into the query, not their usual commands; Ctrl-C still quits.
 
-The TUI only watches, starts and stops runs, and pauses or resumes features. Models, tiers, routing and budgets are edited in `.pi/shiftwork.json`; the next ticket picks up the changes.
+The TUI only watches, starts and stops runs, and pauses or resumes features. Models, tiers, routing and budgets are edited in `.shiftwork/shiftwork.json`; the next ticket picks up the changes.
 
 ### Reviews
 
@@ -382,15 +415,53 @@ Reviews are **on by default**: once a ticket's Verify gate passes on its branch,
 "review": { "tier": "standard", "features": ["signup"], "types": ["code", "refactor"] }
 ```
 
-The verdict is written to the ticket as `### Review`: **accept** (the branch lands), **reopen** (back to `ready-for-agent`: nothing lands, and the next `run` continues on the same branch and worktree with the findings in its prompt), or **follow-up** (the branch lands and a new ticket is filed in the feature, with the same Verify — only once the branch has landed). Before the review the runner commits the shift's work on the branch (the same `shiftwork: <feature>/<NN> …` commit that lands), so the reviewer sees it with `git diff <target>...HEAD`. A review that cannot run at all — every review model cooling or at its concurrency cap — does not hold the branch: it lands, with `- Not run: …` under `### Review` in the ticket. After a reopen the branch carries one `shiftwork: <feature>/<NN> …` commit per reviewed round; all of them land. Reopen rounds are bounded by `review.maxRounds` (default 2): after that many reopens the ticket goes to `needs-info` (`review rejected it 2 times; branch <branch> kept`), the branch kept for a human. To review the landed commit instead — the ticket lands first, and a `reopen` fixes forward on top of it — set `"when": "after-land"` (`"resolve"`, its old name, still works). To turn reviews off: `"review": false` (or `{ "enabled": false }`) in the config, or `shiftwork run --no-review` for one run. With no tiers there is nothing to review on, so reviews stay off and `run` says so at start. `run` prints the review tier (or its filters) at start; `--dry-run` shows which tickets would be reviewed and where (`review=<tier> (before land)` or `(after land)`, or `review=no`).
+The verdict is written to the ticket as `### Review`: **accept** (the branch lands), **reopen** (back to `ready-for-agent`: nothing lands, and the next `run` continues on the same branch and worktree with the findings in its prompt), or **follow-up** (the branch lands and a new ticket is filed in the feature, with the same Verify — only once the branch has landed). Before the review the runner commits the shift's work on the branch (the same `shiftwork: <feature>/<NN> …` commit that lands), so the reviewer sees it with `git diff <target>...HEAD`. A review that cannot run at all — every review model cooling or at its concurrency cap — lands nothing: the ticket records `- Not run: …` and `- Review: not finished (no reviewer free this run)` under `### Review`, goes back to `ready-for-agent` with its branch kept, and the next run reviews it before any new work. A plan ticket (`Type: plan`) gets no review: its gate, `shiftwork tickets check`, is the check. After a reopen the branch carries one `shiftwork: <feature>/<NN> …` commit per reviewed round; all of them land. Reopen rounds are bounded by `review.maxRounds` (default 2): after that many reopens the ticket goes to `needs-info` (`review rejected it 2 times; branch <branch> kept`), the branch kept for a human. To review the landed commit instead — the ticket lands first, and a `reopen` fixes forward on top of it — set `"when": "after-land"` (`"resolve"`, its old name, still works). To turn reviews off: `"review": false` (or `{ "enabled": false }`) in the config, or `shiftwork run --no-review` for one run. With no tiers there is nothing to review on, so reviews stay off and `run` says so at start. `run` prints the review tier (or its filters) at start; `--dry-run` shows which tickets would be reviewed and where (`review=<tier> (before land)` or `(after land)`, or `review=no`).
 
 The reviewer works **locally**: it reads the code, runs the verify gate and the repo's tests, and never calls network services or live APIs — no `gh api`, `curl` or package installs; external calls are judged by the code and the tests' stubs. The review shift runs on **its own budget**, `review.budget` (default `{ "maxWallMin": 20, "maxTurns": 60 }`, the same fields as any other budget): ticket, tier and model budgets never cap it, and `unlimited` lists don't lift it — only `review.budget` itself does. At its soft limit the reviewer is told to stop investigating and give its verdict, not to hand off.
 
 A review must give a verdict — there is **no silent accept**. A review that ends without a valid marker (an unknown verdict word counts as none) is retried once, in a fresh context, on the next model of the review tier's chain. If that one also gives no verdict, the ticket records `- Verdict: none` and goes to `needs-info` (`review gave no verdict twice; review it by hand`): nothing lands, and a human reviews it by hand — after a landing the landed commit stays, before one the branch is kept. A review stopped by the runner stopping — a `STOP` file or a signal — is none of that: not a missing verdict, so no retry and no `needs-info`; the ticket stays as it is (after a landing: resolved, the landed commit kept; before one: back on the frontier with its branch) with `- Review: not finished (stopped)`, and the next run reviews it again: every run starts by re-reviewing the tickets whose last review never gave a verdict, before any new work — a resolved ticket owes an after-land review of the landed change, a ready one owes a before-land one, resumed in its worktree on the branch the stopped review was judging, instead of starting a new worker shift on it (`--ticket` runs re-review nothing; `--feature` narrows them like the frontier; a paused feature's tickets are not re-reviewed until it is resumed; OpenSpec tasks, which share one `.shiftwork.md`, are never resumed this way — a ready task is worked as usual by the next run, a resolved task's owed after-land review is dropped). A re-review that reopens puts the ticket back on the frontier and the same run fixes it forward; accept and follow-up only complete the review — a before-land one lands the branch it just accepted — so the ticket stays resolved; when no reviewer is free that run, the ticket keeps `- Review: not finished (no reviewer free this run)` and the next run owes the verdict again, with no worker shift in between.
 
+### Dual shifts: two models, then a merge
+
+A ticket can be worked by **two models at once**, then merged (ADR-0007). On the ticket's first round, two candidate shifts run on two models, from different providers when the config has them. Each works in its own worktree on `shiftwork/<feature>-<NN>-a` / `-b`, at the same time when the provider slots allow, and each goes through its own Verify gate. Then:
+
+- **both pass** → a **merge shift** on `dual.mergeTier` (default: the review tier) starts in the ticket's own worktree, created from A's branch. Its prompt points at both branch diffs (`git diff <target>...<branch>`), and the agent combines the best of both and runs Verify. If the merge fails its gate, A's branch is taken;
+- **one passes** → its branch is taken, and no merge shift runs;
+- **neither passes** → this counts as a failed attempt: the next one is an ordinary single shift from the target (or `needs-info` at `maxAttempts`).
+
+The ticket's branch then goes through the usual review and landing. The ticket records a shift report for each candidate and for the merge, plus `### Dual — A: <model>, <verify>; B: <model>, <verify>; merge: <outcome>`. The candidate branches are removed when the ticket lands and kept otherwise. Retries, reopens and handoffs stay single.
+
+```json
+"dual": { "enabled": true, "types": ["code"], "features": ["signup"], "mergeTier": "premium", "budget": { "maxTurns": 40 } }
+```
+
+`models: ["a/m1", "claude:sonnet"]` pins the two models, and `tiers: ["standard", "premium"]` routes the candidates on two tiers instead; set one of them, not both. Without either, A is the ticket's usual route and B is the next model on another provider. `budget` is the merge shift's budget. Each candidate gets the normal shift budget, and the ticket budget still totals every shift: once it is spent, the merge is skipped and A taken. A ticket opts in by itself with `**Dual:** yes`, or out with `**Dual:** no`. Dual shifts need worktrees and Verify commands: without them (`worktree.enabled: false`, `--no-worktree`), or with no second model, the ticket runs as a single shift and records a `### Dual` warning. A plan or research ticket is never dual.
+
+### Jobs: scripts by order or schedule (`shiftwork jobs`)
+
+Not every task needs a model. `shiftwork jobs` runs plain shell commands from `.shiftwork/jobs.json`, one input file at a time, and remembers which items are done, so a stopped or failed batch picks up where it left off. Example — subtitles for every video (`docs/examples/jobs.translate-videos.json` has the full file):
+
+```json
+{ "jobs": [
+  { "name": "translate", "run": "scripts/translate.sh {input} {output}",
+    "inputs": "videos/**/*.mp4", "output": "subs/{stem}.srt",
+    "retries": 1, "timeoutMin": 90, "ticket": true, "schedule": { "at": "02:30" } }
+] }
+```
+
+- `run` is a `sh -c` command run at the repo root. `{input}` `{stem}` `{dir}` `{output}` `{name}` are filled in and shell-quoted. `env` adds environment variables.
+- `inputs` is a glob inside the repo (`*`, `?`, `**`), sorted. Each matching file is one item. Without `inputs` the job is one action and runs afresh every time.
+- `output` is a path template. An item whose output already exists counts as done (`--force` reruns it), and exit 0 without the output counts as a failure.
+- `order` and `after: ["job"]` set the order. A job is skipped when the job it runs after failed in the same run. `concurrency` runs that many items at once (default 1). `timeoutMin` defaults to 60.
+- `retries`: extra attempts for each item. A re-run skips done items and retries failed ones while attempts remain. `--retry-failed` starts them over.
+- `"ticket": true`: when an item fails every attempt, a `ready-for-agent` ticket is written to `.scratch/jobs-<name>/issues/` with the command, the exit code and the log tail, so `shiftwork run` can send an agent to fix the script. Its Verify is `shiftwork jobs run <name> --retry-failed`.
+- `schedule`: `{ "everyMin": 60 }`, `{ "at": "02:30" }` (local time) or `{ "cron": "0 3 * * 1-5" }` (5 fields with `*`, lists, ranges and `/step`). Jobs due at the same time run together, in `after` order. `jobs watch` only runs jobs that have a `schedule`.
+
+Commands: `shiftwork jobs list` (schedule, next due time, done/failed/pending counts), `jobs run [name...] [--force] [--retry-failed] [--dry-run]`, `jobs watch` (runs scheduled jobs when they are due and sleeps between them), `jobs status [name...]` (every item that isn't done, with its log). Item state lives in `.shiftwork/jobs-state.json`, logs in `logs/jobs/<name>/<stem>.log`. A `STOP` file or Ctrl-C stops after the running items finish. A second Ctrl-C kills them. Exit codes: 0 all done · 2 some items failed · 3 stopped · 1 error.
+
 ## 8. A full config example
 
-One `.pi/shiftwork.json` that uses most of this guide: five different agents, a local model, model profiles, parallel runs and reviews.
+One `.shiftwork/shiftwork.json` that uses most of this guide: five different agents, a local model, model profiles, parallel runs and reviews.
 
 ```json
 {
@@ -398,6 +469,7 @@ One `.pi/shiftwork.json` that uses most of this guide: five different agents, a 
   "thinking": "medium",
   "maxAttempts": 3,
   "maxHandoffs": 3,
+  "maxLimitRetries": 10,
   "verifyTimeoutMin": 20,
   "softLimitPct": 80,
   "parallel": 2,
@@ -496,12 +568,12 @@ Dark-factory mode takes work from GitHub **issues** instead of `.scratch/`: you 
 
 | Label | Meaning | Who sets it |
 |---|---|---|
-| `shiftwork:in` | The issue is handed to Shiftwork: only issues with this label are taken | You, or any collaborator |
+| `shiftwork:in` | The issue is handed to Shiftwork: only issues with this label are taken, and only from a collaborator (its author, or who added this label) | You, or any collaborator |
 | `shiftwork:working` | A ticket of the issue is being worked on | Shiftwork |
 | `shiftwork:needs-info` | Shiftwork asked a question in a comment and the issue waits for an answer | Shiftwork |
 | `shiftwork:done` | Every ticket of the issue is resolved | Shiftwork |
 
-Rename them in the `github` block of `.pi/shiftwork.json`. Only `in` is required — without it there is no way to hand an issue over; the others default to the names above:
+Rename them in the `github` block of `.shiftwork/shiftwork.json`. Only `in` is required — without it there is no way to hand an issue over; the others default to the names above:
 
 ```json
 "github": {
@@ -522,23 +594,25 @@ Shiftwork does all GitHub work with the GitHub CLI and its login — no token in
 1. Install the GitHub CLI: <https://cli.github.com>. Shiftwork runs your installed `gh` (point at it with `"gh": "/path/to/gh"` in the `github` block when it is not on PATH).
 2. Log in: `gh auth login`.
 3. Check the login: `gh auth status`.
-4. Add the `github` block (above) to `.pi/shiftwork.json`.
+4. Add the `github` block (above) to `.shiftwork/shiftwork.json`.
 5. Create the labels: `npx shiftwork github labels --create`. It prints `✔ name exists` / `✖ name missing` for each configured label and creates the missing ones with a colour and a description; it never edits or deletes a label. Without `--create` it only checks, and exits 1 when a label is missing.
 6. Hand work over: a collaborator puts the `in` label on an issue.
 
 ## Dark-factory mode
 
-`npx shiftwork run --dark-factory` from a git clone is enough: the CLI puts `shiftwork` on PATH so the planning ticket's Verify (`shiftwork tickets check`) and agent shells find this same binary — no global `shiftwork` install. It runs the whole loop unattended: every `github.pollMin` minutes (default 5) it polls the repo's issues, imports the new ones, reports back, works the frontier until it is empty, reports back again, and waits for the next poll. It stops like any runner: a STOP file or a signal ends it after the current shift. `npx shiftwork run --dark-factory --once` does one poll plus one frontier pass, then exits.
+`npx shiftwork run --dark-factory` from a git clone is enough: the CLI puts `shiftwork` on PATH so the planning ticket's Verify (`shiftwork tickets check`) and agent shells find this same binary — no global `shiftwork` install. It runs the whole loop unattended: every `github.pollMin` minutes (default 5) it polls the repo's issues, imports the new ones, reports back, works the frontier until it is empty, reports back again, and waits for the next poll. It stops like any runner: `shiftwork stop --dark-factory`, a STOP file or a signal ends it after the current shift. `npx shiftwork run --dark-factory --once` does one poll plus one frontier pass, then exits.
 
 The TUI has a hand on it: the **GitHub** tab (`6`) lists the imported issues and the time of the last sync, and `g` starts `run --dark-factory` detached when no runner is live (a second `g`, like `s`, writes STOP); the header shows `dark-factory` while it runs.
 
 How it treats the issues:
 
-- **Collaborators only.** An issue is imported only when its author is a collaborator of the repo (plus the logins in `github.authors`) — issue text is untrusted input to an unattended agent, so anyone else's issue is ignored, and so is an issue without the `in` label. Each issue becomes a feature under `.scratch/`: a spec (the issue itself) and a planning ticket that splits it into implementation tickets.
-- **It reports back, never deletes.** A comment when work starts, a comment per resolved ticket with its shift report and links to the landed commits, a question when a ticket needs information — and a collaborator's answer to that question goes back into the ticket. See [`Dark-factory: labels`](#dark-factory-labels) for the labels it sets.
+- **Collaborators only.** An issue is imported only when its author is a collaborator of the repo (plus the logins in `github.authors`), or when the last one to add the `in` label was — so a collaborator can hand over an outsider's issue by labelling it. Logins compare case-insensitively. Issue text is untrusted input to an unattended agent, so any other issue is ignored (dark-factory prints `github#N skipped: …` once per issue), and so is an issue without the `in` label. When your `gh` token cannot list the collaborators (no push access: a 403), dark-factory warns once and trusts only your own login plus `github.authors`. Each issue becomes a feature under `.scratch/`: a spec (the issue itself) and a planning ticket that splits it into implementation tickets.
+- **It reports back, never deletes.** A comment when work starts, a comment per resolved ticket with its shift report and links to the landed commits, a question when a ticket needs information — and a collaborator's answer to that question goes back into the ticket. While a ticket of a feature waits in `needs-info`, dark-factory works no other ticket of that feature until the answer is in; other features go on. See [`Dark-factory: labels`](#dark-factory-labels) for the labels it sets.
 - **Closing.** When every ticket of an issue is resolved, the issue is closed with a summary comment (`github.autoClose`, default true). Nothing on GitHub is ever deleted.
 - **Planning tier.** Each imported issue starts with a planning ticket (`**Type:** plan`) that writes the implementation tickets. `github.planTier` routes it to a tier (e.g. a cheap one), unless the config already routes `plan`.
 - **Push.** The runner lands on local `main`; the commit links in the comments resolve only once the commits are on GitHub. Set `"push": true` in the `github` block and dark-factory runs `git push origin HEAD` in the main checkout after every pass that landed commits. Without it the comments show the short shas only.
+
+- **GitHub hiccups.** A failing `gh` call during a poll (network, a 5xx, a rate limit) is one `dark-factory: GitHub poll failed: …` line, not the end of the watcher: the frontier pass still runs, and the wait before the next poll doubles (up to an hour) until a poll gets through.
 
 At start, before anything is imported, dark-factory checks your `gh` and its labels: no GitHub CLI, no logged-in `gh`, or a missing label each ends it with an error and how to fix it. Set up all of it once in [`Dark-factory: labels`](#dark-factory-labels).
 

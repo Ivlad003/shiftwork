@@ -13,9 +13,9 @@ async function deadPid() {
 	return child.pid;
 }
 
-test("the lock file lives at .pi/shiftwork.lock and is removed after the section", async () => {
+test("the lock file lives at .shiftwork/shiftwork.lock and is removed after the section", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-lock-"));
-	assert.equal(lockPath(root), join(root, ".pi", "shiftwork.lock"));
+	assert.equal(lockPath(root), join(root, ".shiftwork", "shiftwork.lock"));
 
 	await withLock(root, async () => {
 		const owner = JSON.parse(await readFile(lockPath(root), "utf8"));
@@ -28,7 +28,7 @@ test("the lock file lives at .pi/shiftwork.lock and is removed after the section
 
 test("a lock left by a dead pid is taken over", async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-lock-"));
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	await writeFile(lockPath(root), JSON.stringify({ pid: await deadPid(), token: "left behind" }));
 
 	const startedAt = Date.now();
@@ -75,7 +75,7 @@ test("a lock file whose owner is still being written is held, not stale", async 
 	// createExclusive opens the file before it writes the owner: a waiter that reads it in
 	// between sees an empty file and must wait, not take the lock over.
 	const root = await mkdtemp(join(tmpdir(), "sw-lock-"));
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	await writeFile(lockPath(root), "");
 	let entered = false;
 	const waiting = withLock(root, async () => {
@@ -84,6 +84,25 @@ test("a lock file whose owner is still being written is held, not stale", async 
 	await new Promise((resolve) => setTimeout(resolve, 150));
 	assert.equal(entered, false, "must wait while the owner is being written");
 	await rm(lockPath(root));
+	await waiting;
+	assert.equal(entered, true);
+});
+
+test("a named lock is its own file, and a live holder is never taken over without a timeout", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sw-lock-"));
+	assert.equal(lockPath(root, "land"), join(root, ".shiftwork", "shiftwork-land.lock"));
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
+	// A live holder (this process) of the land lock; the shared-state lock stays free.
+	await writeFile(lockPath(root, "land"), JSON.stringify({ pid: process.pid, token: "landing" }));
+	assert.equal(await withLock(root, async () => "shared is free", { timeoutMs: 100 }), "shared is free");
+
+	let entered = false;
+	const waiting = withLock(root, async () => {
+		entered = true;
+	}, { name: "land", timeoutMs: Infinity, stepMs: 10 });
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	assert.equal(entered, false, "a live landing is waited for, however long");
+	await rm(lockPath(root, "land"));
 	await waiting;
 	assert.equal(entered, true);
 });

@@ -1,9 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
-import { CLAIMED, GITHUB_LABEL_DEFAULTS, READY, RESOLVED } from "shiftwork-core";
+import { applyStatusLine, CLAIMED, GITHUB_LABEL_DEFAULTS, READY, RESOLVED } from "shiftwork-core";
 
 import { execIn } from "./exec.js";
-import { readIssueState, writeIssueState } from "./github-import.js";
+import { appendClarification, bodyWithoutQuestions, replaceIssueSection, upsertQuestions } from "./github-body.js";
+import { loginSet, readIssueState, writeIssueState } from "./github-import.js";
 import { parsePostKey, postKey } from "./github-post.js";
 import { SHIFTWORK_MARKER } from "./github.js";
 
@@ -21,7 +23,7 @@ const TICKET_REF = /^\s*(?:#(\d+)(?!\d)|(\d+):(?!\d))/;
 /**
  * Report ticket progress back to the GitHub issue (spec: github-watch, ticket 04).
  *
- * For every imported issue in `.pi/shiftwork-github.json`, compare its feature's
+ * For every imported issue in `.shiftwork/shiftwork-github.json`, compare its feature's
  * tickets with what was already posted (`posted` keys on the issue's state
  * entry) and post only the difference — never re-post, never delete anything:
  *
@@ -32,12 +34,18 @@ const TICKET_REF = /^\s*(?:#(\d+)(?!\d)|(\d+):(?!\d))/;
  *   remote (`git branch -r --contains <sha>`, no fetch), else the short sha;
  * - a needs-info ticket's reason as a question comment + the `needsInfo` label,
  *   once per occurrence (`needs-info:NN:<k>`), so a ticket that needs
- *   information again asks again; the question never moves the reply floor;
- * - a collaborator's reply after a question: appended to the ticket (or to
- *   every ticket of the issue that waits on a question, or to the one the
- *   reply names with `#NN`/`NN:` — naming a ticket that isn't waiting gets one
- *   comment back, changing nothing), the ticket back to `ready-for-agent`, and
- *   the `needsInfo` label removed once no ticket of the issue waits any more;
+ *   information again asks again; the question never moves the reply floor.
+ *   The same questions are written into the issue description, between
+ *   `<!-- shiftwork:questions:start -->` and `<!-- shiftwork:questions:end -->`,
+ *   and `working` comes off while a question is open and nothing is claimed;
+ * - a collaborator's reply after a question, or a human edit of the description
+ *   outside that questions block: appended to the ticket (or to every ticket of
+ *   the issue that waits on a question, or to the one the reply names with
+ *   `#NN`/`NN:` — naming a ticket that isn't waiting gets one comment back,
+ *   changing nothing), the ticket back to `ready-for-agent`, the questions
+ *   block removed, and the feature spec rewritten before the next frontier
+ *   pass (a reply under `## Clarifications`, a description edit in `## Issue`).
+ *   The `needsInfo` label is removed once no ticket of the issue waits any more;
  * - when every ticket is resolved and `autoClose` is on: a summary comment,
  *   the issue closed, the `done` label (dropping `working`) — each its own
  *   key, so a failed close or label is retried without re-posting the comment.
@@ -49,8 +57,10 @@ const TICKET_REF = /^\s*(?:#(\d+)(?!\d)|(\d+):(?!\d))/;
  * the next. Shiftwork's own comments never count as replies: their ids are
  * recorded (`ownComments`) and they end with the hidden `<!-- shiftwork -->`
  * marker. Labels are never created here (they are checked at dark-factory
- * start), and the only labels ever removed are `needsInfo` and `working` (with
- * `done`). Every post is recorded (state written) before the next one, so a
+ * start), and the only labels ever removed are `needsInfo` (once nothing waits)
+ * and `working` (while a question is open and nothing is claimed, or with
+ * `done`). `working` is added again the next time a ticket is claimed. Every
+ * post is recorded (state written) before the next one, so a
  * crash re-posts at most one comment.
  *
  * @returns {Promise<{ posted: { number: number, key: string }[] }>} the posts made this sync
@@ -61,12 +71,13 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 	// that passed labels partially (`labels.in` is only required to start dark-factory).
 	const labels = { ...GITHUB_LABEL_DEFAULTS, ...(githubConfig.labels ?? {}) };
 	const autoClose = githubConfig.autoClose;
-	const extraAuthors = new Set(githubConfig.authors ?? []);
+	const extraAuthors = githubConfig.authors ?? [];
 	const runGit = git ?? ((args) => execIn(root)(["git", ...args]));
-	// Collaborators are fetched at most once per sync, however many replies arrive.
+	// Collaborators are fetched at most once per sync, however many replies arrive;
+	// logins compare lower-cased (GitHub logins are case-insensitive).
 	let collaborators;
 	const allowedAuthors = async () => {
-		collaborators ??= new Set([...(await github.collaborators()), ...extraAuthors]);
+		collaborators ??= loginSet([...(await github.collaborators()), ...extraAuthors]);
 		return collaborators;
 	};
 
@@ -111,11 +122,40 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 		const questions = (t) => occurrences("needs-info", t.number);
 		const answers = (t) => occurrences("replied", t.number);
 		const waiting = () => tickets.filter((t) => t.status === NEEDS_INFO && questions(t) > answers(t));
+		// `working` may be added, removed while a question is open, and added again.
+		const workingOn = () => {
+			let on = false;
+			for (const key of entry.posted) {
+				if (key === postKey("working")) on = true;
+				else if (key === postKey("working-removed")) on = false;
+			}
+			return on;
+		};
+		let rawBody;
+		const loadBody = async () => {
+			if (rawBody === undefined) rawBody = String((await github.issueBody(entry.number)) ?? "");
+			return rawBody;
+		};
+
+		// A needs-info ticket reads the issue body once. The first time an issue
+		// has no `bodySeen` (imported before descriptions were watched), record it
+		// and do not treat that as an answer. A later change outside the questions
+		// block is the human's answer.
+		const asking = tickets.some((t) => t.status === NEEDS_INFO);
+		let descriptionAnswer;
+		if (asking) {
+			const stripped = bodyWithoutQuestions(await loadBody());
+			if (entry.bodySeen == null) {
+				entry.bodySeen = stripped;
+				await writeIssueState(root, state);
+			} else if (stripped !== entry.bodySeen) descriptionAnswer = stripped;
+		}
+		const openedWaiting = waiting().length > 0;
 
 		// A collaborator's reply to a needs-info question (d): every ticket of the
 		// issue that waits on a question gets it, or the one it names with
 		// `#NN`/`NN:`; each goes back to ready-for-agent with the reply under its
-		// `## Comments`.
+		// `## Comments` and once under the spec's `## Clarifications`.
 		if (waiting().length) {
 			const comments = await github.issueComments(entry.number);
 			const own = (c) => entry.ownComments.includes(Number(c.id)) || String(c.body ?? "").includes(SHIFTWORK_MARKER);
@@ -123,7 +163,7 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 				if (own(reply) || !reply.author) continue;
 				// Only collaborators and configured authors may steer the work (spec 1).
 				const allowed = await allowedAuthors();
-				if (!allowed.has(reply.author)) continue;
+				if (!allowed.has(String(reply.author).toLowerCase())) continue;
 				const named = parseTicketRef(reply.body);
 				const targets = named === undefined ? waiting() : waiting().filter((t) => Number(t.number) === named);
 				// A reply naming a ticket that isn't waiting: one comment back, no ticket changed.
@@ -131,27 +171,66 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 					await postComment(notWaitingComment(named, waiting()));
 					continue;
 				}
+				const replyText = String(reply.body ?? "").trim();
 				for (const t of targets) {
-					await tracker.appendComment(t, `### Reply from @${reply.author}\n\n${String(reply.body ?? "").trim()}`);
+					await tracker.appendComment(t, `### Reply from @${reply.author}\n\n${replyText}`);
 					await tracker.setStatus(t, READY);
 					t.status = READY; // the same sync's later loops look at these tickets too
 					await post(postKey("replied", t.number, answers(t) + 1));
+				}
+				if (targets.length) {
+					await writeSpec(root, entry.feature, (spec) => {
+						const next = appendClarification(spec, { heading: `Reply from @${reply.author}`, text: replyText });
+						return waiting().length ? next : readySpec(next);
+					});
 				}
 			}
 			// Every comment is consumed now, whoever wrote it: the newest id is
 			// where the next sync starts, so a deleted comment hides nothing.
 			entry.lastCommentId = maxCommentId(comments) ?? entry.lastCommentId;
 			await writeIssueState(root, state);
-			// The needsInfo label goes once no ticket of the issue waits any more.
-			if (!waiting().length) await github.removeLabel(entry.number, labels.needsInfo);
 		}
 
-		// Work started (a): the working label once, then a comment per first-claimed ticket.
-		for (const t of tickets.filter((t) => t.status === CLAIMED && !wasPosted(postKey("started", t.number)))) {
-			if (!wasPosted(postKey("working"))) {
-				await github.addLabels(entry.number, [labels.working]);
-				await post(postKey("working"));
+		// A human edit of the description answers every needs-info ticket and replaces
+		// the spec's `## Issue` section before implementation starts. The replied
+		// key is recorded only when a question was already posted, so a later
+		// question can still be asked.
+		if (descriptionAnswer !== undefined) {
+			for (const t of tickets.filter((t) => t.status === NEEDS_INFO)) {
+				await tracker.appendComment(t, `### Reply from the issue description\n\n${descriptionAnswer}`);
+				await tracker.setStatus(t, READY);
+				t.status = READY;
+				if (questions(t) > answers(t)) await post(postKey("replied", t.number, answers(t) + 1));
 			}
+			entry.bodySeen = descriptionAnswer;
+			await writeIssueState(root, state);
+			await writeSpec(root, entry.feature, (spec) => {
+				const next = replaceIssueSection(spec, descriptionAnswer);
+				return waiting().length ? next : readySpec(next);
+			});
+		}
+
+		// The needsInfo label and the questions block go once nothing waits.
+		// A question posted later in this same sync puts them back.
+		if (openedWaiting && !waiting().length) {
+			await github.removeLabel(entry.number, labels.needsInfo);
+			const stripped = bodyWithoutQuestions(await loadBody());
+			if (stripped !== (await loadBody()).trim()) {
+				const cleared = stripped ? `${stripped}\n` : "";
+				await github.editBody(entry.number, cleared);
+				rawBody = cleared;
+			}
+		}
+
+		// Work started (a): the working label whenever a ticket is claimed and the
+		// label is off (including after it was removed for a question), then a
+		// comment the first time each ticket is claimed.
+		const claimed = tickets.filter((t) => t.status === CLAIMED);
+		if (claimed.length && !workingOn()) {
+			await github.addLabels(entry.number, [labels.working]);
+			await post(postKey("working"));
+		}
+		for (const t of claimed.filter((t) => !wasPosted(postKey("started", t.number)))) {
 			await postComment(`**Work started** — ticket ${t.number}: ${t.title}`);
 			await post(postKey("started", t.number));
 		}
@@ -185,6 +264,30 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 			await github.addLabels(entry.number, [labels.needsInfo]);
 		}
 
+		// The open questions live in the issue description, and the working label
+		// comes off while they wait and nothing is claimed, so the issue's label
+		// matches the task: needs-info, not working.
+		if (waiting().length) {
+			const items = [];
+			for (const t of waiting()) {
+				const markdown = await readFile(t.path, "utf8");
+				items.push({
+					number: t.number,
+					title: t.title ?? "",
+					reason: needsInfoReason(markdown) ?? "the ticket needs information from a collaborator",
+				});
+			}
+			const desired = upsertQuestions(await loadBody(), items);
+			if (desired.trim() !== String(rawBody ?? "").trim()) {
+				await github.editBody(entry.number, desired);
+				rawBody = desired;
+			}
+			if (!tickets.some((t) => t.status === CLAIMED) && workingOn()) {
+				await github.removeLabel(entry.number, labels.working);
+				await post(postKey("working-removed"));
+			}
+		}
+
 		// Everything resolved (e): summary comment, close, done label (dropping
 		// working) — each its own key, so a failed close or label is retried next
 		// sync without re-posting the comment.
@@ -201,7 +304,7 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 				await github.addLabels(entry.number, [labels.done]);
 				await post(postKey("done-label"));
 			}
-			if (wasPosted(postKey("working")) && !wasPosted(postKey("working-removed"))) {
+			if (workingOn()) {
 				await github.removeLabel(entry.number, labels.working);
 				await post(postKey("working-removed"));
 			}
@@ -214,6 +317,26 @@ export async function syncIssues({ root, github, config, tracker, git } = {}) {
 	await writeIssueState(root, state);
 
 	return { posted };
+}
+
+/** Rewrite `.scratch/<feature>/spec.md` when it exists. A missing spec is left missing. */
+async function writeSpec(root, feature, transform) {
+	const path = join(root, ".scratch", feature, "spec.md");
+	let spec;
+	try {
+		spec = await readFile(path, "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return;
+		throw error;
+	}
+	const next = transform(spec);
+	if (next === spec) return;
+	await writeFile(path, next.endsWith("\n") ? next : `${next}\n`);
+}
+
+/** A spec that was waiting (`Status: needs-info`) is ready again once the answer landed. */
+function readySpec(spec) {
+	return /^\s*(?:\*\*)?Status:(?:\*\*)?[ \t]*needs-info[ \t]*$/im.test(spec) ? applyStatusLine(spec, READY) : spec;
 }
 
 /**

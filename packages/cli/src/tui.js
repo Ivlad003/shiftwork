@@ -59,7 +59,8 @@ details view's first line carries the same label, plus the reason line for a
 needs-you ticket. --once and the plain-text fallback print the same words
 without colour.
 
-The interactive view is built on @earendil-works/pi-tui (TuiAltScreen), resolved
+The interactive view is built on @earendil-works/pi-tui (TuiAltScreen, or TUI on
+older pi-tui), resolved
 from the user's pi install. It is in colour: the cursor row is highlighted
 across the width, the status column is coloured (done green, working cyan,
 next bold, waits dim, needs you yellow), live workers are cyan, cooldowns are
@@ -68,8 +69,12 @@ colourless (and list every feature, resolved ones included, like --once).
 Without pi-tui a plain-text fallback prints a frame every second; the same
 keys work there where they make sense.`;
 
-/** The `shiftwork tui` command. `--once` prints one frame and exits (the tests drive this). */
-export async function tui(argv) {
+/**
+ * The `shiftwork tui` command. `--once` prints one frame and exits (the tests drive this).
+ * `options` (tests): `loaded` skips resolving pi-tui, `tty` overrides stdout.isTTY,
+ * `interactive` / `fallback` replace the two views.
+ */
+export async function tui(argv, options = {}) {
 	const { values } = parseArgs({
 		args: argv,
 		options: {
@@ -84,15 +89,28 @@ export async function tui(argv) {
 	}
 	const root = values.dir ?? process.cwd();
 
-	if (values.once || !process.stdout.isTTY) {
+	if (values.once || !(options.tty ?? process.stdout.isTTY)) {
 		const state = await collectDashboardState(root);
 		process.stdout.write(`${renderDashboard(state).join("\n")}\n`);
 		return 0;
 	}
 
-	const loaded = await loadPiTui({ piRoot: await configuredPiRoot(root) });
-	if (loaded.kit) return interactive(root, loaded.kit);
-	return fallback(root, loaded.error);
+	const loaded = options.loaded ?? (await loadPiTui({ piRoot: await configuredPiRoot(root) }));
+	if (loaded.kit && tuiScreen(loaded.kit)) return (options.interactive ?? interactive)(root, loaded.kit);
+	const error = loaded.error ?? new Error("pi-tui exports no screen class (TuiAltScreen, TUI or TuiMainScreen)");
+	return (options.fallback ?? fallback)(root, error);
+}
+
+/**
+ * The screen class the loaded pi-tui exports (github#16): `TuiAltScreen` on
+ * current pi-tui, `TUI` on 0.80.x, then `TuiMainScreen`; undefined when none is
+ * a constructor, so `tui()` takes the plain-text fallback instead of throwing.
+ */
+export function tuiScreen(kit) {
+	for (const name of ["TuiAltScreen", "TUI", "TuiMainScreen"]) {
+		if (typeof kit?.[name] === "function") return kit[name];
+	}
+	return undefined;
 }
 
 /** `pi.root` from the merged config, or undefined (a broken config must not stop the dashboard). */
@@ -145,9 +163,12 @@ function onTerminalResize(terminal, handler) {
  * the last layout's hit map to reducer actions (GitHub #5). `options.terminal`
  * and `options.onKey` are for the stub-terminal tests.
  */
-export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text }, options = {}) {
+export async function interactive(root, kit, options = {}) {
+	const { ProcessTerminal, Text } = kit;
+	const Screen = tuiScreen(kit);
+	if (!Screen) throw new Error("pi-tui exports no screen class (TuiAltScreen, TUI or TuiMainScreen)");
 	const terminal = options.terminal ?? new ProcessTerminal();
-	const ui = new TuiAltScreen(terminal, false);
+	const ui = new Screen(terminal, false);
 	const text = new Text("", 0, 0);
 	let last = null; // the last dashboard state
 	let layout = null; // the last frame's hit map (rows, tabs) for the mouse layer
@@ -177,11 +198,11 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 	else ui.addChild(layoutRoot);
 	const controls = createTuiControls({ root, onChange: paint });
 	onTerminalResize(terminal, paint);
-	const refresh = async () => {
+	const refresh = singleFlight(async () => {
 		last = await collectDashboardState(root, { view: controls.view });
 		controls.setDashboard(last);
 		paint();
-	};
+	});
 	const quit = new Promise((resolve) => {
 		controls.onQuit(resolve);
 	});
@@ -198,13 +219,87 @@ export async function interactive(root, { ProcessTerminal, TuiAltScreen, Text },
 			.catch(() => {});
 		return { consume: true };
 	});
+	let timer;
+	let stopped = false;
+	const stop = () => {
+		if (stopped) return false;
+		stopped = true;
+		clearInterval(timer);
+		detach();
+		ui.stop();
+		return true;
+	};
+	// A kill, a hangup, an uncaught throw or process.exit must not leave the
+	// terminal on the alternate screen with mouse tracking on.
+	const detach = restoreTerminalOnExit(() => {
+		try {
+			stop();
+		} catch {
+			// Restoring by hand below is what matters now.
+		}
+		try {
+			terminal.write(RESTORE_TERMINAL);
+		} catch {
+			// The terminal is gone.
+		}
+	}, options.exit);
 	ui.start();
-	const timer = setInterval(() => refresh().catch(() => {}), REFRESH_MS);
-	await refresh();
-	await quit;
-	clearInterval(timer);
-	ui.stop();
+	try {
+		timer = setInterval(() => refresh().catch(() => {}), REFRESH_MS);
+		// The real terminal holds the process open via stdin. A ref'd timer here
+		// survives a test that fails before q, and `npm test` never exits.
+		timer.unref();
+		await refresh();
+		await quit;
+	} finally {
+		stop();
+	}
 	return 0;
+}
+
+/** Mouse tracking off, main screen back, cursor shown: what an abnormal exit writes. */
+export const RESTORE_TERMINAL = "\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l\x1b[?25h";
+
+const EXIT_SIGNALS = { SIGTERM: 15, SIGHUP: 1 };
+
+/**
+ * Run `restore` once if the process is killed (SIGTERM, SIGHUP), exits, or dies
+ * of an uncaught exception, then let it end as it would have (128 + signal).
+ * Returns a detach that removes every handler, for the normal stop.
+ */
+export function restoreTerminalOnExit(restore, exit = (code) => process.exit(code)) {
+	let done = false;
+	const once = () => {
+		if (done) return;
+		done = true;
+		restore();
+	};
+	const onSignal = (signal) => {
+		once();
+		exit(128 + (EXIT_SIGNALS[signal] ?? 15));
+	};
+	for (const signal of Object.keys(EXIT_SIGNALS)) process.on(signal, onSignal);
+	process.on("exit", once);
+	process.on("uncaughtExceptionMonitor", once);
+	return () => {
+		done = true;
+		for (const signal of Object.keys(EXIT_SIGNALS)) process.off(signal, onSignal);
+		process.off("exit", once);
+		process.off("uncaughtExceptionMonitor", once);
+	};
+}
+
+/** Wrap an async refresh so a slow one is never overlapped: calls while it runs share its promise. */
+function singleFlight(run) {
+	let inFlight = null;
+	return () => {
+		inFlight ??= Promise.resolve()
+			.then(run)
+			.finally(() => {
+				inFlight = null;
+			});
+		return inFlight;
+	};
 }
 
 /** Plain-text fallback when pi-tui isn't resolvable: a frame every second, with the same keys. */
@@ -219,13 +314,24 @@ async function fallback(root, error) {
 		process.stdout.write(`\n${renderDashboard({ ...last, ...controls.view }).join("\n")}\n`);
 	};
 	const controls = createTuiControls({ root, onChange: paint });
-	const frame = async () => {
+	const frame = singleFlight(async () => {
 		last = await collectDashboardState(root, { view: controls.view });
 		controls.setDashboard(last);
 		paint();
-	};
-	const timer = setInterval(() => frame().catch(() => {}), REFRESH_MS);
+	});
+	// Armed after the first frame: if that one throws, no interval is left holding the process.
 	await frame();
+	const timer = setInterval(() => frame().catch(() => {}), REFRESH_MS);
+	try {
+		await runFallbackKeys(controls);
+	} finally {
+		clearInterval(timer);
+	}
+	return 0;
+}
+
+/** Feed stdin's keys to the controls until q; without a TTY, run until the process is killed. */
+async function runFallbackKeys(controls) {
 	const quit = new Promise((resolve) => controls.onQuit(resolve));
 	if (process.stdin.isTTY) {
 		process.stdin.setRawMode(true);
@@ -245,6 +351,4 @@ async function fallback(root, error) {
 		// Nothing to read keys from: run until the process is killed.
 		await new Promise(() => {});
 	}
-	clearInterval(timer);
-	return 0;
 }

@@ -24,11 +24,11 @@ async function makeRoot({ issues = [], labels = [...LABELS], noAuth = false, gh 
 	git("config", "user.name", "T");
 	await writeFile(join(root, "README.md"), "# test\n");
 	// One initial commit, so syncIssues' `git log --grep` runs in a repo with history.
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	git("add", "README.md");
 	git("commit", "-q", "-m", "init");
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({
 			model: "scripted/s1",
 			thinking: "off",
@@ -190,5 +190,5 @@ test("a missing label exits 1 with the missing-labels error and imports nothing"
 	assert.match(stderr, new RegExp(`dark-factory: missing GitHub labels in owner/name: ${LABELS.slice(1).join(", ").replace(/:/g, "\\:")}`));
 	assert.match(stderr, /shiftwork github labels --create/);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported");
-	assert.deepEqual(await readdir(join(root, ".pi")).catch(() => []), ["shiftwork.json"], "no issue state written");
+	assert.deepEqual(await readdir(join(root, ".shiftwork")).catch(() => []), ["shiftwork.json"], "no issue state written");
 });

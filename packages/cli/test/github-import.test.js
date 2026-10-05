@@ -12,13 +12,17 @@ import { importIssues, readIssueState, slugifyTitle } from "../src/github-import
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /** A stub GitHub: records every `listIssues` label, filters issues on it like `gh --label`. */
-function stubGitHub({ collaborators = ["octocat"], issues = [] } = {}) {
-	const calls = { listIssues: [] };
+function stubGitHub({ collaborators = ["octocat"], issues = [], labelActors = {} } = {}) {
+	const calls = { listIssues: [], labelActor: [] };
 	return {
 		calls,
 		github: {
 			async collaborators() {
 				return [...collaborators];
+			},
+			async labelActor(n, label) {
+				calls.labelActor.push([n, label]);
+				return labelActors[n];
 			},
 			async listIssues({ label } = {}) {
 				calls.listIssues.push(label ?? null);
@@ -71,6 +75,34 @@ test("imports a collaborator's issue: spec.md and 01-plan.md with the expected l
 	assert.match(plan, /\*\*Verify:\*\* `shiftwork tickets check gh-8-support-github-issues`/);
 });
 
+test("the plan ticket asks for a Type: research ticket 02 only when the issue needs reading first", async () => {
+	const dir = await root();
+	await importIssues({ root: dir, github: stubGitHub({ issues: [issue()] }).github, config: { github: {} }, now });
+
+	const plan = await readFile(join(dir, ".scratch", "gh-8-support-github-issues", "issues", "01-plan.md"), "utf8");
+	assert.match(plan, /needs reading before coding/);
+	assert.match(plan, /`\*\*Type:\*\* research` ticket `02`/);
+	assert.match(plan, /`\.scratch\/gh-8-support-github-issues\/research\.md`/);
+	assert.match(plan, /`test -s \.scratch\/gh-8-support-github-issues\/research\.md`/);
+	assert.match(plan, /`\*\*Blocked by:\*\*`/);
+	assert.match(plan, /otherwise skip it/);
+});
+
+test("an empty issue imports ticket 01 as needs-info and records a blank description", async () => {
+	const dir = await root();
+	const theIssue = issue({ body: " \n\t" });
+
+	await importIssues({ root: dir, github: stubGitHub({ issues: [theIssue] }).github, config: { github: {} }, now });
+
+	const plan = await readFile(join(dir, ".scratch", "gh-8-support-github-issues", "issues", "01-plan.md"), "utf8");
+	assert.match(plan, /\*\*Status:\*\* needs-info/);
+	assert.match(plan, /Outcome: needs-info: The issue has no description\. What should Shiftwork build\?/);
+	const spec = await readFile(join(dir, ".scratch", "gh-8-support-github-issues", "spec.md"), "utf8");
+	assert.match(spec, /\*\*Status:\*\* needs-info/);
+	const state = await readIssueState(dir);
+	assert.equal(state.issues["8"].bodySeen, "");
+});
+
 test("a second run imports nothing: the state file makes it idempotent", async () => {
 	const dir = await root();
 	const { github } = stubGitHub({ issues: [issue()] });
@@ -90,6 +122,7 @@ test("a second run imports nothing: the state file makes it idempotent", async (
 		lastCommentId: null,
 		ownComments: [],
 		posted: [],
+		bodySeen: "Please support issues.",
 	});
 });
 
@@ -127,6 +160,36 @@ test("github.labels.in filters the issues and is passed to listIssues", async ()
 	assert.deepEqual(calls.listIssues, ["shiftwork"]);
 	assert.deepEqual(result.imported.map((i) => i.number), [8]);
 	assert.deepEqual(result.skipped, []);
+});
+
+test("logins are compared case-insensitively, on both the collaborators and github.authors", async () => {
+	const dir = await root();
+	const config = { github: { authors: ["Friend"] } };
+	const issues = [issue({ number: 8, author: "octocat" }), issue({ number: 9, title: "Other", author: "FRIEND" })];
+
+	const result = await importIssues({ root: dir, github: stubGitHub({ collaborators: ["OctoCat"], issues }).github, config, now });
+
+	assert.deepEqual(result.imported.map((i) => i.number), [8, 9]);
+	assert.deepEqual(result.skipped, []);
+});
+
+test("an outsider's issue is accepted when a collaborator added the in label; events are read only for outsiders", async () => {
+	const dir = await root();
+	const config = { github: { labels: { in: "shiftwork" } } };
+	const { github, calls } = stubGitHub({
+		issues: [
+			issue({ number: 8, labels: ["shiftwork"] }),
+			issue({ number: 9, title: "Labelled by a collaborator", author: "rando", labels: ["shiftwork"] }),
+			issue({ number: 10, title: "Labelled by an outsider", author: "rando", labels: ["shiftwork"] }),
+		],
+		labelActors: { 9: "OctoCat", 10: "rando" },
+	});
+
+	const result = await importIssues({ root: dir, github, config, now });
+
+	assert.deepEqual(result.imported.map((i) => i.number), [8, 9]);
+	assert.deepEqual(result.skipped, [{ number: 10, login: "rando" }]);
+	assert.deepEqual(calls.labelActor, [[9, "shiftwork"], [10, "shiftwork"]], "the author's own issue needs no events query");
 });
 
 test("the generated 01-plan.md passes parseTicket and the spec names the issue URL", async () => {
@@ -168,7 +231,8 @@ test("the slug is the title lower-cased, ASCII-folded, 40 characters max", () =>
 	assert.equal(slugifyTitle(undefined), "issue");
 });
 
-test(".pi/shiftwork-github.json is in .gitignore", async () => {
+test(".shiftwork/shiftwork-github.json (and its legacy .pi/ path) is in .gitignore", async () => {
 	const gitignore = await readFile(join(repoRoot, ".gitignore"), "utf8");
+	assert.match(gitignore, /^\.shiftwork\/shiftwork-github\.json$/m);
 	assert.match(gitignore, /^\.pi\/shiftwork-github\.json$/m);
 });

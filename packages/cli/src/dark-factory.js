@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { openRunState, runFrontier } from "shiftwork-core";
 
 import { execIn } from "./exec.js";
-import { createGitHub, ghPreFlight, ghAuthMessage, ghInstallMessage } from "./github.js";
+import { createGitHub, ghPreFlight, ghAuthMessage, ghInstallMessage, oneLine } from "./github.js";
 import { importIssues } from "./github-import.js";
 import { checkLabels, missingLabelsMessage } from "./github-labels.js";
 import { parsePostKey } from "./github-post.js";
@@ -13,13 +13,15 @@ import { syncIssues } from "./github-sync.js";
 const STOP_FILE = "STOP";
 /** The wait between polls wakes at least this often, so a STOP file is noticed (like the runner's cooldown waits). */
 const WAKE_MS = 60_000;
+/** After failed GitHub polls the wait doubles, up to this (or `pollMin`, when longer). */
+const BACKOFF_CAP_MS = 60 * 60_000;
 
 // The gh pre-flight messages live with the wrapper (github.js); re-exported
 // here for the TUI and the tests, which know them as dark-factory's (they take
 // the command name; dark-factory passes none, so they use its own).
 export { ghAuthMessage, ghInstallMessage };
 /** `run --dark-factory` without a `github` block: there is nothing to watch. */
-export const NO_GITHUB_CONFIG_MESSAGE = 'dark-factory needs a "github" block in .pi/shiftwork.json (see docs/guide.md "Dark-factory mode")';
+export const NO_GITHUB_CONFIG_MESSAGE = 'dark-factory needs a "github" block in .shiftwork/shiftwork.json (see docs/guide.md "Dark-factory mode")';
 
 /**
  * `run --dark-factory` (spec: github-watch, ticket 05): watch the repo's GitHub
@@ -34,6 +36,13 @@ export const NO_GITHUB_CONFIG_MESSAGE = 'dark-factory needs a "github" block in 
  * is linked only once the local remote-tracking refs show it on the remote).
  * It stops like the runner does: a STOP file or a signal ends it after the
  * current shift; `once` does one poll plus one frontier pass and returns 0.
+ *
+ * A failing gh call in the import or a sync (network, 5xx, rate limit, 403)
+ * must not kill the watcher: it is logged as one line, the frontier pass still
+ * runs, and the wait before the next poll doubles (capped at an hour) until a
+ * poll gets through. An outsider's skipped issue is printed once per process.
+ * The run state says running between passes (each `runFrontier` pass ends by
+ * marking it idle) and not running once dark-factory returns.
  *
  * Before anything else, using the operator's installed `gh` (`github.gh`, else
  * `gh` on PATH): gh missing and `gh auth status` failing each exit 1, then
@@ -73,7 +82,7 @@ export async function darkFactoryRun({
 		err(problem);
 		return 1;
 	}
-	const githubApi = github ?? createGitHub({ root, repo: config.github.repo, gh: ghBinary, exec: execFn });
+	const githubApi = github ?? createGitHub({ root, repo: config.github.repo, gh: ghBinary, exec: execFn, warn: err });
 
 	// The configured labels must exist before any issue is imported (ticket 09).
 	const { missing } = await checkLabels({ github: githubApi, config });
@@ -86,72 +95,108 @@ export async function darkFactoryRun({
 
 	// The run state records the mode (the TUI's header shows dark-factory while it is
 	// live), whether it was started from the shell or with the TUI's `g`.
-	await openRunState(root).update({ pid: process.pid, running: true, mode: "dark-factory" });
+	const runState = openRunState(root);
+	const markRunning = () => runState.update({ pid: process.pid, running: true, mode: "dark-factory" });
+	await markRunning();
+	try {
+		return await watch();
+	} finally {
+		await runState.update({ pid: process.pid, running: false, finishedAt: new Date().toISOString() });
+	}
 
-	const runGit = git ?? ((args) => execIn(root)(["git", ...args]));
-	const gitHead = async () => {
-		try {
-			return String(await runGit(["rev-parse", "HEAD"])).trim() || undefined;
-		} catch {
-			return undefined; // not a git repo, or no commit yet: nothing to push
-		}
-	};
-	const stopped = () => existsSync(join(root, STOP_FILE));
-	const sleepFor = sleep ?? ((ms) => sleepUntil(root, ms));
+	async function watch() {
+		const runGit = git ?? ((args) => execIn(root)(["git", ...args]));
+		const gitHead = async () => {
+			try {
+				return String(await runGit(["rev-parse", "HEAD"])).trim() || undefined;
+			} catch {
+				return undefined; // not a git repo, or no commit yet: nothing to push
+			}
+		};
+		const stopped = () => existsSync(join(root, STOP_FILE));
+		const sleepFor = sleep ?? ((ms) => sleepUntil(root, ms));
 
-	// Commit links need the commits on GitHub, checked per commit by the sync
-	// itself (`git branch -r --contains`); a failed `git push` is retried on
-	// every poll until one succeeds.
-	let retryPush = false;
-	const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit });
+		// Commit links need the commits on GitHub, checked per commit by the sync
+		// itself (`git branch -r --contains`); a failed `git push` is retried on
+		// every poll until one succeeds.
+		let retryPush = false;
+		const syncOnce = () => syncIssues({ root, github: githubApi, config, tracker, git: runGit });
 
-	for (;;) {
-		const { imported } = await importIssues({ root, github: githubApi, config });
-		for (const issue of imported) log(`github#${issue.number} imported: ${issue.title} → ${issue.feature}`);
-		await printSync(await syncOnce(), log);
+		// A failing gh call is one line in the log, never the end of the watcher:
+		// the poll's other steps still run and the next wait backs off.
+		const pollMs = pollMin * 60_000;
+		let waitMs = pollMs;
+		let pollFailed = false;
+		const ghStep = async (step) => {
+			try {
+				await step();
+			} catch (error) {
+				pollFailed = true;
+				log(`dark-factory: GitHub poll failed: ${oneLine(error)}`);
+			}
+		};
+		// An outsider's issue is skipped on every poll; it is printed once per process.
+		const reportedSkips = new Set();
 
-		// One frontier pass with today's runner, all features, until the frontier is empty.
-		const before = config.github.push ? await gitHead() : undefined;
-		const summary = await runFrontierImpl({
-			root,
-			tracker,
-			backend,
-			verify,
-			config,
-			workspace,
-			classifyTicket,
-			log: shiftLog,
-			options: {},
-		});
-		for (const t of summary.resolved) log(`✔ ${t.feature}/${t.number} resolved: ${t.reason}`);
-		for (const t of summary.reopened ?? []) log(`✖ ${t.feature}/${t.number} reopened by review: ${t.reason}`);
-		for (const t of summary.needsInfo) log(`✖ ${t.feature}/${t.number} needs-info: ${t.reason}`);
-		if (summary.stoppedReason) log(`⚠ Stopped: ${summary.stoppedReason}`);
+		for (;;) {
+			pollFailed = false;
+			await ghStep(async () => {
+				const { imported, skipped } = await importIssues({ root, github: githubApi, config });
+				for (const issue of imported) log(`github#${issue.number} imported: ${issue.title} → ${issue.feature}`);
+				for (const { number, login } of skipped) {
+					if (reportedSkips.has(number)) continue;
+					reportedSkips.add(number);
+					log(`github#${number} skipped: ${login} is not a collaborator or in github.authors, and no collaborator added the in label`);
+				}
+			});
+			await ghStep(async () => printSync(await syncOnce(), log));
 
-		// The commits the comments link to need to be on GitHub: push after a pass
-		// that landed. A failed push must not kill the watcher: it is retried on
-		// the next poll, and until one succeeds the comments show short shas.
-		if (config.github.push) {
-			const after = await gitHead();
-			if (after !== undefined && (after !== before || retryPush)) {
-				try {
-					await runGit(["push", "origin", "HEAD"]);
-					retryPush = false;
-					log(`dark-factory: pushed ${after.slice(0, 7)} to origin`);
-				} catch (error) {
-					retryPush = true;
-					log(`dark-factory: git push failed: ${String(error?.message ?? error).trim()}; commit links stay short shas until it succeeds`);
+			// One frontier pass with today's runner, all features, until the frontier is empty.
+			const before = config.github.push ? await gitHead() : undefined;
+			const summary = await runFrontierImpl({
+				root,
+				tracker,
+				backend,
+				verify,
+				config,
+				workspace,
+				classifyTicket,
+				log: shiftLog,
+				options: { holdOnNeedsInfo: true },
+			});
+			for (const t of summary.resolved) log(`✔ ${t.feature}/${t.number} resolved: ${t.reason}`);
+			for (const t of summary.reopened ?? []) log(`✖ ${t.feature}/${t.number} reopened by review: ${t.reason}`);
+			for (const t of summary.needsInfo) log(`✖ ${t.feature}/${t.number} needs-info: ${t.reason}`);
+			if (summary.stoppedReason) log(`⚠ Stopped: ${summary.stoppedReason}`);
+			// Each pass ends by marking the run state idle; dark-factory is still running.
+			await markRunning();
+
+			// The commits the comments link to need to be on GitHub: push after a pass
+			// that landed. A failed push must not kill the watcher: it is retried on
+			// the next poll, and until one succeeds the comments show short shas.
+			if (config.github.push) {
+				const after = await gitHead();
+				if (after !== undefined && (after !== before || retryPush)) {
+					try {
+						await runGit(["push", "origin", "HEAD"]);
+						retryPush = false;
+						log(`dark-factory: pushed ${after.slice(0, 7)} to origin`);
+					} catch (error) {
+						retryPush = true;
+						log(`dark-factory: git push failed: ${String(error?.message ?? error).trim()}; commit links stay short shas until it succeeds`);
+					}
 				}
 			}
-		}
-		await printSync(await syncOnce(), log);
+			await ghStep(async () => printSync(await syncOnce(), log));
 
-		if (summary.stoppedReason || stopped()) return 3;
-		if (once) return 0;
-		log(`dark-factory: waiting ${pollMin} min for the next poll`);
-		if (await sleepFor(pollMin * 60_000)) {
-			log("⚠ Stopped: STOP file");
-			return 3;
+			if (summary.stoppedReason || stopped()) return 3;
+			if (once) return 0;
+			waitMs = pollFailed ? Math.min(waitMs * 2, Math.max(pollMs, BACKOFF_CAP_MS)) : pollMs;
+			log(`dark-factory: waiting ${waitMs / 60_000} min for the next poll`);
+			if (await sleepFor(waitMs)) {
+				log("⚠ Stopped: STOP file");
+				return 3;
+			}
 		}
 	}
 }

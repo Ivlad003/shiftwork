@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { validateConfig } from "shiftwork-core";
-import { dryRunFrontier, formatDryRunLine } from "../src/dry-run.js";
+import { dryRunFrontier, dualColumn, formatDryRunLine } from "../src/dry-run.js";
 
 const bin = fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
 const exec = async (args, env = {}) => {
@@ -31,16 +32,35 @@ test("init writes config, worker prompt and pi compaction settings, and keeps th
 	const root = await repo({});
 	const { stdout: first } = await exec(["init", "--dir", root, "--model", "anthropic/m1"]);
 	assert.match(first, /allowInPlace: true/);
-	const config = JSON.parse(await readFile(join(root, ".pi", "shiftwork.json"), "utf8"));
+	const config = JSON.parse(await readFile(join(root, ".shiftwork", "shiftwork.json"), "utf8"));
 	assert.equal(config.allowInPlace, false);
 	assert.deepEqual(config.tiers.quick.chain, ["anthropic/m1"]);
-	assert.match(await readFile(join(root, ".pi", "shiftwork-worker.md"), "utf8"), /Shiftwork worker/);
+	assert.match(await readFile(join(root, ".shiftwork", "shiftwork-worker.md"), "utf8"), /Shiftwork worker/);
 	assert.equal(JSON.parse(await readFile(join(root, ".pi", "settings.json"), "utf8")).compaction.reserveTokens, 16384);
 
-	await writeFile(join(root, ".pi", "shiftwork.json"), "{\"model\":\"mine/kept\"}");
+	await writeFile(join(root, ".shiftwork", "shiftwork.json"), "{\"model\":\"mine/kept\"}");
 	const { stdout } = await exec(["init", "--dir", root]);
 	assert.match(stdout, /kept .*shiftwork\.json/);
-	assert.equal(await readFile(join(root, ".pi", "shiftwork.json"), "utf8"), "{\"model\":\"mine/kept\"}");
+	assert.equal(await readFile(join(root, ".shiftwork", "shiftwork.json"), "utf8"), "{\"model\":\"mine/kept\"}");
+});
+
+test("init writes Shiftwork's files to .shiftwork/ and pi's settings to .pi/", async () => {
+	const root = await repo({});
+	await exec(["init", "--dir", root, "--model", "a/b"]);
+	assert.equal(existsSync(join(root, ".shiftwork", "shiftwork.json")), true);
+	assert.equal(existsSync(join(root, ".shiftwork", "shiftwork-worker.md")), true);
+	assert.equal(existsSync(join(root, ".pi", "shiftwork.json")), false);
+	assert.equal(existsSync(join(root, ".pi", "settings.json")), true);
+});
+
+test("init in a legacy repo keeps its .pi/shiftwork.json until it is migrated", async () => {
+	const root = await repo({});
+	await mkdir(join(root, ".pi"));
+	await writeFile(join(root, ".pi", "shiftwork.json"), "{\"model\":\"mine/kept\"}");
+	const { stdout, stderr } = await exec(["init", "--dir", root]);
+	assert.match(stdout, /kept .*\.pi\/shiftwork\.json/);
+	assert.match(stderr, /legacy \.pi\/.*shiftwork migrate/);
+	assert.equal(existsSync(join(root, ".shiftwork")), false);
 });
 
 test("init keeps other pi settings", async () => {
@@ -141,7 +161,7 @@ test("run --dry-run shows whether a ticket would be reviewed and on which tier",
 	assert.match(on.stdout, /f\/02 {2}type=code \(default\) {2}tier=standard {2}model=prov\/model-a {2}thinking=medium {2}budget=[^\n]* {2}review=premium \(before land\) {2}Build it/);
 
 	// Filters narrow the reviews to some tickets only.
-	const path = join(root, ".pi", "shiftwork.json");
+	const path = join(root, ".shiftwork", "shiftwork.json");
 	const config = JSON.parse(await readFile(path, "utf8"));
 	config.review = { enabled: true, tier: "premium", types: ["git"] };
 	await writeFile(path, JSON.stringify(config));
@@ -176,7 +196,7 @@ test("run --no-review turns the review column off for that run", async () => {
 test("run says at start that reviews are off in the config", async () => {
 	const root = await repo({ "f/01-git.md": t("01", "Commit it", "**Type:** git") });
 	await exec(["init", "--dir", root, "--model", "prov/model-a"]);
-	const path = join(root, ".pi", "shiftwork.json");
+	const path = join(root, ".shiftwork", "shiftwork.json");
 	const config = JSON.parse(await readFile(path, "utf8"));
 	config.review = false;
 	await writeFile(path, JSON.stringify(config));
@@ -202,4 +222,15 @@ test("formatDryRunLine shows the review tier, no, or nothing when reviews are of
 		formatDryRunLine({ feature: "f", number: "03", title: "Build it", type: "code" }, route),
 		`f/03  ${line}  Build it`,
 	);
+});
+
+test("dualColumn names the two candidates and the merge tier of a dual ticket, nothing otherwise", () => {
+	const ticket = { feature: "f", number: "01", type: "code", dual: "yes" };
+	const route = { type: "code" };
+	assert.equal(dualColumn({ dual: { models: ["grok:grok-4.6", "claude:haiku"], mergeTier: "premium" } }, ticket, route), "grok:grok-4.6 + claude:haiku → merge premium");
+	assert.equal(dualColumn({ dual: { enabled: true, tiers: ["standard", "premium"] } }, { ...ticket, dual: undefined }, route), "tiers standard + premium → merge review tier");
+	assert.equal(dualColumn({ dual: { enabled: true } }, { ...ticket, dual: undefined }, route), "usual route + next provider → merge review tier");
+	assert.equal(dualColumn({}, { ...ticket, dual: undefined }, route), undefined);
+	assert.equal(dualColumn({ dual: { enabled: true } }, { ...ticket, type: "plan", dual: undefined }, route), undefined);
+	assert.match(formatDryRunLine({ feature: "f", number: "01", type: "code", title: "T" }, { type: "code", tier: "s", model: "m", thinking: "low" }, undefined, "a + b → merge p"), /  dual=a \+ b → merge p  T$/);
 });

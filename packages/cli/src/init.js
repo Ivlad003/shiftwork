@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
-import { WORKER_PROMPT } from "shiftwork-core";
+import { stateDir, WORKER_PROMPT } from "shiftwork-core";
 import { discoverOllamaModels, ollamaHost, ollamaUnavailableMessage, writeOllamaProvider } from "./ollama.js";
 
 /** A starter config: every tier gets `model` when given, otherwise CHANGE-ME placeholders. */
@@ -84,8 +84,13 @@ export async function init(argv, { root = process.cwd(), log = console.log, env 
 			return;
 		}
 	}
-	const dir = join(values.dir ?? root, ".pi");
+	// Shiftwork's own files go to .shiftwork/ (or a legacy repo's .pi/ until "shiftwork migrate");
+	// pi's settings.json always stays in pi's .pi/.
+	const base = values.dir ?? root;
+	const dir = stateDir(base);
+	const piDir = join(base, ".pi");
 	await mkdir(dir, { recursive: true });
+	const configName = `${relative(base, dir)}/shiftwork.json`;
 
 	const files = [
 		[join(dir, "shiftwork.json"), `${JSON.stringify(starterConfig(values.model), null, 2)}\n`],
@@ -100,7 +105,8 @@ export async function init(argv, { root = process.cwd(), log = console.log, env 
 		log(`wrote   ${path}`);
 	}
 
-	const settingsPath = join(dir, "settings.json");
+	const settingsPath = join(piDir, "settings.json");
+	await mkdir(piDir, { recursive: true });
 	const settings = existsSync(settingsPath) ? JSON.parse(await readFile(settingsPath, "utf8")) : {};
 	if (settings.compaction && !values.force) {
 		log(`kept    ${settingsPath} compaction settings`);
@@ -125,9 +131,9 @@ export async function init(argv, { root = process.cwd(), log = console.log, env 
 		};
 		await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 		log(`updated ${configPath} (local tier: ${ollama.models.length} ollama models)`);
-		log('route ticket types to local models with routing.<type>.tier: "local" in .pi/shiftwork.json');
+		log(`route ticket types to local models with routing.<type>.tier: "local" in ${configName}`);
 	}
-	log("handoffs start a fresh context by default; set allowInPlace: true in .pi/shiftwork.json to restore in-place swaps");
+	log(`handoffs start a fresh context by default; set allowInPlace: true in ${configName} to restore in-place swaps`);
 	log('every ticket gets one review shift on the strongest configured tier, on its branch before it lands; turn reviews off with "review": false or "shiftwork run --no-review"');
-	if (!values.model) log('\nNext: replace the CHANGE-ME models in .pi/shiftwork.json (see "pi --list-models"), then "shiftwork run --dry-run".');
+	if (!values.model) log(`\nNext: replace the CHANGE-ME models in ${configName} (see "pi --list-models"), then "shiftwork run --dry-run".`);
 }

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createPiBackend, locatePi, mapPiEvent } from "../src/pi-backend.js";
+import { existsSync } from "node:fs";
+import { createPiBackend, locatePi, mapPiEvent, parseModelList, piRawEvents } from "../src/pi-backend.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/scripted-provider.ts", import.meta.url));
 
@@ -206,7 +207,8 @@ test("probe reports a model that answers as available and a limit error as unava
 
 /** A pi managed install like the official installer's: <agentDir>/bin/pi is a shell launcher into install/releases/<v>. */
 async function fakeManagedInstall(version = "9.9.9") {
-	const home = await mkdtemp(join(tmpdir(), "sw-pi-managed-"));
+	// The real path: on macOS tmpdir() is /var/… while locatePi resolves symlinks to /private/var/….
+	const home = await realpath(await mkdtemp(join(tmpdir(), "sw-pi-managed-")));
 	const agentDir = join(home, ".pi", "agent");
 	const pkg = join(agentDir, "install", "releases", version, "node_modules", "@earendil-works", "pi-coding-agent");
 	await mkdir(join(pkg, "dist", "bundle"), { recursive: true });
@@ -246,4 +248,92 @@ test("locatePi takes an explicit root first and names pi.root when nothing is fo
 	assert.equal(locatePi({ root: m.pkg, resolvePackage: noPackage, which: () => "", env: {} }).root, m.pkg);
 	const empty = await mkdtemp(join(tmpdir(), "sw-pi-none-"));
 	assert.throws(() => locatePi({ resolvePackage: noPackage, which: () => "", env: {}, home: empty }), /pi\.root/);
+});
+
+test("a pi shift does not load the user's global extensions unless isolateExtensions is false", { timeout: 120_000 }, async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-ext-home-"));
+	await mkdir(join(agentDir, "extensions"), { recursive: true });
+	const marker = join(agentDir, "loaded.txt");
+	await writeFile(
+		join(agentDir, "extensions", "global.ts"),
+		`import { writeFileSync } from "node:fs";\nexport default function () {\n\twriteFileSync(${JSON.stringify(marker)}, "loaded");\n}\n`,
+	);
+	const runShift = async (extra) => {
+		const backend = createPiBackend({
+			args: ["--offline", "-ns", "-e", fixture],
+			env: { PI_CODING_AGENT_DIR: agentDir, SHIFTWORK_SCRIPT: JSON.stringify([{ text: "done" }]) },
+			timeoutMs: 60_000,
+			...extra,
+		});
+		const shift = await backend.startShift({ cwd: await mkdtemp(join(tmpdir(), "sw-pi-ext-")), route: { model: "scripted/s1", thinking: "off" }, prompt: "p", systemPrompt: "s" });
+		for await (const event of shift.events) if (event.type === "end") break;
+		await shift.close?.();
+	};
+
+	await runShift({});
+	assert.equal(existsSync(marker), false, "global extensions stay out of a shift; explicit -e still loads");
+	await runShift({ isolateExtensions: false });
+	assert.equal(existsSync(marker), true, "the opt-out loads them again");
+});
+
+test("auto isolation loads the extensions for a model pi only knows through one", { timeout: 120_000 }, async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-ext-home-"));
+	await mkdir(join(agentDir, "extensions"), { recursive: true });
+	const marker = join(agentDir, "loaded.txt");
+	await writeFile(
+		join(agentDir, "extensions", "global.ts"),
+		`import { writeFileSync } from "node:fs";\nexport default function () {\n\twriteFileSync(${JSON.stringify(marker)}, "loaded");\n}\n`,
+	);
+	const backend = createPiBackend({
+		args: ["--offline", "-ns", "-e", fixture],
+		env: { PI_CODING_AGENT_DIR: agentDir, SHIFTWORK_SCRIPT: JSON.stringify([{ text: "done" }]) },
+		timeoutMs: 60_000,
+	});
+	// Not listed without extensions: a provider some extension would register.
+	const shift = await backend.startShift({ cwd: await mkdtemp(join(tmpdir(), "sw-pi-ext-")), route: { model: "extprovider/m1", thinking: "off" }, prompt: "p", systemPrompt: "s" });
+	for await (const event of shift.events) if (event.type === "end") break;
+	await shift.close?.();
+	assert.equal(existsSync(marker), true, "a model missing from pi's extension-free list keeps the extensions");
+});
+
+test("parseModelList reads provider/model refs from pi --list-models", () => {
+	const text = [
+		'Warning: No models match pattern "x/y"',
+		"provider        model                       context  max-out  thinking  images",
+		"anthropic       claude-haiku-4-5            200K     64K      yes       yes",
+		"opencode-go     glm-5.3                     200K     64K      yes       no",
+		"",
+	].join("\n");
+	assert.deepEqual([...parseModelList(text)], ["anthropic/claude-haiku-4-5", "opencode-go/glm-5.3"]);
+});
+
+test("pi extension UI requests are dropped and an extension error stays a compact raw event", () => {
+	assert.deepEqual(piRawEvents({ type: "extension_ui_request", id: "1", method: "setWidget", widgetLines: ["mic"] }), []);
+	const [raw] = piRawEvents({ type: "extension_error", extensionPath: "/x/pi-free.ts", event: "session_start", error: "e".repeat(5000) });
+	assert.equal(raw.type, "raw");
+	assert.equal(raw.event.type, "extension_error");
+	assert.equal(raw.event.extensionPath, "/x/pi-free.ts");
+	assert.ok(raw.event.error.length <= 500);
+	const event = { type: "message_end", message: { role: "assistant" } };
+	assert.deepEqual(piRawEvents(event), [{ type: "raw", event }]);
+});
+
+test("a missing API key is an error event with kind auth, so the runner can skip that model", () => {
+	const events = mapPiEvent({
+		type: "message_end",
+		message: { role: "assistant", stopReason: "error", errorMessage: 'No API key found for "openrouter"', content: [], usage: {} },
+	});
+	assert.deepEqual(events.at(-1), { type: "error", message: 'No API key found for "openrouter"', kind: "auth" });
+	const other = mapPiEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "429 rate limit", content: [], usage: {} } });
+	assert.deepEqual(other.at(-1), { type: "error", message: "429 rate limit" });
+});
+
+test("mapPiEvent turns tool_execution_start into a tool event: the command for bash, the path for file tools", () => {
+	assert.deepEqual(mapPiEvent({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "npm test" } }), [
+		{ type: "tool", name: "bash", input: "npm test" },
+	]);
+	assert.deepEqual(mapPiEvent({ type: "tool_execution_start", toolCallId: "t2", toolName: "read", args: { path: "src/a.js" } }), [
+		{ type: "tool", name: "read", input: "src/a.js" },
+	]);
+	assert.deepEqual(mapPiEvent({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash" }), []);
 });

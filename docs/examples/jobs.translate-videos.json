@@ -1,0 +1,39 @@
+{
+	"jobs": [
+		{
+			"name": "extract-audio",
+			"order": 1,
+			"run": "mkdir -p work/audio && ffmpeg -nostdin -y -i {input} -vn -ac 1 -ar 16000 {output}",
+			"inputs": "videos/**/*.mp4",
+			"output": "work/audio/{stem}.wav",
+			"concurrency": 2,
+			"timeoutMin": 30,
+			"retries": 1,
+			"schedule": { "at": "02:30" }
+		},
+		{
+			"name": "transcribe",
+			"order": 2,
+			"after": ["extract-audio"],
+			"run": "mkdir -p work/subs && whisper {input} --model small --output_format srt --output_dir work/subs",
+			"inputs": "work/audio/*.wav",
+			"output": "work/subs/{stem}.srt",
+			"timeoutMin": 120,
+			"retries": 1,
+			"schedule": { "at": "02:30" }
+		},
+		{
+			"name": "translate",
+			"order": 3,
+			"after": ["transcribe"],
+			"run": "scripts/translate-srt.sh {input} uk {output}",
+			"inputs": "work/subs/*.srt",
+			"output": "subs/uk/{stem}.srt",
+			"timeoutMin": 30,
+			"retries": 2,
+			"env": { "TARGET_LANG": "uk" },
+			"ticket": true,
+			"schedule": { "at": "02:30" }
+		}
+	]
+}

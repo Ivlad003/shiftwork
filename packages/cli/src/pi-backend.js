@@ -1,10 +1,12 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyError } from "shiftwork-core";
+import { registerChild } from "./signal-stop.js";
+import { runAgent } from "./spawn-agent.js";
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 
@@ -45,7 +47,7 @@ export function locatePi({
 		const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.pi;
 		return { root: candidate, cli: join(candidate, bin), index: join(candidate, "dist", "index.js"), version: manifest.version };
 	}
-	throw new Error(`pi not found: install it (https://pi.dev or "npm i -g ${PI_PACKAGE}") or set pi.root in .pi/shiftwork.json`);
+	throw new Error(`pi not found: install it (https://pi.dev or "npm i -g ${PI_PACKAGE}") or set pi.root in .shiftwork/shiftwork.json`);
 }
 
 /** The pi package of a managed install's current release: <install>/releases/<current-version>/node_modules/<pi>. */
@@ -57,6 +59,17 @@ function managedPiRoot(installRoot) {
 	} catch {
 		return undefined;
 	}
+}
+
+/** The `provider/model` refs in `pi --list-models` output (a header row, then one model per row). */
+export function parseModelList(text) {
+	const refs = new Set();
+	for (const line of String(text ?? "").split("\n")) {
+		const [provider, model] = line.trim().split(/\s+/);
+		if (!provider || !model || provider === "provider" || /:$/.test(provider)) continue;
+		refs.add(`${provider}/${model}`);
+	}
+	return refs;
 }
 
 function packageRootOf(file) {
@@ -71,11 +84,35 @@ function packageRootOf(file) {
 
 /**
  * The pi backend: every shift is a fresh `pi --mode rpc --no-session` process (ADR-0002).
- * Options: { root?, args?: string[], env?: object, timeoutMs? }
+ * The user's global pi extensions (widgets, MCP, provider add-ons) are not loaded into a shift:
+ * pi runs with `--no-extensions`, which keeps explicit `-e <path>` in `args` working. The
+ * pi-shiftwork extension is not needed in a worker (the runner already restricts skills per
+ * route). With the default `isolateExtensions: "auto"`, a model pi does not list without its
+ * extensions (a provider an extension registers) runs with them loaded; `true` always isolates,
+ * `false` never does.
+ * Options: { root?, args?: string[], env?: object, timeoutMs?, isolateExtensions?: "auto" | boolean = "auto" }
  */
 export function createPiBackend(options = {}) {
 	const pi = locatePi({ root: options.root });
+	const mode = options.isolateExtensions ?? "auto";
 	let RpcClient;
+	// `pi --no-extensions --list-models`, read once per backend: the models a shift can use isolated.
+	let builtin;
+	const builtinModels = () =>
+		(builtin ??= runAgent(process.execPath, [pi.cli, "--no-extensions", ...(options.args ?? []), "--list-models"], {
+			env: { ...process.env, ...options.env },
+			timeoutMs: 60_000,
+		}).then(
+			(result) => (result.code === 0 ? parseModelList(`${result.stdout}\n${result.stderr}`) : null),
+			() => null,
+		));
+	/** The isolation flags for `model`. Unknown (the list failed): extensions load, as pi does by default. */
+	const isolation = async (model) => {
+		if (mode === false) return [];
+		if (mode === true) return ["--no-extensions"];
+		const listed = await builtinModels();
+		return listed?.has(model) ? ["--no-extensions"] : [];
+	};
 
 	return {
 		name: "pi",
@@ -85,16 +122,10 @@ export function createPiBackend(options = {}) {
 		 * Availability check before a ticket: one tiny `pi -p` request to `model`.
 		 * True when pi exits cleanly and prints no provider limit.
 		 */
-		probe(model, { timeoutMs = 60_000 } = {}) {
-			const args = [pi.cli, "-p", "--no-session", "-ns", "-nc", "--model", model, "--thinking", "off", ...(options.args ?? []), "Reply with exactly: OK"];
-			return new Promise((resolve) => {
-				const child = execFile(process.execPath, args, { env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-					const output = `${stdout}\n${stderr}`;
-					resolve(!error && classifyError(output) === null);
-				});
-				// pi -p reads piped stdin as extra prompt text; close it so the probe doesn't wait.
-				child.stdin?.end();
-			});
+		async probe(model, { timeoutMs = 60_000 } = {}) {
+			const args = [pi.cli, "-p", "--no-session", "-ns", "-nc", ...(await isolation(model)), "--model", model, "--thinking", "off", ...(options.args ?? []), "Reply with exactly: OK"];
+			const result = await runAgent(process.execPath, args, { env: { ...process.env, ...options.env }, timeoutMs });
+			return !result.error && result.code === 0 && classifyError(`${result.stdout}\n${result.stderr}`) === null;
 		},
 		async startShift({ cwd, route, prompt, systemPrompt }) {
 			RpcClient ??= (await import(pathToFileURL(pi.index).href)).RpcClient;
@@ -104,7 +135,7 @@ export function createPiBackend(options = {}) {
 			const fullSystemPrompt = [systemPrompt, preload.text].filter(Boolean).join("\n\n");
 			await writeFile(promptFile, fullSystemPrompt ?? "");
 
-			const args = ["--no-session", "--approve", "--append-system-prompt", promptFile];
+			const args = ["--no-session", "--approve", ...(await isolation(route.model)), "--append-system-prompt", promptFile];
 			if (route.thinking) args.push("--thinking", route.thinking);
 			if (route.skills?.restricted) {
 				args.push("-ns");
@@ -133,7 +164,7 @@ export function createPiBackend(options = {}) {
 
 			let lastStop = null;
 			client.onEvent((event) => {
-				queue.push({ type: "raw", event });
+				for (const raw of piRawEvents(event)) queue.push(raw);
 				for (const mapped of mapPiEvent(event)) {
 					if (mapped.type === "turn") lastStop = mapped.stopReason;
 					queue.push(mapped);
@@ -157,14 +188,17 @@ export function createPiBackend(options = {}) {
 			try {
 				await client.start();
 				// Unexpected exit of the pi process ends the shift instead of hanging it.
+				// RpcClient spawns pi itself (not detached): register it so a forced signal stop kills it.
+				const unregister = registerChild(client.process?.pid);
 				client.process?.once("exit", (code) => {
-					if (!queue.closed) queue.push({ type: "error", message: `pi exited with code ${code}: ${client.getStderr().slice(-500)}` });
+					unregister();
+					if (!queue.closed) queue.push(piError(`pi exited with code ${code}: ${client.getStderr().slice(-500)}`));
 					finish("error");
 				});
 				const disposition = await client.prompt(prompt);
 				if (disposition === "handled") finish("stop");
 			} catch (error) {
-				queue.push({ type: "error", message: error.message });
+				queue.push(piError(error.message));
 				await finish("error");
 			}
 
@@ -214,6 +248,7 @@ export function createPiBackend(options = {}) {
 
 /** Map one pi JSON event to Shiftwork ShiftEvents. Exported for tests. */
 export function mapPiEvent(event) {
+	if (event.type === "tool_execution_start") return [toolEvent(event.toolName, event.args)];
 	if (event.type !== "message_end" || event.message?.role !== "assistant") return [];
 	const message = event.message;
 	const usage = message.usage ?? {};
@@ -231,8 +266,47 @@ export function mapPiEvent(event) {
 		.map((block) => block.text)
 		.join("\n");
 	if (text) out.push({ type: "text", text });
-	if (message.stopReason === "error") out.push({ type: "error", message: message.errorMessage ?? "provider error" });
+	if (message.stopReason === "error") out.push(piError(message.errorMessage ?? "provider error"));
 	return out;
+}
+
+const TOOL_INPUT_CHARS = 500;
+
+/** A tool call for the shift log: the shell command, else the file path, else the arguments as
+ * JSON — at most 500 chars. `shiftwork reflect` mines these for repeated steps. */
+function toolEvent(name, args) {
+	const input =
+		typeof args === "string"
+			? args
+			: (args?.command ?? args?.cmd ?? args?.file_path ?? args?.filePath ?? args?.path ?? args?.pattern ?? args?.url ?? (args == null ? "" : JSON.stringify(args)));
+	return { type: "tool", name: String(name ?? "tool"), input: String(Array.isArray(input) ? input.join(" ") : input).slice(0, TOOL_INPUT_CHARS) };
+}
+
+const AUTH_ERROR = /no api key found/i;
+
+/**
+ * A pi error event. `kind: "auth"` marks a missing credential ("No API key found for <provider>"):
+ * not a provider limit to cool down, but a model this machine cannot use, so the runner can skip
+ * it. The message is pi's, unchanged.
+ */
+function piError(message) {
+	return AUTH_ERROR.test(message) ? { type: "error", message, kind: "auth" } : { type: "error", message };
+}
+
+const EXTENSION_ERROR_CHARS = 500;
+
+/**
+ * The `raw` events a pi RPC event becomes. Extension UI requests (widgets, status lines,
+ * notifications) are dropped: nobody answers them in a shift and they bloat logs. An extension
+ * error is kept, compact. Exported for tests.
+ */
+export function piRawEvents(event) {
+	if (event?.type === "extension_ui_request") return [];
+	if (event?.type === "extension_error") {
+		const { extensionPath, event: hook, error } = event;
+		return [{ type: "raw", event: { type: "extension_error", extensionPath, event: hook, error: String(error ?? "").slice(0, EXTENSION_ERROR_CHARS) } }];
+	}
+	return [{ type: "raw", event }];
 }
 
 async function loadPreload(preloadPaths) {

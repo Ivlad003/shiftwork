@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { CLAIMED, frontier, loadTickets, orderFrontier, READY } from "./index.js";
-import { createExclusive, isAlive, readOwner, withLock } from "./lock.js";
+import { isAlive, readOwner, takeClaim, withLock } from "./lock.js";
 
 const TABLE_START = "<!-- shiftwork:tickets:start -->";
 const TABLE_END = "<!-- shiftwork:tickets:end -->";
@@ -52,11 +52,7 @@ export function openTracker(root) {
 			await mkdir(claimsDir, { recursive: true });
 			const path = claimPath(t);
 			const owner = { pid, token: randomUUID(), at: new Date().toISOString() };
-			if (!(await createExclusive(path, owner))) {
-				if (await liveClaim(t)) return null;
-				await unlink(path).catch(() => {});
-				if (!(await createExclusive(path, owner))) return null;
-			}
+			if (!(await takeClaim(root, path, owner))) return null;
 			await setStatusLine(t.path, CLAIMED);
 			await syncSpecTable(root, t.feature);
 			return { ticket: t, path, ...owner };
@@ -92,32 +88,52 @@ export function openTracker(root) {
 			await writeAtomic(path, `${base}${section}\n${markdown.trim()}\n`);
 		},
 
-		/** Append a new ticket to a feature: the next free number, ready and blocked by nothing. */
-		async createTicket(feature, { title, what, type, verify = [], status = READY } = {}) {
-			const tickets = (await loadTickets(root)).filter((t) => t.feature === feature);
-			const next = String(Math.max(0, ...tickets.map((t) => Number(t.number) || 0)) + 1).padStart(2, "0");
+		/** Add `number` to the ticket's `**Blocked by:**` line (a `None …` line is replaced); every
+		 * other byte is kept. A research rollback blocks the ticket on the research it filed. */
+		async addBlocker(ticketOrClaim, number) {
+			const path = pathOf(ticketOrClaim);
+			await writeAtomic(path, applyBlockedBy(await readFile(path, "utf8"), number));
+		},
+
+		/** Append a new ticket to a feature: the next free number, ready and blocked by nothing.
+		 * The number is picked and the file created under the shared-state lock, with an
+		 * exclusive create, so parallel follow-ups in one feature never share a number. */
+		async createTicket(feature, { title, what, type, verify = [], status = READY, checkboxes = ["It works"] } = {}) {
 			const slug =
 				String(title ?? "ticket")
 					.toLowerCase()
 					.replace(/[^a-z0-9]+/g, "-")
 					.replace(/^-+|-+$/g, "")
 					.slice(0, 48) || "ticket";
-			const path = join(root, ".scratch", feature, "issues", `${next}-${slug}.md`);
-			const lines = [
-				`# ${next}: ${title}`,
-				"",
-				`**What to build:** ${what}`,
-				"",
-				"**Blocked by:** None (can start immediately)",
-				"",
-				`**Status:** ${status}`,
-			];
-			if (type) lines.push(`**Type:** ${type}`);
-			if (verify.length) lines.push(`**Verify:** ${verify.map((c) => `\`${c}\``).join(" · ")}`);
-			lines.push("", "- [ ] It works", "");
-			await writeAtomic(path, lines.join("\n"));
+			const issuesDir = join(root, ".scratch", feature, "issues");
+			await mkdir(issuesDir, { recursive: true });
+			const created = await withLock(root, async () => {
+				const tickets = (await loadTickets(root)).filter((t) => t.feature === feature);
+				let number = Math.max(0, ...tickets.map((t) => Number(t.number) || 0));
+				for (;;) {
+					number += 1;
+					const next = String(number).padStart(2, "0");
+					// A file already holding the number (even one that doesn't parse) takes it.
+					const taken = (await readdir(issuesDir)).some((f) => Number(f.match(/^(\d+)-/)?.[1]) === number);
+					if (taken) continue;
+					const path = join(issuesDir, `${next}-${slug}.md`);
+					const lines = [
+						`# ${next}: ${title}`,
+						"",
+						`**What to build:** ${what}`,
+						"",
+						"**Blocked by:** None (can start immediately)",
+						"",
+						`**Status:** ${status}`,
+					];
+					if (type) lines.push(`**Type:** ${type}`);
+					if (verify.length) lines.push(`**Verify:** ${verify.map((c) => `\`${c}\``).join(" · ")}`);
+					lines.push("", ...checkboxes.map((box) => `- [ ] ${box}`), "");
+					if (await writeExclusive(path, lines.join("\n"))) return { number: next, path };
+				}
+			});
 			await syncSpecTable(root, feature);
-			return { feature, number: next, title, path };
+			return { feature, number: created.number, title, path: created.path };
 		},
 	};
 }
@@ -168,6 +184,22 @@ export function applyStatusLine(text, status) {
 	return titled !== text ? titled : `**Status:** ${status}\n\n${text}`;
 }
 
+/** The file with `number` added to its Blocked by line: a `None …` (or empty) line becomes the
+ * number, a list gains it once; without the line, one goes under the `#` title. */
+export function applyBlockedBy(text, number) {
+	const line = /^(\s*(?:\*\*)?Blocked by:(?:\*\*)?[ \t]*)([^\r\n]*?)([ \t]*)$/im;
+	const match = text.match(line);
+	if (!match) {
+		const titled = text.replace(/^(#[^\n]*\n)/, `$1\n**Blocked by:** ${number}\n`);
+		return titled !== text ? titled : `**Blocked by:** ${number}\n\n${text}`;
+	}
+	const old = match[2].trim();
+	const numbers = /^none\b/i.test(old) || old === "" ? [] : (old.match(/\d+/g) ?? []);
+	if (numbers.some((n) => Number(n) === Number(number))) return text;
+	const value = /^none\b/i.test(old) || old === "" ? number : `${old}, ${number}`;
+	return text.replace(line, (_all, prefix, _old, trailing) => `${prefix}${value}${trailing}`);
+}
+
 async function setStatusLine(path, status) {
 	await writeAtomic(path, applyStatusLine(await readFile(path, "utf8"), status));
 }
@@ -197,5 +229,21 @@ export async function writeAtomic(path, content) {
 	} catch (error) {
 		await unlink(tmp).catch(() => {});
 		throw error;
+	}
+}
+
+/** Write `content` to `path` only when it doesn't exist yet: false when it does. The file
+ * appears whole (temp file hard-linked into place), never half written. */
+async function writeExclusive(path, content) {
+	const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+	await writeFile(tmp, content);
+	try {
+		await link(tmp, path);
+		return true;
+	} catch (error) {
+		if (error.code === "EEXIST") return false;
+		throw error;
+	} finally {
+		await unlink(tmp).catch(() => {});
 	}
 }

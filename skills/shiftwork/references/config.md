@@ -1,6 +1,6 @@
 # Configuring and running Shiftwork
 
-`.pi/shiftwork.json` sits at the repo root (merged over `<pi agent dir>/shiftwork.json`). `npx shiftwork init --model <provider>/<model-id>` writes it; `--ollama` also writes an `ollama` provider into pi's `models.json` and a `local` tier.
+`.shiftwork/shiftwork.json` sits at the repo root (merged over `<pi agent dir>/shiftwork.json`). `npx shiftwork init --model <provider>/<model-id>` writes it; `--ollama` also writes an `ollama` provider into pi's `models.json` and a `local` tier.
 
 ## Keys
 
@@ -9,6 +9,7 @@
 - `budgets` — `default`, `tiers.<name>`, `models.<provider/model>` and `ticket` (a ticket's `**Budget:**` line overrides it): token, cost, turn, time, context and stall limits. Past a limit, Shiftwork hands the shift to another model.
 - `unlimited` — `true` or a list of limit names (`tokens`, `cost`, `turns`, `time`, `context`, `stall`), lifts every limit or only those. Also accepted on `tiers.<name>`, `models.<provider/model>` and `backends.<name>` (backend names: `pi`, `claude`, `codex`, `opencode`, `grok`, `cursor`): a shift on that tier, model or backend runs with the union of the top-level, tier, model and backend lists lifted — every limit for that route, the ticket's own `Budget:` line included. Budgets stay global; the per-route lists are how chosen agents and models run without limits.
 - `maxAttempts`, `maxHandoffs`, `softLimitPct`, `crossTier`, `allowInPlace`: how hard the runner tries before giving up on a ticket and whether handoffs stay in-process.
+- `frozen`: globs of frozen paths for every ticket (default `[]`), added to each ticket's `**Frozen:**` line: a passing gate on a branch that changed one is a failed attempt.
 - `parallel` (frontier tickets at once, default 1; above 1 needs worktrees), `concurrency` (`{ "<provider>": n }` shift caps), `verifyTimeoutMin` (default 10), `paidProviders`, `preferWaitMin`, `probeEveryMin`/`probeBeforeTicket` (cooldown probes), `models.<provider/model>` profiles (`contextWindow`, `thinking`, `budget`), and per-backend blocks (`claude`, `codex`, `opencode`, `grok`, `cursor`: binary path and args) — see docs/guide.md.
 - `landRetries` (default 5): while a parallel landing keeps moving the target, the runner rebases onto it, re-runs Verify and lands again, this many rounds; past it the ticket goes to `needs-info` with the branch kept.
 - `cooldown`: `rate`/`usage`/`quota`/`server` durations. All workers share one provider's cooldown; a missing CLI or a stopped Ollama server makes a backend unavailable instead.
@@ -24,14 +25,16 @@
 
 | Command | What |
 | --- | --- |
-| `npx shiftwork init [--model <provider>/<id>] [--ollama]` | write `.pi/shiftwork.json` and pi settings |
+| `npx shiftwork init [--model <provider>/<id>] [--ollama]` | write `.shiftwork/shiftwork.json` and pi settings |
+| `npx shiftwork migrate [--dry-run]` | move Shiftwork's files from a legacy `.pi/` to `.shiftwork/` (pi's own files stay; refused while a runner is live); until then a legacy repo keeps working from `.pi/` |
 | `npx shiftwork status` | the tickets and the ready frontier; `⏸ paused` after a paused feature's name |
 | `npx shiftwork feature pause <feature>` / `resume <feature>` | freeze a feature (`**Status:** paused` in its spec — its tickets leave the frontier; `run --ticket`/`--feature` on it are refused) / thaw it back to `ready-for-agent` |
 | `npx shiftwork run --dry-run` | which model, tier and thinking each ticket gets, and whether it gets a review (before or after it lands) |
 | `npx shiftwork run --once` | work one ticket |
 | `npx shiftwork run` | work the frontier until nothing is left |
 | `npx shiftwork run --dark-factory` | poll the repo's GitHub issues (`github` block), report back and work the frontier; `--once` is one poll + one pass |
-| `npx shiftwork tickets check <feature> [--min <n>] [--except NN]` | planning gate: at least n tickets besides the excepted ones (default `01`) are ready with checkboxes and a Verify line, and every Blocked-by number exists |
+| `npx shiftwork tickets check <feature> [--min <n>] [--except NN]` | planning gate: at least n tickets besides the excepted ones (default `01`) are ready with checkboxes and a Verify line, and every Blocked-by number exists, with no Blocked-by cycle |
+| `npx shiftwork graph <feature>` | print the feature's tickets and Blocked-by edges as a Mermaid flowchart (status per node, missing blockers and cycles dashed); read-only |
 | `npx shiftwork github labels [--create]` | check the dark-factory labels exist in the GitHub repo (`✔ exists` / `✖ missing`, exit 1 when any is missing); `--create` creates the missing ones with a colour and a description, never edits or deletes one |
 | `npx shiftwork tui` | live dashboard, tabs `1`–`6` (Queue, Agents, Cooldowns, Log, Resolved, GitHub): ↑↓ · ←→ fold · enter details · n run this · p pause · `/` search · r run · s stop · d dry-run · f filter · g dark-factory · q quit; mouse clicks and wheel |
 

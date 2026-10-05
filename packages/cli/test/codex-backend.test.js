@@ -164,9 +164,7 @@ test("restricted skills are delivered as symlinks in .agents/skills and excluded
 	await writeFile(
 		codexPath,
 		`#!/usr/bin/env node
-const fs = require("fs");
-const link = fs.readlinkSync(process.env.SHIFTWORK_RECORD_LINK ?? "missing");
-fs.writeFileSync(process.env.SHIFTWORK_RECORD_LINK ?? "missing" + ".out", link);
+for (const n of require("fs").readdirSync(".agents/skills")) require("fs").copyFileSync(".agents/skills/" + n + "/SKILL.md", "seen-skill.md");
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
 `,
 	);
@@ -192,8 +190,8 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, o
 	await shift.close?.();
 
 	const symlinkPath = join(cwd, ".agents", "skills", basename(skill));
-	assert.ok(existsSync(symlinkPath), "symlink exists in .agents/skills");
-	assert.equal(await readFile(join(symlinkPath, "SKILL.md"), "utf8"), "Skill body.");
+	assert.equal(await readFile(join(cwd, "seen-skill.md"), "utf8"), "Skill body.", "the agent saw the skill through the link");
+	assert.ok(!existsSync(symlinkPath), "the link is removed when the shift ends");
 	const exclude = await readFile(join(cwd, ".git", "info", "exclude"), "utf8");
 	assert.match(exclude, /^\.agents\/skills\/$/m);
 });
@@ -203,7 +201,7 @@ test("the Codex mapper counts one turn per turn.completed and ignores unknown ev
 	assert.deepEqual(map({ type: "thread.started" }), []);
 	assert.deepEqual(map({ type: "turn.started" }), []);
 	assert.deepEqual(map({ type: "item.completed", item: { type: "agent_message", text: "hello" } }), []);
-	assert.deepEqual(map({ type: "item.completed", item: { type: "file_change", changes: [], status: "completed" } }), []);
+	assert.deepEqual(map({ type: "item.completed", item: { type: "file_change", changes: [], status: "completed" } }), [{ type: "tool", name: "file_change", input: "" }]);
 	assert.deepEqual(map({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 3 } }), [
 		{ type: "turn", model: undefined, usage: { input: 10, output: 3, totalTokens: 13 }, costUsd: 0 },
 		{ type: "context", tokens: 10 },
@@ -272,4 +270,58 @@ test("the codex sandbox is configurable: approve-for-me by default, bypass for a
 	assert.ok((await argsFor({ sandbox: "bypass" })).includes("--dangerously-bypass-approvals-and-sandbox"));
 	const ww = await argsFor({ sandbox: "workspace-write" });
 	assert.deepEqual(ww.slice(ww.indexOf("--sandbox"), ww.indexOf("--sandbox") + 2), ["--sandbox", "workspace-write"]);
+});
+
+test("in a git worktree, skill links are excluded through git's real exclude file, and a repo-owned path is left alone", { timeout: 30_000 }, async () => {
+	const { execFileSync } = await import("node:child_process");
+	const git = (args, cwd) => execFileSync("git", args, { cwd, stdio: "ignore" });
+	const skills = await mkdtemp(join(tmpdir(), "sw-codex-wt-skills-"));
+	const granted = join(skills, "granted");
+	await mkdir(granted, { recursive: true });
+	await writeFile(join(granted, "SKILL.md"), "Granted body.");
+	// A granted skill whose name collides with a file the repo itself tracks.
+	const owned = join(skills, "owned");
+	await mkdir(owned, { recursive: true });
+	await writeFile(join(owned, "SKILL.md"), "Shiftwork's copy.");
+
+	const repo = await mkdtemp(join(tmpdir(), "sw-codex-wt-repo-"));
+	git(["init", "-q"], repo);
+	git(["config", "user.email", "test@example.com"], repo);
+	git(["config", "user.name", "Test"], repo);
+	await mkdir(join(repo, ".agents", "skills"), { recursive: true });
+	await writeFile(join(repo, ".agents", "skills", "owned"), "repo-owned\n");
+	git(["add", "."], repo);
+	git(["commit", "-q", "-m", "init"], repo);
+	const cwd = join(repo, "..", `${basename(repo)}-wt`);
+	git(["worktree", "add", "-q", cwd, "-b", "wt"], repo);
+
+	const binDir = await mkdtemp(join(tmpdir(), "sw-codex-bin-"));
+	await writeFile(join(binDir, "codex"), "#!/bin/sh\ncp .agents/skills/granted/SKILL.md seen-granted.md\nexit 0\n");
+	await chmod(join(binDir, "codex"), 0o755);
+	const backend = createCodexBackend({ command: "codex", env: { PATH: `${binDir}:${process.env.PATH}` } });
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "gpt-5.6-terra", skills: { paths: [granted, owned], preload: [], restricted: true } },
+		prompt: "Do the ticket.",
+		systemPrompt: "sys",
+	});
+	for await (const event of shift.events) {
+		if (event.type === "end") break;
+	}
+	await shift.close?.();
+
+	const exclude = await readFile(join(repo, ".git", "info", "exclude"), "utf8");
+	assert.match(exclude, /^\.agents\/skills\/$/m, "the worktree's exclude lives in the common git dir");
+	assert.equal(await readFile(join(cwd, ".agents", "skills", "owned"), "utf8"), "repo-owned\n", "the repo's file is neither replaced nor removed");
+	assert.equal(await readFile(join(cwd, "seen-granted.md"), "utf8"), "Granted body.", "the agent saw the granted skill");
+});
+
+test("the Codex mapper turns file_change and command_execution items into tool events, once per item", () => {
+	const map = createCodexMapper();
+	const lines = readFileSync(new URL("./fixtures/codex-stream.jsonl", import.meta.url), "utf8").split("\n").filter(Boolean);
+	const tools = lines.flatMap((line) => map(JSON.parse(line))).filter((e) => e.type === "tool");
+	assert.deepEqual(tools, [{ type: "tool", name: "file_change", input: "/work/hi.txt" }], "item.started and item.completed of one item count once");
+
+	const cmd = createCodexMapper()({ type: "item.started", item: { id: "item_9", type: "command_execution", command: "bash -lc 'npm test'", status: "in_progress" } });
+	assert.deepEqual(cmd, [{ type: "tool", name: "shell", input: "bash -lc 'npm test'" }]);
 });

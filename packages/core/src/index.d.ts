@@ -18,7 +18,11 @@ export interface Ticket {
 	model?: string;
 	skills: string[];
 	budget?: string;
+	/** `**Dual:** yes|no`: the ticket's own opt-in to (or out of) dual shifts; absent when the line is. */
+	dual?: string;
 	verify: string[];
+	/** `**Frozen:**` globs: paths this ticket's shifts may not change; `[]` when the line is absent. */
+	frozen: string[];
 	checkboxes: { done: boolean; text: string }[];
 	/** Model of the latest shift report, when one exists. */
 	lastRoute?: string;
@@ -38,6 +42,8 @@ export interface Route {
 	model: string;
 	/** The model as written in the config or ticket, prefix included: `claude:sonnet`, `anthropic/claude-sonnet-4-5`. */
 	ref: string;
+	/** Provider part of the model reference (`anthropic` for `anthropic/claude-sonnet-4-5`); the cooldown key's provider. */
+	provider: string;
 	thinking: string;
 	skills: { paths: string[]; preload: string[]; warnings: string[]; restricted: boolean };
 	budget: Budget;
@@ -54,10 +60,15 @@ export declare function frontier<T extends Ticket>(tickets: T[]): T[];
  */
 export declare function orderFrontier<T extends Ticket>(frontier: T[], tickets: T[], options?: { current?: string | null }): T[];
 export declare function loadTickets(root?: string): Promise<(Ticket & { feature: string })[]>;
-export type Plan =
-	| Route
-	| { wait: Date }
-	| { stop: string };
+/** Every candidate model is cooling or its provider is full: re-plan at `wait`. */
+export interface PlanWait {
+	wait: Date;
+}
+/** No eligible model is left (e.g. every model excluded as stalled): `stop` says why. */
+export interface PlanStop {
+	stop: string;
+}
+export type Plan = Route | PlanWait | PlanStop;
 
 export declare function planShift(options: {
 	ticket: Ticket;
@@ -66,7 +77,13 @@ export declare function planShift(options: {
 	cooldowns?: Cooldown[];
 	now?: Date | number;
 	classification?: TicketClassification | null;
+	/** Providers at their `concurrency` cap: skipped like cooling ones, without a cooldown. */
+	fullProviders?: string[];
 }): Plan;
+/**
+ * The key a provider limit cools: the model ref itself for free models (`…:free`), else its provider.
+ */
+export declare function cooldownKey(ref: string): string;
 export declare const TIER_ORDER: readonly string[];
 export declare function parseModelRef(ref: string): { backend: "pi" | "claude" | "codex" | "opencode" | "grok" | "cursor"; model: string; provider: string };
 export declare function skillsForModel(
@@ -112,6 +129,25 @@ export interface Review {
 
 /** Whether a resolved ticket gets one review shift on the review tier. */
 export declare function shouldReview(config: { review?: Review } & Record<string, unknown>, ticket: { feature?: string; type?: string }): boolean;
+/** `dual`: two worker shifts on one ticket, on two models in two worktrees, then a merge shift (ADR-0007). */
+export interface Dual {
+	enabled: boolean;
+	/** Ticket types (the routed type) that get dual shifts; every type when omitted. */
+	types?: string[];
+	/** Feature names that get dual shifts; every feature when omitted. */
+	features?: string[];
+	/** The two candidates' models, A then B. Without `models` or `tiers`, B is the ticket's next route on another provider. */
+	models?: [string, string];
+	/** The two candidates' tiers, A then B. */
+	tiers?: [string, string];
+	/** Tier of the merge shift; the review tier by default, else candidate A's tier. */
+	mergeTier?: string;
+	/** The merge shift's budget; the merge tier's budget when omitted. */
+	budget?: Budget;
+}
+
+/** Whether a ticket gets dual shifts: its own `**Dual:** yes|no` line wins, else `dual.enabled` and its filters. */
+export declare function shouldDual(config: { dual?: Dual } & Record<string, unknown>, ticket: { feature?: string; type?: string; dual?: string }): boolean;
 /** Where the review shift runs: "before-land" (the default) or "after-land" ("resolve" reads as it). */
 export declare function reviewWhen(config: { review?: Review } & Record<string, unknown>): "before-land" | "after-land";
 
@@ -126,7 +162,7 @@ export interface GitHubLabels {
 	done: string;
 }
 
-/** The `github` block of `.pi/shiftwork.json`: the dark-factory watcher's source repo and behavior. */
+/** The `github` block of `.shiftwork/shiftwork.json`: the dark-factory watcher's source repo and behavior. */
 export interface GitHub {
 	/** `owner/name`; the `origin` remote when omitted. */
 	repo?: string;
@@ -158,10 +194,14 @@ export declare function liftedFor(
 	route: { ref?: string; model?: string; tier?: string } | undefined | null,
 	config: Record<string, unknown>,
 ): Array<keyof Budget>;
-/** The validated `.pi/shiftwork.json`: the knobs typed where the runner reads them; the rest stays `Record<string, unknown>`. */
+/** The validated `.shiftwork/shiftwork.json`: the knobs typed where the runner reads them; the rest stays `Record<string, unknown>`. */
 export interface ShiftworkConfig extends Record<string, unknown> {
 	/** Rebase-and-reverify rounds a landing takes while a parallel landing keeps moving the target (default 5). */
 	landRetries: number;
+	/** Provider-limit shifts in a row one ticket may take before it goes to needs-info (default 10). */
+	maxLimitRetries: number;
+	/** Frozen-path globs for every ticket, added to each ticket's own `**Frozen:**` list (default []). */
+	frozen: string[];
 }
 export declare function loadConfig(root: string, userDir?: string): Promise<ShiftworkConfig>;
 export declare function validateConfig(input: Record<string, unknown>): ShiftworkConfig;
@@ -228,15 +268,24 @@ export declare function createMeter(
 
 export interface Claim {
 	ticket: Ticket;
+	/** The claim file: `.scratch/.claims/<feature>--<NN>.lock` (OpenSpec: `openspec/.claims/`). */
+	path: string;
 	pid: number;
 	token: string;
 	at: string;
 }
 
 export interface Cooldown {
+	/** The cooled key: a provider, or a free model's own ref (see `cooldownKey`). */
 	provider: string;
 	until: string;
 	kind?: string;
+	/** When the cooldown was written (ISO). */
+	at?: string;
+	/** True when the provider gave the end time; a guessed one may be probed early. */
+	exact?: boolean;
+	/** When a guessed cooldown was last probed (ISO). */
+	probedAt?: string;
 }
 
 export declare function formatTicketsTable(tickets: Ticket[]): string;
@@ -250,9 +299,12 @@ export interface Tracker {
 	setStatus(ticketOrClaim: Ticket | Claim, status: string): Promise<void>;
 	appendComment(ticketOrClaim: Ticket | Claim, markdown: string): Promise<void>;
 	/** Append a new ready ticket to a feature (follow-ups); optional for trackers that cannot. */
-	createTicket?(feature: string, ticket: { title?: string; what?: string; type?: string; verify?: string[]; status?: string }): Promise<
-		Ticket & { feature: string; created?: boolean }
-	>;
+	createTicket?(
+		feature: string,
+		ticket: { title?: string; what?: string; type?: string; verify?: string[]; status?: string; checkboxes?: string[] },
+	): Promise<Ticket & { feature: string; created?: boolean }>;
+	/** Add a ticket number to the ticket's `**Blocked by:**` line (a research rollback); optional for trackers that cannot. */
+	addBlocker?(ticketOrClaim: Ticket | Claim, number: string): Promise<void>;
 }
 
 export declare function openTracker(root: string): Tracker;
@@ -274,7 +326,11 @@ export declare function parseTasks(text: string): { done: boolean; number: strin
 export declare function openCooldowns(root: string): {
 	path: string;
 	active(now?: Date): Promise<Cooldown[]>;
-	add(provider: string, until: Date | string, kind?: string): Promise<void>;
+	add(provider: string, until: Date | string, kind?: string, options?: { at?: Date | string; exact?: boolean }): Promise<void>;
+	/** End a cooldown early (a probe found the provider answering again). */
+	remove(provider: string): Promise<void>;
+	/** Remember when a guessed cooldown was last probed. */
+	markProbed(provider: string, at?: Date | string): Promise<void>;
 };
 
 /** One running shift in the run state: a worker entry per ticket being worked. */
@@ -321,21 +377,111 @@ export interface RunStateStore {
 	/** Merge `patch` into `patch.pid`'s runner entry (this process's by default). */
 	update(patch: Partial<RunStateRunner> & { pid?: number }): Promise<void>;
 	/** Merge `patch` into this process's worker entry for `ticket`. */
-	updateWorker(ticket: { feature?: string; number?: string }, patch: Partial<RunStateWorker>): Promise<void>;
+	updateWorker(ticket: { feature?: string; number?: string; dual?: string }, patch: Partial<RunStateWorker>): Promise<void>;
 	/** Remove this process's worker entry for `ticket` once the shift settles. */
-	removeWorker(ticket: { feature?: string; number?: string }): Promise<void>;
+	removeWorker(ticket: { feature?: string; number?: string; dual?: string }): Promise<void>;
 	clear(): Promise<void>;
 }
 
 export declare function openRunState(root: string): RunStateStore;
 export declare function noRunState(): RunStateStore;
 
-/** The shared-state lock path: `.pi/shiftwork.lock`. */
-export declare function lockPath(root: string): string;
+/** Shiftwork's per-repo directory name: `.shiftwork`. */
+export declare const SHIFTWORK_DIR: string;
+/** The legacy directory Shiftwork's files lived in: `.pi`. */
+export declare const LEGACY_DIR: string;
+/** The one-time stderr hint printed in legacy mode. */
+export declare const LEGACY_HINT: string;
+/** Whether a file name is one of Shiftwork's own (`shiftwork.json`, `shiftwork-*.json|md|lock`, `shiftwork.lock`). */
+export declare function isShiftworkFile(name: string): boolean;
+/** Shiftwork's own files still under `<root>/.pi/`, sorted. */
+export declare function legacyFiles(root: string): string[];
+/**
+ * The repo's Shiftwork directory: `.shiftwork/` when it exists; `.pi/` when Shiftwork files are
+ * still there (legacy mode, one stderr hint per process); else `.shiftwork/`.
+ */
+export declare function stateDir(root: string, options?: { warn?: (message: string) => void }): string;
+/** A Shiftwork file under `stateDir(root)`. */
+export declare function shiftworkPath(root: string, name: string, options?: { warn?: (message: string) => void }): string;
+
+/** The shared-state lock path: `.shiftwork/shiftwork.lock` (legacy `.pi/`). */
+export declare function lockPath(root: string, name?: string): string;
 /**
  * Run `fn` while holding the repo's shared-state lock, so parallel shifts and a
  * second runner process never interleave a read-modify-write of the shared state
  * (cooldowns, run-state, the spec tickets table). A lock left by a dead pid is
  * taken over at once; a live one is waited for.
  */
-export declare function withLock(root: string, fn: () => Promise<T>, options?: { pid?: number; timeoutMs?: number; stepMs?: number }): Promise<T>;
+export declare function withLock<T>(root: string, fn: () => T | Promise<T>, options?: { pid?: number; timeoutMs?: number; stepMs?: number; name?: string }): Promise<T>;
+
+/** System prompt of a worker shift. */
+export declare const WORKER_PROMPT: string;
+/** System prompt of a review shift. */
+export declare const REVIEWER_PROMPT: string;
+/** The user prompt that starts a shift: pointers to the ticket and spec, not copies. */
+export declare function buildShiftPrompt(
+	ticket: Ticket,
+	options: { root: string; attempt: number; absolute?: boolean; reopenedByReview?: boolean; dual?: string; frozen?: string[] },
+): string;
+/** The user prompt that starts a dual-shift merge shift: both candidates' branches and verify results, and the branch the worktree starts from. */
+export declare function buildMergePrompt(
+	ticket: Ticket,
+	options: {
+		root: string;
+		target?: string;
+		base: string;
+		candidates: { label: string; model: string; branch: string; verify: string; stat?: string }[];
+	},
+): string;
+/** The user prompt that starts a review shift; `target` makes it a before-land review of the unlanded branch. */
+export declare function buildReviewPrompt(
+	ticket: Ticket,
+	options: { root: string; landed?: string; target?: string; absolute?: boolean; resumed?: boolean },
+): string;
+
+/** What happens to a ticket after one attempt. Pure. */
+export declare function decideNext(options: {
+	attempt: number;
+	maxAttempts: number;
+	needsInfo?: string | null;
+	hasVerify: boolean;
+	verifyOk?: boolean;
+}): { action: "resolve" | "retry" | "needs-info"; reason?: string };
+
+/** One run's outcome: the tickets resolved, sent to needs-info and reopened by review. */
+export interface RunSummary {
+	resolved: (Ticket & { reason?: string; review?: unknown })[];
+	needsInfo: (Ticket & { reason?: string })[];
+	reopened: (Ticket & { reason?: string; review?: unknown })[];
+	stoppedReason?: string;
+	/** 0 all resolved, 2 needs-info or reopened tickets, 3 stopped. */
+	exitCode?: number;
+	[key: string]: unknown;
+}
+
+/**
+ * Work the frontier: claim, plan, run shifts, verify, land and review tickets until none is
+ * ready or the run stops. Every dependency is injected.
+ */
+export declare function runFrontier(options: {
+	root: string;
+	tracker: Tracker;
+	backend: unknown;
+	verify?: unknown;
+	config: Record<string, unknown>;
+	workspace?: unknown;
+	log?: (...args: unknown[]) => void;
+	options?: {
+		feature?: string;
+		ticket?: string;
+		parallel?: number;
+		holdOnNeedsInfo?: boolean;
+		[key: string]: unknown;
+	};
+	classify?: typeof classifyError;
+	classifyTicket?: (ticket: Ticket) => Promise<TicketClassification | null> | TicketClassification | null;
+	clock?: { now(): Date; sleep(ms: number): Promise<void> };
+	cooldowns?: ReturnType<typeof openCooldowns>;
+	runState?: RunStateStore;
+	[key: string]: unknown;
+}): Promise<RunSummary>;

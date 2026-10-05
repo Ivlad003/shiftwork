@@ -145,9 +145,7 @@ test("restricted skills are delivered as symlinks in .agents/skills and excluded
 	await writeFile(
 		opencodePath,
 		`#!/usr/bin/env node
-const fs = require("fs");
-const link = fs.readlinkSync(process.env.SHIFTWORK_RECORD_LINK ?? "missing");
-fs.writeFileSync(process.env.SHIFTWORK_RECORD_LINK ?? "missing" + ".out", link);
+for (const n of require("fs").readdirSync(".agents/skills")) require("fs").copyFileSync(".agents/skills/" + n + "/SKILL.md", "seen-skill.md");
 console.log(JSON.stringify({ type: "step_finish", part: { type: "step-finish", messageID: "m1", reason: "done", tokens: { input: 1, output: 1 } } }));
 `,
 	);
@@ -172,8 +170,8 @@ console.log(JSON.stringify({ type: "step_finish", part: { type: "step-finish", m
 	await shift.close?.();
 
 	const symlinkPath = join(cwd, ".agents", "skills", basename(skill));
-	assert.ok(existsSync(symlinkPath), "symlink exists in .agents/skills");
-	assert.equal(await readFile(join(symlinkPath, "SKILL.md"), "utf8"), "Skill body.");
+	assert.equal(await readFile(join(cwd, "seen-skill.md"), "utf8"), "Skill body.", "the agent saw the skill through the link");
+	assert.ok(!existsSync(symlinkPath), "the link is removed when the shift ends");
 	const exclude = await readFile(join(cwd, ".git", "info", "exclude"), "utf8");
 	assert.match(exclude, /^\.agents\/skills\/$/m);
 });
@@ -181,7 +179,7 @@ console.log(JSON.stringify({ type: "step_finish", part: { type: "step-finish", m
 test("the OpenCode mapper counts one assistant message per messageID and ignores unknown events", () => {
 	const map = createOpencodeMapper();
 	assert.deepEqual(map({ type: "step_start", part: { messageID: "m1", type: "step-start" } }), []);
-	assert.deepEqual(map({ type: "tool_use", part: { messageID: "m1", type: "tool", tool: "read" } }), []);
+	assert.deepEqual(map({ type: "tool_use", part: { messageID: "m1", type: "tool", tool: "read" } }), [{ type: "tool", name: "read", input: "" }]);
 	assert.deepEqual(map({ type: "step_finish", part: { messageID: "m1", type: "step-finish", reason: "tool-calls", cost: 0.01, tokens: { input: 100, output: 5, cache: { read: 50, write: 10 } } } }), [
 		{ type: "turn", model: undefined, usage: { input: 160, output: 5, totalTokens: 165 }, costUsd: 0.01 },
 		{ type: "context", tokens: 160 },
@@ -255,4 +253,58 @@ process.stdin.on("end", () => {
 	}
 	await shift.close?.();
 	assert.equal(events.at(-1).type, "end");
+});
+
+test("in a git worktree, skill links are excluded through git's real exclude file, and a repo-owned path is left alone", { timeout: 30_000 }, async () => {
+	const { execFileSync } = await import("node:child_process");
+	const git = (args, cwd) => execFileSync("git", args, { cwd, stdio: "ignore" });
+	const skills = await mkdtemp(join(tmpdir(), "sw-opencode-wt-skills-"));
+	const granted = join(skills, "granted");
+	await mkdir(granted, { recursive: true });
+	await writeFile(join(granted, "SKILL.md"), "Granted body.");
+	// A granted skill whose name collides with a file the repo itself tracks.
+	const owned = join(skills, "owned");
+	await mkdir(owned, { recursive: true });
+	await writeFile(join(owned, "SKILL.md"), "Shiftwork's copy.");
+
+	const repo = await mkdtemp(join(tmpdir(), "sw-opencode-wt-repo-"));
+	git(["init", "-q"], repo);
+	git(["config", "user.email", "test@example.com"], repo);
+	git(["config", "user.name", "Test"], repo);
+	await mkdir(join(repo, ".agents", "skills"), { recursive: true });
+	await writeFile(join(repo, ".agents", "skills", "owned"), "repo-owned\n");
+	git(["add", "."], repo);
+	git(["commit", "-q", "-m", "init"], repo);
+	const cwd = join(repo, "..", `${basename(repo)}-wt`);
+	git(["worktree", "add", "-q", cwd, "-b", "wt"], repo);
+
+	const binDir = await mkdtemp(join(tmpdir(), "sw-opencode-bin-"));
+	await writeFile(join(binDir, "opencode"), "#!/bin/sh\ncp .agents/skills/granted/SKILL.md seen-granted.md\nexit 0\n");
+	await chmod(join(binDir, "opencode"), 0o755);
+	const backend = createOpencodeBackend({ command: "opencode", env: { PATH: `${binDir}:${process.env.PATH}` } });
+	const shift = await backend.startShift({
+		cwd,
+		route: { model: "opencode-go/kimi-k2.7-code", skills: { paths: [granted, owned], preload: [], restricted: true } },
+		prompt: "Do the ticket.",
+		systemPrompt: "sys",
+	});
+	for await (const event of shift.events) {
+		if (event.type === "end") break;
+	}
+	await shift.close?.();
+
+	const exclude = await readFile(join(repo, ".git", "info", "exclude"), "utf8");
+	assert.match(exclude, /^\.agents\/skills\/$/m, "the worktree's exclude lives in the common git dir");
+	assert.equal(await readFile(join(cwd, ".agents", "skills", "owned"), "utf8"), "repo-owned\n", "the repo's file is neither replaced nor removed");
+	assert.equal(await readFile(join(cwd, "seen-granted.md"), "utf8"), "Granted body.", "the agent saw the granted skill");
+});
+
+test("the OpenCode mapper turns tool_use parts into tool events", () => {
+	const map = createOpencodeMapper();
+	const lines = readFileSync(new URL("./fixtures/opencode-stream.jsonl", import.meta.url), "utf8").split("\n").filter(Boolean);
+	const tools = lines.flatMap((line) => map(JSON.parse(line))).filter((e) => e.type === "tool");
+	assert.deepEqual(tools, [{ type: "tool", name: "read", input: "hi.txt" }]);
+
+	const bash = createOpencodeMapper()({ type: "tool_use", part: { messageID: "m", type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm run lint" } } } });
+	assert.deepEqual(bash, [{ type: "tool", name: "bash", input: "npm run lint" }]);
 });

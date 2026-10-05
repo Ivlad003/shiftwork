@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CLAIMED, frontier as computeFrontier, orderFrontier, READY, RESOLVED } from "./index.js";
-import { createExclusive, isAlive, readOwner } from "./lock.js";
+import { isAlive, readOwner, takeClaim } from "./lock.js";
 import { openTracker, writeAtomic } from "./tracker.js";
 
 /** Default verify gate of an OpenSpec task; `<change>` is replaced by the change name. */
@@ -125,11 +125,7 @@ export function openOpenSpecTracker(root, { verify } = {}) {
 			await mkdir(claimsDir, { recursive: true });
 			const path = claimPath(t);
 			const owner = { pid, token: randomUUID(), at: new Date().toISOString() };
-			if (!(await createExclusive(path, owner))) {
-				if (await liveClaim(t)) return null;
-				await unlink(path).catch(() => {});
-				if (!(await createExclusive(path, owner))) return null;
-			}
+			if (!(await takeClaim(root, path, owner))) return null;
 			await setStatus(t, CLAIMED);
 			return { ticket: t, path, ...owner };
 		},

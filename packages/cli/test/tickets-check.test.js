@@ -31,7 +31,10 @@ async function repo(tickets) {
 	return root;
 }
 
-const plan = (status = "resolved") => `# 01: Plan\n\n**Blocked by:** None\n\n**Status:** ${status}\n\n**Type:** plan\n`;
+const plan = (status = "resolved", comments = "") => `# 01: Plan\n\n**Blocked by:** None\n\n**Status:** ${status}\n\n**Type:** plan\n${comments}`;
+
+/** The runner's record that the plan shift asked: its shift report's `- Outcome: needs-info: …` line. */
+const asked = "\n## Comments\n\n### Shift 1 — pi glm-5.3 (medium)\n- Ended: stop\n- Outcome: needs-info: Which database should it use?\n";
 
 const ticket = ({ number = "02", title = "Build", status = "ready-for-agent", verify = "`npm test`", checkboxes = 1, blockedBy = "None" } = {}) => {
 	const boxes = Array.from({ length: checkboxes }, (_, i) => `- [${i === 0 && checkboxes > 1 ? " " : "x"}] Does thing ${i + 1}`).join("\n");
@@ -48,6 +51,65 @@ test("passes with one good ticket besides the plan", async () => {
 	assert.equal(result.stdout, `f: 1 ready ticket besides 01 (need 1)\n`);
 	assert.equal(direct.ok, true);
 	assert.equal(direct.ready, 1);
+});
+
+test("a needs-info plan with no implementation tickets passes", async () => {
+	const root = await repo({ "f/01-plan.md": plan("needs-info", asked) });
+
+	const result = await exec(["tickets", "check", "f", "--dir", root]);
+	const direct = await checkFeatureTickets({ root, feature: "f" });
+
+	assert.equal(result.code, 0);
+	assert.equal(result.stdout, "f: plan needs information; no implementation tickets required\n");
+	assert.equal(direct.ok, true);
+	assert.equal(direct.asked, true);
+	assert.equal(direct.ready, 0);
+});
+
+test("the importer's Shift 0 needs-info outcome counts as the plan having asked", async () => {
+	const imported = "\n## Comments\n\n### Shift 0 — import\n- Outcome: needs-info: The issue has no description. What should Shiftwork build?\n";
+	const direct = await checkFeatureTickets({ root: await repo({ "f/01-plan.md": plan("needs-info", imported) }), feature: "f" });
+	assert.equal(direct.ok, true);
+	assert.equal(direct.asked, true);
+});
+
+test("a plan that set needs-info itself, with no runner-recorded outcome, does not pass", async () => {
+	for (const comments of [
+		"",
+		"\n## Comments\n\n### Shift 1 — pi glm-5.3 (medium)\n- Outcome: new attempt\n",
+		// An earlier needs-info outcome, answered since: the latest outcome is what counts.
+		"\n## Comments\n\n### Shift 1 — pi glm-5.3\n- Outcome: needs-info: Which db?\n\n### Shift 2 — pi glm-5.3\n- Outcome: new attempt\n",
+		// The line outside ## Comments is the agent's text, not the runner's record.
+		"\n- Outcome: needs-info: I wrote this myself\n",
+	]) {
+		const root = await repo({ "f/01-plan.md": plan("needs-info", comments) });
+		const direct = await checkFeatureTickets({ root, feature: "f" });
+		assert.equal(direct.ok, false, comments);
+		assert.equal(direct.asked, undefined);
+		assert.match(direct.problems.join("\n"), /only 0 of 1 required ticket ready/);
+	}
+});
+
+test("a needs-info plan still rejects a ready ticket that is missing its gate", async () => {
+	const root = await repo({
+		"f/01-plan.md": plan("needs-info", asked),
+		"f/02-build.md": ticket({ verify: "", checkboxes: 0 }),
+	});
+
+	const result = await exec(["tickets", "check", "f", "--dir", root]);
+
+	assert.equal(result.code, 1);
+	assert.match(result.stdout, /f\/02: no acceptance checkboxes/);
+	assert.doesNotMatch(result.stdout, /plan needs information/);
+});
+
+test("a needs-info plan with a good implementation ticket still counts that ticket", async () => {
+	const root = await repo({ "f/01-plan.md": plan("needs-info", asked), "f/02-build.md": ticket() });
+
+	const result = await exec(["tickets", "check", "f", "--dir", root]);
+
+	assert.equal(result.code, 0);
+	assert.equal(result.stdout, "f: 1 ready ticket besides 01 (need 1)\n");
 });
 
 test("fails with only the plan ticket", async () => {
@@ -277,4 +339,111 @@ test("resolveTrackerRoot honours dir without calling git", async () => {
 	});
 	assert.equal(root, dir);
 	assert.equal(called, false);
+});
+
+test("resolveTrackerRoot keeps a subdirectory cwd of a normal clone", async () => {
+	const { main } = await gitRepoWithTickets();
+	const sub = join(main, "packages", "x");
+	await mkdir(sub, { recursive: true });
+	assert.equal(await resolveTrackerRoot({ cwd: sub }), sub);
+});
+
+test("resolveTrackerRoot asks git for absolute paths and returns the first worktree of a linked worktree", async () => {
+	const calls = [];
+	const replies = {
+		"rev-parse --path-format=absolute --git-dir": "/repo/.git/worktrees/wt\n",
+		"rev-parse --path-format=absolute --git-common-dir": "/repo/.git\n",
+		"worktree list --porcelain": "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /wt\nHEAD def\ndetached\n",
+	};
+	const root = await resolveTrackerRoot({
+		cwd: "/wt",
+		exec: async (args) => {
+			calls.push(args.join(" "));
+			assert.equal(args[0], "git");
+			const reply = replies[args.slice(1).join(" ")];
+			if (reply === undefined) throw new Error(`unexpected ${args.join(" ")}`);
+			return reply;
+		},
+	});
+	assert.equal(root, "/repo");
+	assert.ok(calls.includes("git worktree list --porcelain"));
+});
+
+test("resolveTrackerRoot keeps cwd when git reports the same absolute git and common dirs", async () => {
+	const root = await resolveTrackerRoot({
+		cwd: "/repo/sub",
+		exec: async (args) => {
+			if (args.includes("--git-dir") || args.includes("--git-common-dir")) return "/repo/.git\n";
+			throw new Error(`unexpected ${args.join(" ")}`);
+		},
+	});
+	assert.equal(root, "/repo/sub");
+});
+
+test("resolveTrackerRoot keeps cwd when git fails (not a repository)", async () => {
+	const root = await resolveTrackerRoot({
+		cwd: "/nowhere",
+		exec: async () => {
+			throw new Error("fatal: not a git repository");
+		},
+	});
+	assert.equal(root, "/nowhere");
+});
+
+test("a ticket blocked by itself fails and does not count", async () => {
+	const root = await repo({ "f/01-plan.md": plan(), "f/02-a.md": ticket({ number: "02", blockedBy: "02" }) });
+	const direct = await checkFeatureTickets({ root, feature: "f" });
+	assert.equal(direct.ok, false);
+	assert.equal(direct.ready, 0);
+	assert.ok(direct.problems.includes("f/02: blocked by itself"), direct.problems.join("\n"));
+	assert.ok(!direct.problems.some((p) => p.includes("blocker cycle")), direct.problems.join("\n"));
+});
+
+test("a 2-cycle is named once and its tickets do not count toward --min", async () => {
+	const root = await repo({
+		"f/01-plan.md": plan(),
+		"f/02-ok.md": ticket({ number: "02" }),
+		"f/03-a.md": ticket({ number: "03", blockedBy: "04" }),
+		"f/04-b.md": ticket({ number: "04", blockedBy: "03" }),
+	});
+	const direct = await checkFeatureTickets({ root, feature: "f" });
+	assert.equal(direct.ok, false);
+	assert.equal(direct.ready, 1);
+	assert.deepEqual(
+		direct.problems.filter((p) => p.includes("cycle")),
+		["f: blocker cycle 03 → 04 → 03"],
+	);
+
+	const result = await exec(["tickets", "check", "f", "--dir", root]);
+	assert.equal(result.code, 1);
+	assert.match(result.stdout, /^f: blocker cycle 03 → 04 → 03$/m);
+});
+
+test("a 3-cycle starts at its lowest number, and the excepted plan ticket is covered", async () => {
+	const root = await repo({
+		"f/01-plan.md": plan().replace("**Blocked by:** None", "**Blocked by:** 03"),
+		"f/02-a.md": ticket({ number: "02", blockedBy: "01" }),
+		"f/03-b.md": ticket({ number: "03", blockedBy: "02" }),
+		"f/04-ok.md": ticket({ number: "04" }),
+	});
+	const direct = await checkFeatureTickets({ root, feature: "f" });
+	assert.equal(direct.ok, false);
+	assert.equal(direct.ready, 1);
+	assert.deepEqual(
+		direct.problems.filter((p) => p.includes("cycle")),
+		["f: blocker cycle 01 → 03 → 02 → 01"],
+	);
+});
+
+test("an acyclic diamond passes", async () => {
+	const root = await repo({
+		"f/01-plan.md": plan(),
+		"f/02-a.md": ticket({ number: "02", blockedBy: "01" }),
+		"f/03-b.md": ticket({ number: "03", blockedBy: "01" }),
+		"f/04-c.md": ticket({ number: "04", blockedBy: "02, 03" }),
+	});
+	const direct = await checkFeatureTickets({ root, feature: "f", min: 3 });
+	assert.deepEqual(direct.problems, []);
+	assert.equal(direct.ok, true);
+	assert.equal(direct.ready, 3);
 });

@@ -26,7 +26,7 @@ function list(value, separator = /[,·]/) {
 
 /**
  * Parse one ticket in the mattpocock-skills local tracker format, plus the
- * optional Shiftwork lines `Type`, `Model`, `Skills`, `Budget`, `Verify`.
+ * optional Shiftwork lines `Type`, `Model`, `Skills`, `Budget`, `Verify`, `Frozen` (and `Dual`, only when present).
  */
 export function parseTicket(markdown, path = "") {
 	const heading = markdown.match(/^#\s+(\d+)\s*:\s*(.+)$/m);
@@ -52,8 +52,12 @@ export function parseTicket(markdown, path = "") {
 		skills: list(field(markdown, "Skills"), /\s+/),
 		budget: field(markdown, "Budget"),
 		verify: commands(field(markdown, "Verify")),
+		// `**Frozen:**` globs: paths this ticket's shifts may not change (its gate's anchor).
+		frozen: globs(field(markdown, "Frozen")),
 		checkboxes,
 		lastRoute: lastRoute(markdown),
+		// `**Dual:** yes|no`: this ticket's own opt-in to (or out of) dual shifts (ADR-0007).
+		...(field(markdown, "Dual") ? { dual: field(markdown, "Dual") } : {}),
 	};
 }
 
@@ -71,6 +75,13 @@ function commands(value) {
 	if (!value) return [];
 	const quoted = [...value.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter(Boolean);
 	return quoted.length ? quoted : list(value, /·/);
+}
+
+/** Frozen globs: the backtick-quoted spans; without backticks, split on "·" or ",". */
+function globs(value) {
+	if (!value) return [];
+	const quoted = [...value.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter(Boolean);
+	return quoted.length ? quoted : list(value, /[·,]/);
 }
 
 function pad(number) {
@@ -147,9 +158,10 @@ export { applyStatusLine, formatTicketsTable, openTracker, setSpecStatus } from 
 export { detectTracker, openOpenSpecTracker, openRepoTracker, parseTasks } from "./openspec.js";
 export { openCooldowns } from "./cooldowns.js";
 export { lockPath, withLock } from "./lock.js";
+export { isShiftworkFile, LEGACY_DIR, LEGACY_HINT, legacyFiles, SHIFTWORK_DIR, shiftworkPath, stateDir } from "./paths.js";
 export { noRunState, openRunState } from "./run-state.js";
-export { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, WORKER_PROMPT } from "./prompt.js";
-export { decideNext, reviewWhen, runFrontier, shouldReview } from "./runner.js";
+export { buildMergePrompt, buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, WORKER_PROMPT } from "./prompt.js";
+export { decideNext, reviewWhen, runFrontier, shouldDual, shouldReview } from "./runner.js";
 export {
 	GITHUB_LABEL_DEFAULTS,
 	GITHUB_LABELS_IN_REQUIRED,

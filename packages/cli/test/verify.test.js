@@ -44,3 +44,13 @@ test("createVerify takes the timeout from verifyTimeoutMin and names it when it 
 	assert.match(gate.results[0].outputTail, /timed out after 0\.005 min \(verifyTimeoutMin\)/);
 	assert.equal((await createVerify({})(["true"], cwd)).ok, true);
 });
+
+test("a missing working directory fails the gate with a clear message instead of crashing", async () => {
+	const cwd = join(await mkdtemp(join(tmpdir(), "sw-verify-")), "gone");
+	const gate = await runVerify(["true", "echo never"], cwd);
+	assert.equal(gate.ok, false);
+	assert.equal(gate.results.length, 1);
+	assert.notEqual(gate.results[0].code, 0);
+	assert.match(gate.results[0].outputTail, /could not start/);
+	assert.match(gate.results[0].outputTail, /gone/);
+});

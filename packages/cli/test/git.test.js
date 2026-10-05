@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { withLock } from "shiftwork-core";
 import { createGitWorkspace } from "../src/git.js";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -126,6 +127,93 @@ test("a target moved by a parallel landing rebases the branch; landing again fas
 	assert.equal(landed.ok, true);
 	assert.equal(await readFile(join(root, "shared.txt"), "utf8"), "ONE\ntwo\nthree\nfour\nfive\nSIX\n");
 	assert.equal(existsSync(b.cwd), false);
+});
+
+test("a dirty tracker copy doesn't stop the rebase onto a moved target: the gate re-runs before landing", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	// The agent edited its copy of the tracker: never committed, so the worktree stays dirty.
+	await writeFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "# 01: A\n\n**Status:** worktree\n");
+	await writeFile(join(root, "other.txt"), "meanwhile\n");
+	git(root, "add", "other.txt");
+	git(root, "commit", "-q", "-m", "meanwhile");
+
+	const moved = await ws.land(t);
+
+	assert.equal(moved.ok, false);
+	assert.match(moved.rebase ?? "", /^[0-9a-f]{7,}$/, `a moved target means re-verify, never a plain merge: ${moved.message}`);
+	assert.equal(existsSync(join(root, "feature.txt")), false, "nothing landed unverified");
+	assert.equal(await readFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "utf8"), "# 01: A\n\n**Status:** worktree\n");
+	assert.equal((await ws.land(t)).ok, true);
+	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n");
+});
+
+test("a tracker copy edited on both sides still rebases, and leaves no unmerged paths behind", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	await writeFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "# 01: A\n\n**Status:** worktree\n");
+	await writeFile(t.path, "# 01: A\n\n**Status:** claimed\n");
+	git(root, "commit", "-q", "-am", "tickets");
+
+	const moved = await ws.land(t);
+
+	assert.match(moved.rebase ?? "", /^[0-9a-f]{7,}$/, moved.message);
+	assert.equal(git(cwd, "diff", "--name-only", "--diff-filter=U"), "");
+	assert.equal(git(root, "stash", "list"), "", "the conflicted autostash is not left in the shared stash list");
+	assert.equal((await ws.land(t)).ok, true);
+	assert.equal(await readFile(t.path, "utf8"), "# 01: A\n\n**Status:** claimed\n");
+});
+
+test("a rebase that refuses to run (no conflict) fails the landing instead of merging unverified", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	// An untracked tracker file the moved target also adds: the rebase would overwrite it.
+	await writeFile(join(cwd, ".scratch", "f", "issues", "02-b.md"), "worktree\n");
+	await writeFile(join(root, ".scratch", "f", "issues", "02-b.md"), "target\n");
+	git(root, "add", "-A");
+	git(root, "commit", "-q", "-m", "new ticket");
+	const head = git(root, "rev-parse", "HEAD");
+
+	const result = await ws.land(t);
+
+	assert.equal(result.ok, false);
+	assert.equal(result.rebase, undefined);
+	assert.equal(result.conflict, undefined);
+	assert.match(result.message, /kept/);
+	assert.equal(git(root, "rev-parse", "HEAD"), head, "the target is untouched");
+	assert.equal(existsSync(join(root, "feature.txt")), false);
+	assert.equal(git(root, "branch", "--list", "--format=%(refname:short)", "shiftwork/f-01"), "shiftwork/f-01");
+});
+
+test("land waits for the repo's cross-process landing lock, not the shared-state lock", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, "feature.txt"), "done\n");
+	const order = [];
+
+	let landing;
+	await withLock(root, async () => {
+		landing = ws.land(t).then((r) => {
+			order.push("landed");
+			return r;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		order.push("released");
+	}, { name: "land" });
+
+	assert.equal((await landing).ok, true);
+	assert.deepEqual(order, ["released", "landed"]);
 });
 
 test("a conflicting parallel landing keeps the branch, and redo starts fresh from the new target", async () => {
@@ -336,4 +424,69 @@ test("after a rebase, discardAfterReview drops what the re-verify left; the next
 	assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "done\n", "the landing carries the reviewed commit, not the re-verify's edit");
 	assert.equal(existsSync(join(root, "stray.txt")), false, "the re-verify's stray never lands");
 	assert.equal(git(root, "log", "--format=%s", "--grep", "shiftwork: f/01").split("\n").length, 1, "one landing commit, no unseen second one");
+});
+
+test("a dual candidate (suffix) gets its own branch and worktree; diff shows its committed work against the target", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const a = { ...ticket(root), suffix: "a" };
+	const b = { ...ticket(root), suffix: "b" };
+
+	const { cwd: cwdA, branch: branchA } = await ws.prepare(a);
+	const { cwd: cwdB } = await ws.prepare(b);
+
+	assert.equal(branchA, "shiftwork/f-01-a");
+	assert.equal(git(cwdA, "rev-parse", "--abbrev-ref", "HEAD"), "shiftwork/f-01-a");
+	assert.equal(git(cwdB, "rev-parse", "--abbrev-ref", "HEAD"), "shiftwork/f-01-b");
+	assert.notEqual(cwdA, cwdB);
+	await writeFile(join(cwdA, "a.txt"), "from a\n");
+	assert.equal(await ws.commit(a), true);
+	assert.match(git(cwdA, "log", "-1", "--format=%s"), /^shiftwork: f\/01-a A$/);
+
+	const diff = await ws.diff(a);
+	assert.equal(diff.branch, "shiftwork/f-01-a");
+	assert.equal(diff.target, "main");
+	assert.match(diff.stat, /a\.txt/);
+	assert.equal((await ws.diff(b)).stat, "", "nothing committed on b");
+	assert.equal(await ws.hasChanges(b), false);
+	assert.equal(await ws.hasChanges(a), true);
+});
+
+test("prepare from a candidate's branch starts the ticket's own branch there; redo drops a candidate", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root });
+	const t = ticket(root);
+	const a = { ...t, suffix: "a" };
+	const { cwd: cwdA, branch: branchA } = await ws.prepare(a);
+	await writeFile(join(cwdA, "a.txt"), "from a\n");
+	await ws.commit(a);
+
+	const { cwd, branch } = await ws.prepare(t, { from: branchA });
+
+	assert.equal(branch, "shiftwork/f-01");
+	assert.equal(await readFile(join(cwd, "a.txt"), "utf8"), "from a\n");
+	await ws.redo(a);
+	assert.equal(existsSync(cwdA), false);
+	assert.equal(git(root, "branch", "--list", "shiftwork/f-01-a"), "");
+	const landed = await ws.land(t);
+	assert.equal(landed.ok, true);
+	assert.equal(await readFile(join(root, "a.txt"), "utf8"), "from a\n");
+});
+
+test("changedFiles lists the branch's changes against the target, committed and uncommitted, without the tracker copy or setup output", async () => {
+	const root = await repo();
+	const ws = createGitWorkspace({ dir: `${root}-worktrees`, root, setup: ["echo x > setup-out.txt"] });
+	const t = ticket(root);
+	const { cwd } = await ws.prepare(t);
+	await writeFile(join(cwd, ".scratch", "f", "issues", "01-a.md"), "edited copy\n");
+	assert.deepEqual(await ws.changedFiles(t), []);
+
+	await mkdir(join(cwd, "test"), { recursive: true });
+	await writeFile(join(cwd, "test", "a.test.js"), "x\n");
+	git(cwd, "add", "test/a.test.js");
+	git(cwd, "commit", "-q", "-m", "work");
+	await writeFile(join(cwd, "README.md"), "changed\n");
+	await writeFile(join(cwd, "new.txt"), "new\n");
+	assert.deepEqual((await ws.changedFiles(t)).sort(), ["README.md", "new.txt", "test/a.test.js"]);
+	assert.deepEqual(await ws.changedFiles({ ...t, number: "09" }), [], "no worktree, nothing changed");
 });

@@ -50,10 +50,19 @@ function runOne(cmd, cwd, timeoutMs, timeoutLabel) {
 			output += `\n[shiftwork] timed out after ${timeoutLabel}`;
 			killGroup(child);
 		}, timeoutMs);
-		child.on("close", (code, signal) => {
+		let done = false;
+		const finish = (code) => {
+			if (done) return;
+			done = true;
 			running.delete(child);
 			clearTimeout(timer);
-			resolve({ cmd, code: code ?? (signal ? 124 : 1), outputTail: output.slice(-TAIL_CHARS) });
+			resolve({ cmd, code, outputTail: output.slice(-TAIL_CHARS) });
+		};
+		// The command could not start (a missing worktree directory: ENOENT): a failed gate, not a crash.
+		child.on("error", (error) => {
+			output += `\n[shiftwork] could not start \`${cmd}\` in ${cwd}: ${error.message}`;
+			finish(127);
 		});
+		child.on("close", (code, signal) => finish(code ?? (signal ? 124 : 1)));
 	});
 }

@@ -52,6 +52,14 @@ _Avoid_: lock, assignment
 The ticket's commands whose success, and nothing else, decides that the ticket is resolved.
 _Avoid_: tests, checks, acceptance step
 
+**Frozen path**:
+A path a ticket's shifts may not change, so its verify gate measures what it measured before (a ticket's `**Frozen:**` globs plus the config's `frozen` list). A passing gate on a branch that changed one is a failed attempt.
+_Avoid_: protected file, locked path
+
+**Research rollback**:
+An implementation shift ending with `<shiftwork:needs-research reason="…"/>`: the runner files a research ticket in the feature and blocks the ticket on it, once per ticket, with no human in between.
+_Avoid_: research request, escalation
+
 ### Execution
 
 **Runner**:
@@ -63,7 +71,7 @@ One running shift of a parallel run: the runner works one ticket per worker, up 
 _Avoid_: thread, job, child process
 
 **Shared-state lock**:
-The runner's short hold on `.pi/shiftwork.lock` around every read-modify-write of the shared state — cooldowns, the run state, the spec table — so parallel shifts and a second runner never lose an update. Stale when the pid holding it is gone.
+The runner's short hold on `.shiftwork/shiftwork.lock` around every read-modify-write of the shared state — cooldowns, the run state, the spec table — so parallel shifts and a second runner never lose an update. Stale when the pid holding it is gone.
 _Avoid_: mutex, semaphore, claim
 
 **Backend**:
@@ -85,6 +93,10 @@ _Avoid_: merge clash, collision
 **Review shift**:
 One shift in a fresh context on its own tier, judging a ticket's change and ending with a verdict: accept, reopen or follow-up. By default it runs on the unlanded branch, in the ticket's worktree, before anything lands; `review.when: "after-land"` moves it after the landing.
 _Avoid_: code review, QA pass, checker
+
+**Dual shift**:
+A ticket's first round worked by two **candidate** shifts on two models, each in its own worktree and through its own verify gate, then combined by one **merge shift** when both pass. See ADR-0007.
+_Avoid_: pair run, double run, race
 
 **Handoff**:
 Passing a ticket from one shift to the next, together with a handoff note. An **in-place handoff** keeps the context and swaps the model. A **fresh handoff** starts a new context.

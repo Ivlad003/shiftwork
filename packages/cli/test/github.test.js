@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -90,7 +90,7 @@ test("collaborators() calls gh api with --paginate, every page, and returns the 
 	assert.deepEqual(calls, [["gh", "api", "repos/owner/name/collaborators", "--paginate", "--jq", ".[].login"]]);
 });
 
-test("listIssues() calls gh issue list with --json and normalizes the output", async () => {
+test("listIssues() calls gh issue list with --json and normalizes the output; with a label the limit is 1000", async () => {
 	const { exec, calls } = stubExec((args) =>
 		args.includes("list")
 			? JSON.stringify([
@@ -128,7 +128,7 @@ test("listIssues() calls gh issue list with --json and normalizes the output", a
 		"--state",
 		"open",
 		"--limit",
-		"100",
+		"1000",
 		"--label",
 		"sw",
 		"--json",
@@ -142,6 +142,50 @@ test("listIssues() without a label sends no --label flag", async () => {
 
 	assert.deepEqual(await gh.listIssues(), []);
 	assert.ok(!calls[0].includes("--label"));
+	assert.equal(calls[0][calls[0].indexOf("--limit") + 1], "100");
+});
+
+test("collaborators() failing (a 403: no push access) falls back to the authenticated user and warns once", async () => {
+	const { exec, calls } = stubExec((args) => {
+		if (args.join(" ") === "gh api user --jq .login") return "me\n";
+		if (args.includes("repos/owner/name/collaborators")) throw new Error("gh: HTTP 403: Must have push access to view repository collaborators.");
+		return undefined;
+	});
+	const warnings = [];
+	const gh = createGitHub({ root: "/repo", repo: "owner/name", exec, warn: (line) => warnings.push(line) });
+
+	assert.deepEqual(await gh.collaborators(), ["me"]);
+	assert.deepEqual(await gh.collaborators(), ["me"]);
+	assert.equal(calls.filter((args) => args.includes("repos/owner/name/collaborators")).length, 2, "the collaborators are retried every time");
+	assert.equal(warnings.length, 1, warnings.join("\n"));
+	assert.match(warnings[0], /cannot list the collaborators of owner\/name.*HTTP 403.*github\.authors/);
+});
+
+test("collaborators() rethrows the original error when the authenticated user cannot be read either", async () => {
+	const { exec } = stubExec(() => {
+		throw new Error("gh: connection refused");
+	});
+	const gh = createGitHub({ root: "/repo", repo: "owner/name", exec, warn: () => {} });
+
+	await assert.rejects(gh.collaborators(), /connection refused/);
+});
+
+test("labelActor(n, label) reads the issue events and returns who added the label last", async () => {
+	const jq = '.[] | select(.event == "labeled" and .label.name == "shiftwork:in") | .actor.login';
+	const { exec, calls } = stubExec((args) =>
+		args.join(" ") === `gh api repos/owner/name/issues/8/events --paginate --jq ${jq}` ? "rando\nOctoCat\n" : undefined,
+	);
+	const gh = createGitHub({ root: "/repo", repo: "owner/name", exec });
+
+	assert.equal(await gh.labelActor(8, "shiftwork:in"), "OctoCat");
+	assert.deepEqual(calls, [["gh", "api", "repos/owner/name/issues/8/events", "--paginate", "--jq", jq]]);
+});
+
+test("labelActor(n, label) is undefined when the label was never added", async () => {
+	const { exec } = stubExec(() => "");
+	const gh = createGitHub({ root: "/repo", repo: "owner/name", exec });
+
+	assert.equal(await gh.labelActor(8, "shiftwork:in"), undefined);
 });
 
 test("issueComments(n) calls gh api with --paginate and normalizes the comments with their ids", async () => {
@@ -182,6 +226,26 @@ test("addLabels and removeLabel edit the issue's labels", async () => {
 		["gh", "issue", "edit", "8", "--repo", "owner/name", "--add-label", "shiftwork:planning", "--add-label", "shiftwork:working"],
 		["gh", "issue", "edit", "8", "--repo", "owner/name", "--remove-label", "shiftwork:needs-info"],
 	]);
+});
+
+test("issueBody reads the body and editBody replaces it through a file", async () => {
+	let written;
+	const { exec, calls } = stubExec((args) => {
+		if (args.includes("--json")) return '{"body":"hello"}';
+		const file = args[args.indexOf("--body-file") + 1];
+		return readFile(file, "utf8").then((text) => {
+			written = text;
+			return "";
+		});
+	});
+	const gh = createGitHub({ root: "/repo", repo: "owner/name", exec });
+
+	assert.equal(await gh.issueBody(8), "hello");
+	await gh.editBody(8, "next\nline");
+
+	assert.equal(written, "next\nline");
+	assert.deepEqual(calls[0], ["gh", "issue", "view", "8", "--repo", "owner/name", "--json", "body"]);
+	assert.deepEqual(calls[1].slice(0, 7), ["gh", "issue", "edit", "8", "--repo", "owner/name", "--body-file"]);
 });
 
 test("close(n) closes the issue, with an optional final comment that ends with the marker", async () => {

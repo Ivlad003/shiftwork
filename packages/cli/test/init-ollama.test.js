@@ -86,7 +86,7 @@ test("init --ollama writes the ollama provider into models.json with the right c
 			{ id: "qwen2.5-coder:7b", contextWindow: 32768 },
 		]);
 
-		const config = JSON.parse(await readFile(join(root, ".pi", "shiftwork.json"), "utf8"));
+		const config = JSON.parse(await readFile(join(root, ".shiftwork", "shiftwork.json"), "utf8"));
 		assert.deepEqual(config.tiers.local.chain, ["ollama/llama3.2:latest", "ollama/qwen2.5-coder:7b"]);
 		assert.equal(config.tiers.quick.chain[0], "CHANGE-ME/quick-model", "the other tiers are untouched");
 	} finally {
@@ -133,4 +133,5 @@ test("without a running server, init --ollama explains how to start Ollama and c
 	assert.match(stdout, /Nothing was changed\./);
 	assert.equal(existsSync(join(dir, "models.json")), false, "models.json is not created");
 	assert.equal(existsSync(join(root, ".pi")), false, "no .pi directory is created");
+	assert.equal(existsSync(join(root, ".shiftwork")), false, "no .shiftwork directory is created");
 });

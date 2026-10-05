@@ -41,27 +41,28 @@
     },
     "standard": {
       "chain": [
+        "grok:grok-4.6",
         "opencode-go/glm-5.3",
         "opencode-go/deepseek-v4-pro",
         "opencode-go/kimi-k3",
         "opencode-go/qwen3.8-max",
-        "xai/grok-4.6",
         "opencode-go/minimax-m3",
         "opencode-go/mimo-v2.6-pro"
       ]
     },
     "premium": {
       "chain": [
-        "xai/grok-4.7",
-        "openrouter/anthropic/claude-opus-5"
+        "grok:grok-4.7",
+        "claude:claude-opus-5-5"
+
       ],
       "thinking": "high"
     }
   },
   "budgets": {
     "default": {
-      "maxTurns": 150,
-      "maxWallMin": 60,
+      "maxTurns": 40,
+      "maxWallMin": 20,
       "maxContextPct": 80
     },
     "ticket": {
@@ -104,6 +105,25 @@
   "preferWaitMin": 30,
   "review": {
     "enabled": true,
-    "tier": "premium"
+    "tier": "premium",
+    "types": ["code", "refactor", "test"],
+    "budget": {
+      "maxTurns": 12,
+      "maxWallMin": 8
+    }
+  },
+  "models": {
+    "grok:grok-4.6": { "contextWindow": 500000 },
+    "grok:grok-4.7": { "contextWindow": 500000 }
+  },
+  "github": {
+    "repo": "Ivlad003/shiftwork",
+    "planTier": "standard",
+    "labels": {
+      "in": "shiftwork:in",
+      "working": "shiftwork:working",
+      "needsInfo": "shiftwork:needs-info",
+      "done": "shiftwork:done"
+    }
   }
 }

@@ -9,8 +9,8 @@ async function dirs(project, user) {
 	const root = await mkdtemp(join(tmpdir(), "sw-cfg-"));
 	const userDir = await mkdtemp(join(tmpdir(), "sw-cfg-user-"));
 	if (project) {
-		await mkdir(join(root, ".pi"));
-		await writeFile(join(root, ".pi", "shiftwork.json"), JSON.stringify(project));
+		await mkdir(join(root, ".shiftwork"));
+		await writeFile(join(root, ".shiftwork", "shiftwork.json"), JSON.stringify(project));
 	}
 	if (user) await writeFile(join(userDir, "shiftwork.json"), JSON.stringify(user));
 	return { root, userDir };
@@ -37,9 +37,16 @@ test("an invalid project file names the file and the field", async () => {
 
 test("broken JSON names the file", async () => {
 	const { root, userDir } = await dirs();
+	await mkdir(join(root, ".shiftwork"));
+	await writeFile(join(root, ".shiftwork", "shiftwork.json"), "{ nope");
+	await assert.rejects(loadConfig(root, userDir), /\.shiftwork\/shiftwork\.json/);
+});
+
+test("a legacy repo's .pi/shiftwork.json is still read until it is migrated", async () => {
+	const { root, userDir } = await dirs();
 	await mkdir(join(root, ".pi"));
-	await writeFile(join(root, ".pi", "shiftwork.json"), "{ nope");
-	await assert.rejects(loadConfig(root, userDir), /\.pi\/shiftwork\.json/);
+	await writeFile(join(root, ".pi", "shiftwork.json"), JSON.stringify({ model: "a/1", maxAttempts: 7 }));
+	assert.equal((await loadConfig(root, userDir)).maxAttempts, 7);
 });
 
 test("tracker and openspec.verify are validated", async () => {
@@ -330,4 +337,48 @@ test("landRetries defaults to 5; negative or non-integer fails", () => {
 	assert.throws(() => validateConfig({ ...base, landRetries: -1 }), /landRetries: must be a non-negative integer/);
 	assert.throws(() => validateConfig({ ...base, landRetries: 2.5 }), /landRetries: must be a non-negative integer/);
 	assert.throws(() => validateConfig({ ...base, landRetries: "5" }), /landRetries: must be a non-negative integer/);
+});
+
+test("maxLimitRetries defaults to 10 and must be a positive integer", () => {
+	assert.equal(validateConfig({ model: "fake/m1" }).maxLimitRetries, 10);
+	assert.equal(validateConfig({ model: "fake/m1", maxLimitRetries: 3 }).maxLimitRetries, 3);
+	assert.throws(() => validateConfig({ model: "fake/m1", maxLimitRetries: 0 }), /maxLimitRetries/);
+});
+
+test("dual: absent stays absent; true/false and the object form are validated", () => {
+	const base = { model: "a/1", tiers: { standard: { chain: ["a/1", "b/2"] }, premium: { chain: ["p/3"] } } };
+	assert.equal(validateConfig(base).dual, undefined);
+	assert.deepEqual(validateConfig({ ...base, dual: true }).dual, { enabled: true });
+	assert.deepEqual(validateConfig({ ...base, dual: false }).dual, { enabled: false });
+	const full = { enabled: true, types: ["code"], features: ["f"], tiers: ["standard", "premium"], mergeTier: "premium", budget: { maxTurns: 30 } };
+	assert.deepEqual(validateConfig({ ...base, dual: full }).dual, full);
+	assert.deepEqual(validateConfig({ ...base, dual: { enabled: true, models: ["a/1", "claude:sonnet"] } }).dual, { enabled: true, models: ["a/1", "claude:sonnet"] });
+	// Re-validating a validated config round-trips it.
+	assert.deepEqual(validateConfig(validateConfig({ ...base, dual: full })).dual, full);
+	for (const [dual, error] of [
+		["yes", /dual: must be an object, true or false/],
+		[{ enabled: "yes" }, /dual\.enabled: must be true or false/],
+		[{ pick: "best" }, /dual\.pick: unknown dual field/],
+		[{ models: ["a/1"] }, /dual\.models: must be two model references/],
+		[{ models: ["a/1", "nope"] }, /dual\.models\[1\]: expected "provider\/model"/],
+		[{ tiers: ["standard", "quick"] }, /dual\.tiers\[1\]: unknown tier "quick"/],
+		[{ models: ["a/1", "b/2"], tiers: ["standard", "premium"] }, /dual: set models or tiers, not both/],
+		[{ mergeTier: "ultra" }, /dual\.mergeTier: unknown tier "ultra"/],
+		[{ types: "code" }, /dual\.types: must be an array of ticket types/],
+		[{ features: [""] }, /dual\.features: must be an array of feature names/],
+		[{ budget: { maxTurns: -1 } }, /dual\.budget\.maxTurns: must be a non-negative finite number/],
+	]) {
+		assert.throws(() => validateConfig({ ...base, dual }), error);
+	}
+});
+
+test("frozen: a list of globs, [] by default; anything else is refused", () => {
+	assert.deepEqual(validateConfig({ model: "fake/m1" }).frozen, []);
+	assert.deepEqual(validateConfig({ model: "fake/m1", frozen: ["packages/*/test/fixtures/**", "package.json"] }).frozen, [
+		"packages/*/test/fixtures/**",
+		"package.json",
+	]);
+	for (const frozen of ["package.json", [1], [""], { a: 1 }]) {
+		assert.throws(() => validateConfig({ model: "fake/m1", frozen }), /frozen: must be an array of globs/);
+	}
 });

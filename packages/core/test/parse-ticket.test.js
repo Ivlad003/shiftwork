@@ -45,3 +45,11 @@ test("a paused feature's spec keeps its tickets off the frontier; another spec s
 	assert.equal(tickets.find((t) => t.feature === "live").featurePaused, undefined);
 	assert.deepEqual(frontier(tickets).map((t) => t.feature), ["bare", "live", "triaged"]);
 });
+
+test("Frozen globs: backtick-quoted spans, else split on the middle dot or a comma; absent is []", () => {
+	const frozen = (line) => parseTicket(`# 01: A\n\n**Status:** ready-for-agent\n**Frozen:** ${line}\n`).frozen;
+	assert.deepEqual(frozen("`packages/*/test/fixtures/**` · `package.json`"), ["packages/*/test/fixtures/**", "package.json"]);
+	assert.deepEqual(frozen("test/**/*.js · package.json"), ["test/**/*.js", "package.json"]);
+	assert.deepEqual(frozen("test/**, scripts/verify.sh"), ["test/**", "scripts/verify.sh"]);
+	assert.deepEqual(parseTicket("# 01: A\n\n**Status:** ready-for-agent\n").frozen, []);
+});

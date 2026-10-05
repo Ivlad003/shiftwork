@@ -5,7 +5,7 @@ CLI for [Shiftwork](https://github.com/Ivlad003/shiftwork) · [npm](https://www.
 **Requirements:** Node ≥ 22 and [pi](https://pi.dev), installed with `npm i -g @earendil-works/pi-coding-agent`, with at least one provider logged in (`/login` in pi).
 
 ```bash
-npx shiftwork init --model anthropic/<model-id>   # .pi/shiftwork.json, worker prompt, pi compaction settings
+npx shiftwork init --model anthropic/<model-id>   # .shiftwork/shiftwork.json, worker prompt, pi compaction settings
 npx shiftwork status                              # tickets and the ready frontier
 npx shiftwork tui                                 # live dashboard: queue, agents, cooldowns, logs — tabs 1–6, n run this, p pause, / search, r run, s stop, q quit
 npx shiftwork run --dry-run                       # which model/tier/thinking each ticket would get, and whether it gets a review (before or after it lands)
@@ -13,13 +13,13 @@ npx shiftwork run --once                          # work one ticket
 npx shiftwork run                                 # work the frontier until nothing is left
 ```
 
-Local models through [Ollama](https://ollama.com): `npx shiftwork init --ollama` discovers them (`OLLAMA_HOST`, default `http://localhost:11434`), adds an `ollama` provider to `~/.pi/agent/models.json` and a `local` tier to `.pi/shiftwork.json`. Route ticket types to it with `routing.<type>.tier: "local"`. Local models are never paid, and a stopped Ollama server makes the backend unavailable instead of cooling.
+Local models through [Ollama](https://ollama.com): `npx shiftwork init --ollama` discovers them (`OLLAMA_HOST`, default `http://localhost:11434`), adds an `ollama` provider to `~/.pi/agent/models.json` and a `local` tier to `.shiftwork/shiftwork.json`. Route ticket types to it with `routing.<type>.tier: "local"`. Local models are never paid, and a stopped Ollama server makes the backend unavailable instead of cooling.
 
 Tickets live in `.scratch/<feature>/issues/NN-slug.md`, in the [mattpocock-skills](https://github.com/mattpocock/skills) format, and are resolved only by their `**Verify:**` commands. Every shift is a fresh `pi --mode rpc --no-session` process. Its report goes to the ticket's `## Comments`, and its events go to `logs/<feature>/<NN>/`.
 
 In a git repo, every ticket runs in its own worktree on branch `shiftwork/<feature>-<NN>`, outside the repo under `~/.cache/shiftwork/worktrees/`. A resolved ticket is committed and merged into the branch you started from; a ticket that needs info keeps its branch. Dependencies aren't copied into worktrees: set `worktree.setup`, for example `["npm ci --ignore-scripts"]`. Files the setup creates are never committed. Use `--no-worktree` to work in the main checkout.
 
-Routing: the ticket's `**Model:**`, then `routing[Type]` → tier → first model of the tier's chain, then `defaultTier`. See `.pi/shiftwork.json` after `init`.
+Routing: the ticket's `**Model:**`, then `routing[Type]` → tier → first model of the tier's chain, then `defaultTier`. See `.shiftwork/shiftwork.json` after `init`.
 
 Review shifts, on by default: one review shift in a fresh context on the strongest configured tier (set `review.tier` to choose one) judges each ticket's change — on its unlanded branch, in its worktree, before anything lands (`review.when: "after-land"` reviews the landed commit after the landing instead). The reviewer reads the ticket, the spec and the diff, runs the verify gate, and ends with `<shiftwork:review verdict="accept|reopen|follow-up" reason="…"/>`. The verdict is recorded as `### Review` in the ticket's Comments: `accept` lands the branch, `reopen` sends the ticket back to ready-for-agent (nothing lands; the next shift continues on the same branch with the findings in its prompt, up to `review.maxRounds` reopens, default 2), `follow-up` lands the branch and files a new ticket in the feature. Restrict reviews with `features` (feature names) and `types` (ticket types); `run --dry-run` prints `review=<tier> (before land)` or `(after land)` for tickets that will be reviewed and `review=no` for the rest.
 

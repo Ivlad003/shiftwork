@@ -14,13 +14,13 @@ const fixture = fileURLToPath(new URL("./fixtures/scripted-provider.ts", import.
 test("shiftwork run resolves a ticket end to end with a real pi shift", { timeout: 120_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-e2e-"));
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	await writeFile(
 		join(root, ".scratch", "demo", "issues", "01-hello.md"),
 		"# 01: Hello file\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n\n- [ ] hello.txt exists\n",
 	);
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({ model: "scripted/s1", thinking: "off", pi: { args: ["--offline", "-ns", "-ne", "-e", fixture] } }),
 	);
 	const script = [{ tool: { name: "write", args: { path: "hello.txt", content: "hi\n" } } }, { text: "Wrote hello.txt." }];
@@ -44,13 +44,13 @@ test("in a git repo each ticket runs in its own worktree and lands on the target
 	git("config", "user.email", "t@example.com");
 	git("config", "user.name", "T");
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	await writeFile(
 		join(root, ".scratch", "demo", "issues", "01-hello.md"),
 		"# 01: Hello file\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt` · `test -f setup-ran.txt`\n",
 	);
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({
 			model: "scripted/s1",
 			thinking: "off",
@@ -82,7 +82,7 @@ test("parallel tickets touching one file land: a conflicting landing is redone o
 	git("config", "user.email", "t@example.com");
 	git("config", "user.name", "T");
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	// Two independent tickets touching the same new file: `pwd > hello.txt` gives each worktree
 	// its own content, so the second landing conflicts with the first (spec story 4).
 	for (const [number, title] of [
@@ -95,7 +95,7 @@ test("parallel tickets touching one file land: a conflicting landing is redone o
 		);
 	}
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({
 			model: "scripted/s1",
 			thinking: "off",
@@ -131,14 +131,14 @@ test("parallel tickets touching one file land: a conflicting landing is redone o
 test("run reviews every resolved ticket by default; run --no-review skips the review shift", { timeout: 240_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-e2e-review-"));
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	await writeFile(
 		join(root, ".scratch", "demo", "issues", "01-hello.md"),
 		"# 01: Hello file\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n\n- [ ] hello.txt exists\n",
 	);
 	// No review block: reviews are on by default, on the strongest configured tier (premium).
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({
 			model: "scripted/s1",
 			thinking: "off",
@@ -186,14 +186,14 @@ test("in a git repo the review runs on the unlanded branch: main gets the commit
 	git("config", "user.email", "t@example.com");
 	git("config", "user.name", "T");
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	await writeFile(
 		join(root, ".scratch", "demo", "issues", "01-hello.md"),
 		"# 01: Hello file\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n**Verify:** `test -f hello.txt`\n",
 	);
 	// No review block: reviews are on by default, before the branch lands.
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({
 			model: "scripted/s1",
 			thinking: "off",
@@ -240,7 +240,7 @@ test("in a git repo the review runs on the unlanded branch: main gets the commit
 test("run --ticket works exactly the chosen ticket end to end", { timeout: 120_000 }, async () => {
 	const root = await mkdtemp(join(tmpdir(), "sw-e2e-ticket-"));
 	await mkdir(join(root, ".scratch", "demo", "issues"), { recursive: true });
-	await mkdir(join(root, ".pi"));
+	await mkdir(join(root, ".shiftwork"));
 	for (const [number, file] of [
 		["01", "01-first.md"],
 		["02", "02-second.md"],
@@ -251,7 +251,7 @@ test("run --ticket works exactly the chosen ticket end to end", { timeout: 120_0
 		);
 	}
 	await writeFile(
-		join(root, ".pi", "shiftwork.json"),
+		join(root, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({ model: "scripted/s1", thinking: "off", pi: { args: ["--offline", "-ns", "-ne", "-e", fixture] } }),
 	);
 	const script = [{ tool: { name: "write", args: { path: "02.txt", content: "hi\n" } } }, { text: "Wrote 02.txt." }];

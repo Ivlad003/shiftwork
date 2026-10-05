@@ -7,7 +7,7 @@ import { createGitHub, ghPreFlight } from "./github.js";
 export const LABEL_META = {
 	in: {
 		color: "0e8a16",
-		description: "Shiftwork: hands this issue to Shiftwork (set by a collaborator)",
+		description: "Shiftwork: hands this issue to Shiftwork (authored or labelled by a collaborator)",
 	},
 	working: {
 		color: "fbca04",

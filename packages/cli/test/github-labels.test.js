@@ -122,7 +122,7 @@ test("github labels --create creates only the missing ones, with a colour and a 
 	assert.deepEqual(creates, [
 		["gh", "label", "create", "sw", "--repo", "owner/name",
 			"--color", "0e8a16",
-			"--description", "Shiftwork: hands this issue to Shiftwork (set by a collaborator)"],
+			"--description", "Shiftwork: hands this issue to Shiftwork (authored or labelled by a collaborator)"],
 		["gh", "label", "create", "sw:needs-info", "--repo", "owner/name",
 			"--color", "d93f0b",
 			"--description", "Shiftwork: needs information from a collaborator (set by Shiftwork)"],

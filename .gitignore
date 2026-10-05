@@ -1,6 +1,11 @@
 node_modules/
 *.tgz
 .DS_Store
+.shiftwork/shiftwork-state.json
+.shiftwork/shiftwork-run.json
+.shiftwork/shiftwork-github.json
+.shiftwork/*.lock
+# legacy location, until "shiftwork migrate"
 .pi/shiftwork-state.json
 .pi/shiftwork-run.json
 .pi/shiftwork-github.json

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { isAlive, withLock } from "./lock.js";
+import { shiftworkPath } from "./paths.js";
 
 /**
- * Open the runner state at `.pi/shiftwork-run.json`: what every runner process is
+ * Open the runner state at `.shiftwork/shiftwork-run.json` (legacy `.pi/`): what every runner process is
  * doing right now, one entry per runner pid with one worker per running shift
  * ({ ticket, attempt, shift, model, tier, usage, … }) and how each run ended.
  * A runner writes it under the shared-state lock, so parallel shifts and a
@@ -12,7 +13,7 @@ import { isAlive, withLock } from "./lock.js";
  * the dashboard, `shiftwork tui` and the pi status widget read the merged view.
  */
 export function openRunState(root) {
-	const path = join(root, ".pi", "shiftwork-run.json");
+	const path = shiftworkPath(root, "shiftwork-run.json");
 	// Writes are chained so a reader never sees two updates crossing each other.
 	let queue = Promise.resolve();
 
@@ -50,9 +51,8 @@ export function openRunState(root) {
 	const patchWorker = (ticket, patch) =>
 		writeLocked(async (runners) => {
 			const pid = process.pid;
-			const key = (t) => `${t?.feature ?? ""}/${t?.number ?? ""}`;
 			const entry = { ...(runners.find((r) => r.pid === pid) ?? { pid, running: true }), pid };
-			const old = (entry.workers ?? []).find((w) => key(w.ticket) === key(ticket));
+			const old = (entry.workers ?? []).find((w) => sameWorker(w, ticket));
 			const worker = { ...old, ...patch };
 			entry.workers = [...(entry.workers ?? []).filter((w) => w !== old), worker];
 			entry.updatedAt = new Date().toISOString();
@@ -101,20 +101,22 @@ export function openRunState(root) {
 			return enqueue(() => patchEntry(patch.pid ?? process.pid, patch));
 		},
 
-		/** Merge `patch` into this process's worker entry for `ticket`: one entry per running shift. */
+		/** Merge `patch` into this process's worker entry for `ticket`: one entry per running shift.
+		 * `ticket.dual` (`A`, `B`, `merge`) names a dual candidate (ADR-0007): candidates of one
+		 * ticket run at once, each its own entry. */
 		updateWorker(ticket, patch) {
 			return enqueue(() => patchWorker(ticket, patch));
 		},
 
-		/** Remove this process's worker entry for `ticket` once the shift settles. */
+		/** Remove this process's worker entry for `ticket` once the shift settles: only that dual
+		 * candidate's when `ticket.dual` is set, else every entry of the ticket. */
 		removeWorker(ticket) {
 			return enqueue(() =>
 				writeLocked(async (runners) => {
 					const pid = process.pid;
 					const entry = runners.find((r) => r.pid === pid);
 					if (!entry?.workers?.length) return;
-					const key = (t) => `${t?.feature ?? ""}/${t?.number ?? ""}`;
-					entry.workers = entry.workers.filter((w) => key(w.ticket) !== key(ticket));
+					entry.workers = entry.workers.filter((w) => !sameWorker(w, ticket));
 					entry.updatedAt = new Date().toISOString();
 					await writeAtomic(path, `${JSON.stringify({ runners }, null, 2)}\n`);
 				}),
@@ -135,6 +137,13 @@ export function openRunState(root) {
 			);
 		},
 	};
+}
+
+/** Whether worker `w` is the entry for `ticket`: same feature and number, and the same dual
+ * candidate when `ticket.dual` names one (a worker's `shift` is its candidate label). */
+function sameWorker(w, ticket) {
+	if (`${w.ticket?.feature ?? ""}/${w.ticket?.number ?? ""}` !== `${ticket?.feature ?? ""}/${ticket?.number ?? ""}`) return false;
+	return ticket?.dual === undefined || String(w.shift) === String(ticket.dual);
 }
 
 /** A run state that keeps nothing, for runs without a root on disk. */

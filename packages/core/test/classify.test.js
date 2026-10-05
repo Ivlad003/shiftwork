@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classifyError, cooldownMs } from "../src/index.js";
+import { isAuthError } from "../src/classify.js";
 
 const now = Date.parse("2026-01-01T00:00:00Z");
 
@@ -79,7 +80,7 @@ test("classifyError: x-ratelimit-reset unix seconds", () => {
 });
 
 test("classifyError: 'resets at' ISO timestamp in the body", () => {
-	const got = classifyError("usage limit reached; resets at 2026-09-30T14:00:00Z");
+	const got = classifyError("usage limit reached; resets at 2026-09-30T14:00:00Z", undefined, now);
 	assert.equal(got.kind, "usage");
 	assert.equal(got.resetAt.toISOString(), "2026-09-30T14:00:00.000Z");
 });
@@ -94,4 +95,24 @@ test("cooldownMs uses config then defaults", () => {
 	assert.equal(cooldownMs({ cooldown: { rate: "2m" } }, "rate"), 120_000);
 	assert.equal(cooldownMs({ cooldown: { rate: 1000 } }, "rate"), 1000);
 	assert.equal(cooldownMs({}, "usage"), 5 * 60 * 60 * 1000);
+});
+
+test("classifyError: a small x-ratelimit-reset is seconds from now, not an epoch", () => {
+	const got = classifyError("429", { "x-ratelimit-reset": "30" }, now);
+	assert.equal(got.resetAt.toISOString(), "2026-01-01T00:00:30.000Z");
+});
+
+test("classifyError: a reset time already past is no reset (the default cooldown applies)", () => {
+	assert.equal(classifyError("429", { "retry-after": "Wed, 21 Oct 2015 07:28:00 GMT" }, now).resetAt, undefined);
+	assert.equal(classifyError("429", { "x-ratelimit-reset": String(now / 1000 - 60) }, now).resetAt, undefined);
+	assert.equal(classifyError("usage limit reached; resets at 2025-09-30T14:00:00Z", undefined, now).resetAt, undefined);
+});
+
+test("isAuthError: a missing or rejected API key is an auth error, a rate limit is not", () => {
+	assert.equal(isAuthError("No API key found for opencode-go"), true);
+	assert.equal(isAuthError("401 Unauthorized: invalid x-api-key"), true);
+	assert.equal(isAuthError("Invalid API key provided"), true);
+	assert.equal(isAuthError("anything", "auth"), true);
+	assert.equal(isAuthError("HTTP 429 Too Many Requests"), false);
+	assert.equal(isAuthError(undefined), false);
 });

@@ -220,8 +220,8 @@ test("a runner with the fake backend works an OpenSpec change end to end", async
 
 	const state = await readFile(statePath(root, "add-auth"), "utf8");
 	assert.match(state, /## 1\.1\n\n\*\*Status:\*\* resolved\n\n### Shift 1 — pi fake\/m1 \(low\)[\s\S]*?Verify: passed/);
-	assert.match(state, /## 1\.2\n\n\*\*Status:\*\* resolved\n\n### Shift 2 — pi fake\/m1 \(low\)/);
-	assert.match(state, /## 2\.1\n\n\*\*Status:\*\* resolved\n\n### Shift 3 — pi fake\/m1 \(low\)/);
+	assert.match(state, /## 1\.2\n\n\*\*Status:\*\* resolved\n\n### Shift 1 — pi fake\/m1 \(low\)/);
+	assert.match(state, /## 2\.1\n\n\*\*Status:\*\* resolved\n\n### Shift 1 — pi fake\/m1 \(low\)/);
 });
 
 function deadPid() {
@@ -230,3 +230,23 @@ function deadPid() {
 		child.on("exit", () => resolve(child.pid));
 	});
 }
+
+test("parallel claims of a stale claim: exactly one takes it over", async () => {
+	// Staggered starts interleave check → unlink → create across claimants; repeat to hit the window.
+	for (let round = 0; round < 10; round++) {
+		const root = await makeOpenSpecRepo({ "add-auth": { tasks: TASKS } });
+		const tracker = openOpenSpecTracker(root);
+		const [first] = await tracker.frontier();
+		await tracker.claim(first, { pid: await deadPid() });
+		const [orphan] = await tracker.frontier();
+
+		const claims = await Promise.all(
+			Array.from({ length: 8 }, (_, k) => new Promise((resolve) => setTimeout(resolve, k % 4)).then(() => tracker.claim(orphan))),
+		);
+
+		const won = claims.filter(Boolean);
+		assert.equal(won.length, 1, `round ${round}: ${won.length} claimants won`);
+		const owner = JSON.parse(await readFile(won[0].path, "utf8"));
+		assert.equal(owner.token, won[0].token);
+	}
+});

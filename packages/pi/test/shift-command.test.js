@@ -121,8 +121,8 @@ test("/shift run starts a detached runner, returns at once and shows a status wi
 
 test("/shift run finds the shiftwork CLI and logs its output to a file", { timeout: 90_000 }, async () => {
 	const { client, cwd, ui } = await startPi();
-	await mkdir(join(cwd, ".pi"), { recursive: true });
-	await writeFile(join(cwd, ".pi", "shiftwork.json"), JSON.stringify({ model: "fake/m1" }));
+	await mkdir(join(cwd, ".shiftwork"), { recursive: true });
+	await writeFile(join(cwd, ".shiftwork", "shiftwork.json"), JSON.stringify({ model: "fake/m1" }));
 
 	assert.equal(await client.prompt("/shift run --dry-run"), "handled");
 	const notify = await waitFor(() => ui.find((r) => r.method === "notify" && /runner started/.test(r.message)));
@@ -149,4 +149,16 @@ test("/shift run refuses to start a second runner", { timeout: 90_000 }, async (
 
 	assert.match(warning.message, /already working \(pid \d+\)/);
 	await writeFile(join(cwd, "STOP"), "");
+});
+
+test("/shift run refuses while a STOP file is there and leaves it alone", { timeout: 90_000 }, async () => {
+	const { client, cwd, ui } = await startPi({ env: { SHIFTWORK_BIN: stubRunner } });
+	await writeFile(join(cwd, "STOP"), "an operator's stop\n");
+
+	assert.equal(await client.prompt("/shift run"), "handled");
+	const warning = await waitFor(() => ui.find((r) => r.method === "notify" && r.notifyType === "warning"));
+
+	assert.match(warning.message, /STOP file .*delete STOP to start a runner/);
+	assert.equal(readFileSync(join(cwd, "STOP"), "utf8"), "an operator's stop\n");
+	assert.equal(await openRunState(cwd).read(), null, "no runner was started");
 });

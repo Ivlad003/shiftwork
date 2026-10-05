@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { openRunState, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "../src/dry-run.js";
-import { createTuiControls, decodeKeys, githubRows, mouseAction, queueRows, reduceKey, reduceMouse, resolvedRows, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
+import { createTuiControls, decodeKeys, githubRows, mouseAction, queueRows, reduceKey, reduceMouse, resolvedRows, STOP_FILE_REFUSAL, startDetachedRunner, writeStopFile } from "../src/tui-controls.js";
 
 const stubRunner = fileURLToPath(new URL("./fixtures/stub-runner.js", import.meta.url));
 const argvRunner = fileURLToPath(new URL("./fixtures/argv-runner.js", import.meta.url));
@@ -89,9 +89,9 @@ async function repo(tickets = {}, { config = true } = {}) {
 		await writeFile(join(root, ".scratch", feature, "issues", file), body);
 	}
 	if (config) {
-		await mkdir(join(root, ".pi"), { recursive: true });
+		await mkdir(join(root, ".shiftwork"), { recursive: true });
 		await writeFile(
-			join(root, ".pi", "shiftwork.json"),
+			join(root, ".shiftwork", "shiftwork.json"),
 			JSON.stringify({
 				model: "fake/m1",
 				routing: { git: { tier: "quick", thinking: "low" }, docs: { tier: "quick" } },
@@ -165,13 +165,38 @@ test("a second runner is refused: no new process, a warning notice", async () =>
 	await waitFor(async () => !(await openRunState(root).read())?.live);
 });
 
-test("starting removes a stale STOP file that would end the new run", async () => {
+test("starting refuses while a STOP file is there and leaves it alone; the notice says to delete it", async () => {
 	const root = await repo({});
-	await writeFile(join(root, "STOP"), "left over\n");
+	await writeFile(join(root, "STOP"), "an operator's stop\n");
+	const res = await startDetachedRunner(root, { bin: stubRunner });
+	assert.equal(res.started, false);
+	assert.equal(res.reason, STOP_FILE_REFUSAL);
+	assert.match(res.reason, /delete STOP/);
+	assert.equal(await readFile(join(root, "STOP"), "utf8"), "an operator's stop\n");
+	assert.equal(await openRunState(root).read(), null, "no runner was claimed");
+
+	const controls = stubControls(root);
+	controls.setDashboard({ run: null, tickets: [] });
+	await controls.handleKey("r");
+	assert.equal(controls.view.notice, STOP_FILE_REFUSAL);
+});
+
+test("two starts at once spawn one runner: the second is refused while the first is starting", async () => {
+	const root = await repo({});
+	const [a, b] = await Promise.all([startDetachedRunner(root, { bin: stubRunner }), startDetachedRunner(root, { bin: stubRunner })]);
+	assert.deepEqual([a.started, b.started].sort(), [false, true]);
+	assert.match((a.started ? b : a).reason, /already starting|already working/);
+	await writeStopFile(root);
+	await waitFor(async () => !(await openRunState(root).read())?.live);
+});
+
+test("startDetachedRunner closes its copy of the log descriptor after the spawn", { skip: !existsSync("/dev/fd") && "no /dev/fd" }, async () => {
+	const root = await repo({});
+	const fds = async () => (await readdir("/dev/fd")).length;
+	const before = await fds();
 	const res = await startDetachedRunner(root, { bin: stubRunner });
 	assert.equal(res.started, true);
-	assert.equal(res.removedStop, true);
-	assert.equal(existsSync(join(root, "STOP")), false);
+	assert.ok((await fds()) <= before, "the runner log's descriptor stays open in the parent");
 	await writeStopFile(root);
 	await waitFor(async () => !(await openRunState(root).read())?.live);
 });

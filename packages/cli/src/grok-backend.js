@@ -1,9 +1,11 @@
-import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { lstat, mkdir, readFile, readlink, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { classifyError } from "shiftwork-core";
+import { execIn } from "./exec.js";
+import { runAgent, spawnAgent } from "./spawn-agent.js";
 
 /**
  * Grok Build backend: `grok -m <m> --output-format streaming-json --always-approve -p <prompt>`.
@@ -29,28 +31,19 @@ export function createGrokBackend(options = {}) {
 
 		async probe(model, { timeoutMs = 60_000 } = {}) {
 			if (!(await isOnPath(command, options.env))) return false;
-			return new Promise((resolve) => {
-				const args = [
-					"-m",
-					model,
-					"--output-format",
-					"streaming-json",
-					"--always-approve",
-					...(options.args ?? []),
-					"-p",
-					"Reply with exactly: OK",
-				];
-				const child = execFile(
-					command,
-					args,
-					{ env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-					(error, stdout, stderr) => {
-						const output = `${stdout}\n${stderr}`;
-						resolve(!error && classifyError(output) === null);
-					},
-				);
-				child.stdin?.end();
-			});
+			const args = [
+				"-m",
+				model,
+				"--output-format",
+				"streaming-json",
+				"--always-approve",
+				...(options.args ?? []),
+				"-p",
+				"Reply with exactly: OK",
+			];
+			const result = await runAgent(command, args, { env: { ...process.env, ...options.env }, timeoutMs });
+			const output = `${result.stdout}\n${result.stderr}`;
+			return !result.error && result.code === 0 && classifyError(output) === null;
 		},
 
 		async startShift({ cwd, route, prompt, systemPrompt }) {
@@ -65,17 +58,8 @@ export function createGrokBackend(options = {}) {
 
 			const skillPaths = route.skills?.restricted ? route.skills.paths ?? [] : [];
 			const skillsDir = join(cwd, ".agents", "skills");
-			const skillLinks = [];
-			if (skillPaths.length) {
-				await mkdir(skillsDir, { recursive: true });
-				for (const skillPath of skillPaths) {
-					const target = join(skillsDir, basename(skillPath));
-					await rm(target, { force: true }).catch(() => {});
-					await symlink(skillPath, target).catch(() => {});
-					skillLinks.push(target);
-				}
-				await excludeSkillsFromGit(cwd);
-			}
+			const skillLinks = skillPaths.length ? await linkSkills(skillsDir, skillPaths) : [];
+			if (skillPaths.length) await excludeSkillsFromGit(cwd);
 
 			const args = ["-m", route.model, "--output-format", "streaming-json", "--always-approve"];
 			if (effort) args.push("--reasoning-effort", effort);
@@ -84,60 +68,52 @@ export function createGrokBackend(options = {}) {
 			args.push("-p", prompt);
 
 			const queue = eventQueue();
-			let stderr = "";
-			let buffer = "";
+			let stopping = false;
+			const timeoutMs = options.timeoutMs ?? SAFETY_TIMEOUT_MS;
 			const map = createGrokMapper();
 			let ended = false;
 			let sawError = false;
 
 			const cleanup = async () => {
-				for (const link of skillLinks) await rm(link, { force: true }).catch(() => {});
+				for (const link of skillLinks) await unlink(link).catch(() => {});
 			};
 
+			// close() after the process already ended waits for that ending's cleanup.
+			let cleanupDone = null;
 			const finish = async (stopReason, errorMessage) => {
-				if (queue.closed) return;
+				if (queue.closed) return cleanupDone;
 				for (const mapped of map.flush()) queue.push(mapped);
 				if (errorMessage) queue.push({ type: "error", message: errorMessage });
 				if (!ended) queue.push({ type: "end", stopReason });
 				queue.close();
-				await cleanup();
+				cleanupDone = cleanup();
+				await cleanupDone;
 			};
 
-			const child = execFile(command, args, {
+			const agent = spawnAgent(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
 				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
-				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
-				maxBuffer: 256 * 1024 * 1024,
-			});
-			// A piped stdin must not be read as extra prompt: close it.
-			child.stdin?.end();
-
-			child.stderr?.on("data", (chunk) => {
-				stderr += chunk;
-			});
-
-			child.stdout?.on("data", (chunk) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop();
-				for (const line of lines) {
-					if (!line.trim()) continue;
+				timeoutMs,
+				onLine(line) {
+					if (!line.trim()) return;
 					const event = parseJsonLine(line);
-					if (!event) continue;
+					if (!event) return;
 					for (const mapped of map(event)) {
 						if (mapped.type === "end") ended = true;
 						if (mapped.type === "error") sawError = true;
 						queue.push(mapped);
 					}
-				}
-			});
-
-			child.on("error", (error) => finish("error", error.message));
-			child.on("close", (code) => {
-				// Grok exits 0 even when the stream carried a fatal error (e.g. unknown model).
-				const message = code !== 0 ? stderr || `grok exited with code ${code}` : undefined;
-				finish(code === 0 && !sawError ? "stop" : "error", message);
+				},
+				onError: (error) => finish("error", error.message),
+				onClose: ({ code, timedOut }) => {
+					if (stopping) return;
+					// Grok exits 0 even when the stream carried a fatal error (e.g. unknown model).
+					const message = timedOut
+						? `grok timed out after ${Math.round(timeoutMs / 60_000)} min (safety timeout)`
+						: code !== 0 ? agent.stderrTail() || `grok exited with code ${code}` : undefined;
+					finish(code === 0 && !sawError ? "stop" : "error", message);
+				},
 			});
 
 			return {
@@ -145,11 +121,13 @@ export function createGrokBackend(options = {}) {
 				events: queue.iterate(),
 				warnings: preload.warnings,
 				async abort() {
-					child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("aborted").catch(() => {});
 				},
 				async close() {
-					if (!child.killed) child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("stop").catch(() => {});
 				},
 			};
@@ -171,7 +149,7 @@ function parseJsonLine(line) {
  * Recorded fixture (`test/fixtures/grok-stream.jsonl`, grok 1.0.44) shows:
  * - `available_commands`: tool/command lists; noise, ignored
  * - `text`: { data } — a streaming chunk of the current assistant message
- * - `tool_call` / `tool_call_update`: tool lifecycle; ignored
+ * - `tool_call`: { toolName, rawInput } — one `tool` event; `tool_call_update`: its progress, ignored
  * - `usage`: per assistant message { input_tokens, output_tokens, cache_read_input_tokens,
  *   cache_creation_input_tokens, reasoning_tokens } — one per model call, so one turn each
  * - `error`: { message } — failures such as plan limits; grok may still exit 0
@@ -191,6 +169,9 @@ export function createGrokMapper() {
 		const out = [];
 		if (event.type === "text" && typeof event.data === "string") {
 			pendingText.push(event.data);
+		} else if (event.type === "tool_call") {
+			// tool_call_update events follow the same call: only the first is a new call.
+			out.push(toolEvent(event.toolName ?? event.kind ?? event.title, event.rawInput));
 		} else if (event.type === "usage" && event.usage) {
 			flushText(out);
 			const u = event.usage;
@@ -217,18 +198,61 @@ export function createGrokMapper() {
 	return map;
 }
 
+const TOOL_INPUT_CHARS = 500;
+
+/** A tool call for the shift log: the shell command, else the file path, else the arguments as
+ * JSON — at most 500 chars. `shiftwork reflect` mines these for repeated steps. */
+function toolEvent(name, args) {
+	const input =
+		typeof args === "string"
+			? args
+			: (args?.command ?? args?.cmd ?? args?.file_path ?? args?.filePath ?? args?.path ?? args?.pattern ?? args?.url ?? (args == null ? "" : JSON.stringify(args)));
+	return { type: "tool", name: String(name ?? "tool"), input: String(Array.isArray(input) ? input.join(" ") : input).slice(0, TOOL_INPUT_CHARS) };
+}
+
 /** Stateless convenience for single events (tests); prefer createGrokMapper for a stream. */
 export function mapGrokEvent(event) {
 	return createGrokMapper()(event);
 }
 
+/**
+ * Link granted skills into `skillsDir`. A link of ours left by an earlier shift is reused; any other
+ * file already at the path belongs to the repo and is left alone and not recorded, so cleanup
+ * never removes it. Returns the links to remove when the shift ends.
+ */
+async function linkSkills(skillsDir, skillPaths) {
+	const links = [];
+	await mkdir(skillsDir, { recursive: true });
+	for (const skillPath of skillPaths) {
+		const target = join(skillsDir, basename(skillPath));
+		const existing = await lstat(target).catch(() => null);
+		if (existing) {
+			if (existing.isSymbolicLink() && (await readlink(target).catch(() => null)) === skillPath) links.push(target);
+			continue;
+		}
+		try {
+			await symlink(skillPath, target);
+			links.push(target);
+		} catch {
+			// EEXIST from a race or an unwritable dir: the skill is not delivered, nothing to clean up.
+		}
+	}
+	return links;
+}
+
 async function excludeSkillsFromGit(cwd) {
-	const excludeFile = join(cwd, ".git", "info", "exclude");
-	if (!existsSync(excludeFile)) return;
+	// In a linked worktree `.git` is a file: ask git where info/exclude really lives (the common dir).
+	let excludeFile;
+	try {
+		excludeFile = resolve(cwd, (await execIn(cwd)(["git", "rev-parse", "--git-path", "info/exclude"])).trim());
+	} catch {
+		return;
+	}
 	const pattern = ".agents/skills/";
 	const text = await readFile(excludeFile, "utf8").catch(() => "");
 	if (text.split("\n").some((line) => line.trim() === pattern)) return;
-	await writeFile(excludeFile, text.endsWith("\n") ? `${text}${pattern}\n` : `${text}\n${pattern}\n`);
+	await mkdir(dirname(excludeFile), { recursive: true });
+	await writeFile(excludeFile, !text || text.endsWith("\n") ? `${text}${pattern}\n` : `${text}\n${pattern}\n`);
 }
 
 async function isOnPath(command, env) {

@@ -16,7 +16,7 @@ test("cooldowns survive a new openCooldowns (runner restart)", async () => {
 	assert.equal(active[0].provider, "anthropic");
 	assert.equal(active[0].kind, "rate");
 	assert.equal(active[0].until, until);
-	assert.equal(again.path, join(root, ".pi", "shiftwork-state.json"));
+	assert.equal(again.path, join(root, ".shiftwork", "shiftwork-state.json"));
 });
 
 test("active() hides expired cooldowns", async () => {

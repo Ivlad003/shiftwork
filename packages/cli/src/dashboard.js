@@ -1,6 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CLAIMED, openCooldowns, openRepoTracker, openRunState, RESOLVED, VERSION } from "shiftwork-core";
+import { CLAIMED, openCooldowns, openRepoTracker, openRunState, parseModelRef, RESOLVED, shiftworkPath, VERSION } from "shiftwork-core";
 import { formatBudget } from "./dry-run.js";
 import { readIssueState } from "./github-import.js";
 import { parsePostKey } from "./github-post.js";
@@ -11,6 +12,8 @@ import { githubRows, keptTicketSearch, queueRows, TABS, ticketStatusColumn } fro
 /** One frame per second, per the spec. */
 export const REFRESH_MS = 1000;
 const LOG_TAIL = 8;
+/** How much of a shift log's end the dashboard reads each second: plenty for LOG_TAIL lines. */
+export const LOG_TAIL_BYTES = 64 * 1024;
 
 const TAB_LABELS = { queue: "Queue", agents: "Agents", cooldowns: "Cooldowns", log: "Log", resolved: "Resolved", github: "GitHub" };
 
@@ -70,11 +73,11 @@ const NEEDS_INFO = "needs-info";
 
 /**
  * Collect everything one dashboard frame needs: the tracker's tickets, the frontier,
- * live claims, the run state (`.pi/shiftwork-run.json`), active cooldowns and a log
+ * live claims, the run state (`.shiftwork/shiftwork-run.json`), active cooldowns and a log
  * tail — the selected worker's when the view has one (`view.selectedWorker`, else the
  * first live worker's), plus, when details are open (`view.details`), that ticket's
  * body as `ticketDetails` (the What-to-build line and the latest shift report) —
- * and the GitHub tab's rows (`github`, from `.pi/shiftwork-github.json` and the
+ * and the GitHub tab's rows (`github`, from `.shiftwork/shiftwork-github.json` and the
  * tickets). A missing run state, log or issue state yields null/empty, never a throw.
  */
 export async function collectDashboardState(root, { now = new Date(), logTail = LOG_TAIL, view = {} } = {}) {
@@ -93,7 +96,7 @@ export async function collectDashboardState(root, { now = new Date(), logTail = 
 }
 
 /**
- * The GitHub tab's rows (github-watch, ticket 06), from `.pi/shiftwork-github.json`:
+ * The GitHub tab's rows (github-watch, ticket 06), from `.shiftwork/shiftwork-github.json`:
  * one `{ number, title, feature, state }` per imported issue, sorted by number, plus
  * `syncedAt` (the time of the last sync, written by `syncIssues`). The state comes
  * from the feature's tickets: `closed` when the issue was closed (`done` posted),
@@ -145,10 +148,11 @@ export async function tailShiftLog(root, run, maxLines = LOG_TAIL, selected = nu
 		workers.find((w) => w.ticket?.feature && w.ticket?.number && w.attempt);
 	if (!worker) return null;
 	const ticket = worker.ticket;
-	const path = join("logs", ticket.feature, ticket.number, `attempt-${worker.attempt}.jsonl`);
+	const dir = join("logs", ticket.feature, ticket.number);
+	const path = join(dir, await currentShiftLogName(join(root, dir), shiftLogSlot(worker.attempt, worker.shift)));
 	let text;
 	try {
-		text = await readFile(join(root, path), "utf8");
+		text = await readTail(join(root, path), LOG_TAIL_BYTES);
 	} catch {
 		return { path, lines: [] };
 	}
@@ -159,6 +163,132 @@ export async function tailShiftLog(root, run, maxLines = LOG_TAIL, selected = nu
 		.slice(-maxLines)
 		.map(formatLogLine);
 	return { path, lines };
+}
+
+/** The last `bytes` of a file, starting at a whole line (the partial first one dropped). */
+async function readTail(file, bytes) {
+	const handle = await open(file, "r");
+	try {
+		const { size } = await handle.stat();
+		const start = Math.max(0, size - bytes);
+		const buffer = Buffer.alloc(size - start);
+		await handle.read(buffer, 0, buffer.length, start);
+		const text = buffer.toString("utf8");
+		return start === 0 ? text : text.slice(text.indexOf("\n") + 1);
+	} finally {
+		await handle.close();
+	}
+}
+
+/**
+ * Shift log names: `attempt-<n>.jsonl`, and when an earlier run already wrote that
+ * one, `attempt-<n>.<k>.jsonl` with the next free k (2, 3, …) — attempt numbers
+ * restart each run, so one file never mixes two runs' sessions.
+ */
+const shiftLogName = (attempt, k = 1) => (k > 1 ? `attempt-${attempt}.${k}.jsonl` : `attempt-${attempt}.jsonl`);
+
+/** The k of a shift log name for `attempt`, or 0 when it is another attempt's. */
+/** The log slot of a shift: its attempt, or `<attempt>-a|b|merge` for a dual shift (ADR-0007), whose
+ * candidates run at once and must not share a file. A worker's `shift` is that label for a dual shift. */
+export function shiftLogSlot(attempt, dual) {
+	return typeof dual === "string" && /^(?:a|b|merge)$/i.test(dual) ? `${attempt}-${dual.toLowerCase()}` : attempt;
+}
+
+function shiftLogIndex(name, attempt) {
+	const prefix = `attempt-${attempt}.`;
+	if (!name.startsWith(prefix) || !name.endsWith(".jsonl")) return 0;
+	const middle = name.slice(prefix.length, -".jsonl".length);
+	if (middle === "") return 1;
+	return /^[1-9]\d*$/.test(middle) ? Number(middle) : 0;
+}
+
+/** The newest log name for `attempt` in `dir` (the highest k); `attempt-<n>.jsonl` when there is none. */
+export async function currentShiftLogName(dir, attempt) {
+	let names = [];
+	try {
+		names = await readdir(dir);
+	} catch {
+		// No log yet.
+	}
+	const k = Math.max(1, ...names.map((name) => shiftLogIndex(name, attempt)));
+	return shiftLogName(attempt, k);
+}
+
+/** The first free log name for `attempt` in `dir`: a new run never appends to an earlier run's file. */
+function freeShiftLogName(dir, attempt) {
+	let names = [];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return shiftLogName(attempt);
+	}
+	const taken = Math.max(0, ...names.map((name) => shiftLogIndex(name, attempt)));
+	return shiftLogName(attempt, taken + 1);
+}
+
+/** Events the shift log skips: pi's extension UI requests are noise, not the shift's work. */
+const isDroppedEvent = (event) => event?.type === "raw" && event.event?.type === "extension_ui_request";
+
+/**
+ * The runner's shift log: every shift event as NDJSON under
+ * logs/<feature>/<NN>/attempt-<n>[.<k>].jsonl, one file per shift — a shift after an
+ * `end` (a handoff, or the same attempt number in a later run or dark-factory pass)
+ * opens the next free name, so no file mixes two sessions. Each file opens with a
+ * `start` event naming the backend, model, tier, attempt, shift, run start and pid,
+ * read from this runner's worker in `.shiftwork/shiftwork-run.json` (the runner writes it
+ * before the shift's first event). `options` (tests): now, pid.
+ */
+export function createShiftLogger(root, { now = () => new Date(), pid = process.pid } = {}) {
+	const runId = now().toISOString();
+	const files = new Map(); // `${feature}/${number}/${attempt}` → { file, started, ended }
+	return ({ ticket, attempt, dual, event }) => {
+		if (isDroppedEvent(event)) return;
+		const dir = join(root, "logs", ticket.feature, ticket.number);
+		const slot = shiftLogSlot(attempt, dual);
+		const key = `${ticket.feature}/${ticket.number}/${slot}`;
+		// Probes and waits come before the shift is published: they never open a shift.
+		const shiftEvent = event.type !== "probe" && event.type !== "wait";
+		let log = files.get(key);
+		if (!log || (shiftEvent && log.ended)) {
+			mkdirSync(dir, { recursive: true });
+			log = { file: join(dir, freeShiftLogName(dir, slot)), started: false, ended: false };
+			files.set(key, log);
+		}
+		const write = (record) => appendFileSync(log.file, `${JSON.stringify({ at: now().toISOString(), ...record })}\n`);
+		if (shiftEvent && !log.started) {
+			log.started = true;
+			const worker = readOwnWorker(root, pid, ticket, dual);
+			const model = worker?.model ?? null;
+			write({
+				type: "start",
+				backend: model ? parseModelRef(model).backend : null,
+				model,
+				tier: worker?.tier ?? null,
+				attempt,
+				shift: worker?.shift ?? null,
+				runId,
+				pid,
+			});
+		}
+		write(event);
+		if (event.type === "end") log.ended = true;
+	};
+}
+
+/** This runner's worker for `ticket` in `.shiftwork/shiftwork-run.json` (the dual candidate's own
+ * when `dual` names one), or null. */
+function readOwnWorker(root, pid, ticket, dual) {
+	const path = shiftworkPath(root, "shiftwork-run.json");
+	if (!existsSync(path)) return null;
+	try {
+		const state = JSON.parse(readFileSync(path, "utf8"));
+		const runners = Array.isArray(state?.runners) ? state.runners : [state];
+		const runner = runners.find((r) => r?.pid === pid);
+		const mine = (runner?.workers ?? []).filter((w) => w.ticket?.feature === ticket.feature && w.ticket?.number === ticket.number);
+		return (dual === undefined ? mine[0] : mine.find((w) => String(w.shift) === String(dual))) ?? null;
+	} catch {
+		return null;
+	}
 }
 
 /** The open details: the ticket from the list plus, from its file, the What-to-build line and the latest shift report. */
@@ -235,6 +365,8 @@ function logDetail(event) {
 			return `until ${typeof event.until === "string" ? event.until.slice(11, 19) : event.until}`;
 		case "probe":
 			return `${event.provider} ${event.ok ? "ok" : "still limited"}`;
+		case "start":
+			return [event.model, event.tier, event.attempt !== undefined ? `attempt ${event.attempt}` : null].filter(Boolean).join(" · ") || undefined;
 		default:
 			return undefined;
 	}
@@ -436,7 +568,7 @@ function tabBody(state, tab, height, now) {
 		case "github": {
 			const head = [githubHead(state, now)];
 			const issues = githubRows(state);
-			if (!issues.length) return plain([...head, "no issues imported (.pi/shiftwork-github.json, written by run --dark-factory)"]);
+			if (!issues.length) return plain([...head, "no issues imported (.shiftwork/shiftwork-github.json, written by run --dark-factory)"]);
 			const at = clampCursor(cursor.github, issues.length);
 			const rows = issues.map((issue, i) => `${i === at ? ">" : " "} ${githubIssueRow(issue)}`.trim());
 			return underHead(head, scrolled(rows, at, height - 1));

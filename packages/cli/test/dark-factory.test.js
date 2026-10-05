@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
-import { openTracker } from "shiftwork-core";
+import { openRunState, openTracker } from "shiftwork-core";
 
 import { darkFactoryRun, ghAuthMessage, ghInstallMessage, NO_GITHUB_CONFIG_MESSAGE } from "../src/dark-factory.js";
 import { missingLabelsMessage } from "../src/github-labels.js";
@@ -47,6 +47,10 @@ function stubGitHub({ labels = [...LABELS], issues = [{ number: 8, title: "Fix t
 		async listIssues() {
 			calls.push({ op: "listIssues" });
 			return issues.map((issue) => ({ ...issue, state: "open" }));
+		},
+		async labelActor(n, label) {
+			calls.push({ op: "labelActor", n, label });
+			return undefined;
 		},
 		async issueComments(n) {
 			calls.push({ op: "issueComments", n });
@@ -147,12 +151,13 @@ test("--once: imports the issue, syncs it, works one frontier pass, pushes nothi
 
 	assert.equal(code, 0);
 	assert.equal(passes.length, 1, "one frontier pass");
+	assert.equal(passes[0].args.options.holdOnNeedsInfo, true, "dark-factory holds a feature that asked a question");
 	assert.deepEqual(passes[0].tickets, ["gh-8-fix-the-thing/01", "gh-8-fix-the-thing/02"], "the pass works the imported feature");
 	assert.ok(out.some((line) => /github#8 imported: Fix the thing → gh-8-fix-the-thing/.test(line)), `import line: ${out}`);
 	assert.ok(out.some((line) => /github#8: comment: ticket 02 resolved/.test(line)), `sync line: ${out}`);
 	assert.equal(gitCalls.filter((args) => args[0] === "push").length, 0, "push off: no git push");
 	assert.equal(existsSync(join(root, "STOP")), false);
-	const state = JSON.parse(await readFile(join(root, ".pi", "shiftwork-github.json"), "utf8"));
+	const state = JSON.parse(await readFile(join(root, ".shiftwork", "shiftwork-github.json"), "utf8"));
 	assert.equal(state.issues["8"].feature, "gh-8-fix-the-thing");
 });
 
@@ -280,7 +285,7 @@ test("a missing label exits 1 with the missing-labels error, importing nothing",
 	assert.equal(out[0], missingLabelsMessage("owner/name", [LABELS[1], LABELS[2], LABELS[3]]));
 	assert.equal(passes.length, 0);
 	assert.equal(existsSync(join(root, ".scratch")), false, "nothing imported before the labels check");
-	assert.deepEqual(await readdir(join(root, ".pi")).catch(() => []), [], "no issue state written");
+	assert.deepEqual(await readdir(join(root, ".shiftwork")).catch(() => []), [], "no issue state written");
 });
 
 test("a failing git push is caught: the message, short shas, the loop continues and the push is retried next poll", async () => {
@@ -397,4 +402,118 @@ test("push: git push origin HEAD runs once after a pass that landed, never witho
 		...lines(),
 	});
 	assert.equal(none.calls.filter((args) => args[0] === "push").length, 0, "no landing: no push");
+});
+
+test("a failing gh poll is logged as one line, the pass still runs, the wait backs off and resets after a good poll", async () => {
+	const root = await makeRoot();
+	const { github } = stubGitHub();
+	let failures = 2;
+	const listIssues = github.listIssues;
+	github.listIssues = async () => {
+		if (failures-- > 0) throw new Error("gh: HTTP 502: Bad Gateway\n(https://api.github.com/graphql)");
+		return listIssues();
+	};
+	const { runFrontierImpl, passes } = stubFrontier();
+	const { out, log, err } = lines();
+	const waits = [];
+
+	const code = await darkFactoryRun({
+		root,
+		config: { ...config(), github: { ...config().github, pollMin: 1 } },
+		tracker: openTracker(root),
+		github,
+		exec: okExec,
+		runFrontier: runFrontierImpl,
+		shiftLog: () => {},
+		sleep: async (ms) => waits.push(ms) === 4,
+		log,
+		err,
+	});
+
+	assert.equal(code, 3);
+	assert.equal(passes.length, 4, "every poll works a frontier pass, failed import or not");
+	assert.deepEqual(waits, [120_000, 240_000, 60_000, 60_000], "the wait doubles after a failed poll and resets after a good one");
+	const failed = out.filter((line) => /^dark-factory: GitHub poll failed: gh: HTTP 502: Bad Gateway/.test(line));
+	assert.equal(failed.length, 2, out.join("\n"));
+	assert.ok(failed.every((line) => !line.includes("\n")), "one line per failure");
+	assert.ok(out.some((line) => /github#8 imported/.test(line)), "the issue is imported once gh recovers");
+});
+
+test("the backoff is capped at an hour", async () => {
+	const root = await makeRoot();
+	const { github } = stubGitHub();
+	github.listIssues = async () => {
+		throw new Error("gh: HTTP 403: API rate limit exceeded");
+	};
+	const waits = [];
+
+	await darkFactoryRun({
+		root,
+		config: { ...config(), github: { ...config().github, pollMin: 10 } },
+		tracker: openTracker(root),
+		github,
+		exec: okExec,
+		runFrontier: stubFrontier().runFrontierImpl,
+		shiftLog: () => {},
+		sleep: async (ms) => waits.push(ms) === 4,
+		...lines(),
+	});
+	assert.deepEqual(waits, [1_200_000, 2_400_000, 3_600_000, 3_600_000]);
+});
+
+test("the run state stays running between passes (runFrontier marks it idle) and is not running after exit", async () => {
+	const root = await makeRoot();
+	const { github } = stubGitHub();
+	const entry = async () => JSON.parse(await readFile(join(root, ".shiftwork", "shiftwork-run.json"), "utf8")).runners.find((r) => r.pid === process.pid);
+	const seen = [];
+
+	const code = await darkFactoryRun({
+		root,
+		config: { ...config(), github: { ...config().github, pollMin: 1 } },
+		tracker: openTracker(root),
+		github,
+		exec: okExec,
+		runFrontier: async ({ root: dir }) => {
+			// Like the real runner: every pass ends with running:false.
+			await openRunState(dir).update({ running: false, finishedAt: new Date().toISOString() });
+			return { resolved: [], needsInfo: [], reopened: [] };
+		},
+		shiftLog: () => {},
+		sleep: async () => {
+			const { running, mode } = await entry();
+			seen.push({ running, mode });
+			return seen.length === 2;
+		},
+		...lines(),
+	});
+
+	assert.equal(code, 3);
+	assert.deepEqual(seen, [{ running: true, mode: "dark-factory" }, { running: true, mode: "dark-factory" }]);
+	assert.equal((await entry()).running, false, "not running once dark-factory exits");
+});
+
+test("a skipped issue is printed once per process, not on every poll", async () => {
+	const root = await makeRoot();
+	const { github } = stubGitHub({
+		issues: [{ number: 9, title: "From outside", body: "Please.", author: "rando", labels: [LABELS[0]], url: "https://github.com/owner/name/issues/9" }],
+	});
+	const { out, log, err } = lines();
+	let polls = 0;
+
+	await darkFactoryRun({
+		root,
+		config: { ...config(), github: { ...config().github, pollMin: 1 } },
+		tracker: openTracker(root),
+		github,
+		exec: okExec,
+		runFrontier: stubFrontier().runFrontierImpl,
+		shiftLog: () => {},
+		sleep: async () => ++polls === 3,
+		log,
+		err,
+	});
+
+	const skipped = out.filter((line) => /^github#9 skipped: rando /.test(line));
+	assert.equal(skipped.length, 1, out.join("\n"));
+	assert.match(skipped[0], /not a collaborator/);
 });

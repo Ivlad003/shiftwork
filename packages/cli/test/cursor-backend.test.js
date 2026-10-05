@@ -295,3 +295,13 @@ live(
 		assert.deepEqual(events.at(-1), { type: "end", stopReason: "stop" });
 	},
 );
+
+test("the Cursor mapper turns started tool calls into tool events: the path for edits, the command for shell", () => {
+	const map = createCursorMapper();
+	const lines = readFileSync(new URL("./fixtures/cursor-stream.jsonl", import.meta.url), "utf8").split("\n").filter(Boolean);
+	const tools = lines.flatMap((line) => map(JSON.parse(line))).filter((e) => e.type === "tool");
+	assert.deepEqual(tools, [{ type: "tool", name: "edit", input: "/worktree/hello.txt" }], "a completed tool call is not a second call");
+
+	const shell = createCursorMapper()({ type: "tool_call", subtype: "started", tool_call: { shellToolCall: { args: { command: "npm test" } } } });
+	assert.deepEqual(shell, [{ type: "tool", name: "shell", input: "npm test" }]);
+});

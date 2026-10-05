@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseCooldownDuration } from "./classify.js";
+import { shiftworkPath } from "./paths.js";
 import { BACKENDS, LIMIT_SHORT_NAMES, TIER_ORDER } from "./planner.js";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -11,6 +12,7 @@ const DEFAULTS = {
 	maxAttempts: 3,
 	maxHandoffs: 3,
 	landRetries: 5,
+	maxLimitRetries: 10,
 	verifyTimeoutMin: 10,
 	softLimitPct: 80,
 	crossTier: "none",
@@ -25,6 +27,7 @@ const DEFAULTS = {
 	onExceed: {},
 	jev: { enabled: true, model: "typesafe/jev-latest" },
 	review: { enabled: true, when: "before-land", maxRounds: 2 },
+	frozen: [],
 };
 
 /** The review shift's whole budget, when reviews run: only `review.budget` itself lifts a field of it. */
@@ -35,12 +38,12 @@ export const DEFAULT_REVIEW_BUDGET = { maxWallMin: 20, maxTurns: 60 };
 const GITHUB_DEFAULTS = { authors: [], pollMin: 5, autoClose: true, push: false };
 
 /**
- * Load `.pi/shiftwork.json` merged over `<userDir>/shiftwork.json` (the pi agent dir),
+ * Load `.shiftwork/shiftwork.json` (legacy `.pi/shiftwork.json`, see paths.js) merged over `<userDir>/shiftwork.json` (the pi agent dir),
  * validated and defaulted. Throws with the file and field path on a bad config.
  */
 export async function loadConfig(root, userDir) {
 	const user = userDir ? await readJson(join(userDir, "shiftwork.json")) : undefined;
-	const project = await readJson(join(root, ".pi", "shiftwork.json"));
+	const project = await readJson(shiftworkPath(root, "shiftwork.json"));
 	const merged = merge(merge({}, user?.data ?? {}), project?.data ?? {});
 	try {
 		return validateConfig(merged);
@@ -69,6 +72,7 @@ export function validateConfig(input) {
 	}
 	if (!Number.isInteger(config.maxHandoffs) || config.maxHandoffs < 0) fail("maxHandoffs", "must be a non-negative integer");
 	if (!Number.isInteger(config.landRetries) || config.landRetries < 0) fail("landRetries", "must be a non-negative integer");
+	if (!Number.isInteger(config.maxLimitRetries) || config.maxLimitRetries < 1) fail("maxLimitRetries", "must be a positive integer");
 	if (typeof config.softLimitPct !== "number" || config.softLimitPct < 0 || config.softLimitPct > 100) {
 		fail("softLimitPct", "must be a number between 0 and 100");
 	}
@@ -89,6 +93,10 @@ export function validateConfig(input) {
 	if (config.probeBeforeTicket !== undefined && typeof config.probeBeforeTicket !== "boolean") fail("probeBeforeTicket", "must be true or false");
 	if (config.preferWaitMin !== undefined && !(typeof config.preferWaitMin === "number" && config.preferWaitMin >= 0)) {
 		fail("preferWaitMin", "must be a number of minutes ≥ 0");
+	}
+	// Frozen paths every ticket adds its own `**Frozen:**` globs to: no shift may change them.
+	if (!Array.isArray(config.frozen) || !config.frozen.every((g) => typeof g === "string" && g.length > 0)) {
+		fail("frozen", 'must be an array of globs ("packages/*/test/fixtures/**")');
 	}
 	config.cooldown = checkCooldown({ ...DEFAULTS.cooldown, ...config.cooldown }, "cooldown");
 	config.jev = checkJev(config.jev, "jev");
@@ -122,6 +130,7 @@ export function validateConfig(input) {
 	}
 	if (config.defaultTier !== undefined && !tiers[config.defaultTier]) fail("defaultTier", `unknown tier "${config.defaultTier}"`);
 	config.review = checkReview(config.review, "review", tiers);
+	config.dual = checkDual(config.dual, "dual", tiers);
 	config.github = checkGitHub(config.github, "github", tiers);
 	// `github.planTier` routes plan tickets unless the config already routes `plan`.
 	// Done here, not in the importer, so every validated config carries it before a runner sees it.
@@ -364,6 +373,45 @@ function checkReview(value, path, tiers) {
  * validated config — `run` does, with CLI overrides — round-trips it instead of refilling the default. */
 function reviewBudget(budget) {
 	return { ...DEFAULT_REVIEW_BUDGET, ...(budget ?? {}) };
+}
+
+const DUAL_FIELDS = ["enabled", "types", "features", "models", "tiers", "mergeTier", "budget"];
+
+/**
+ * `dual`: two worker shifts on one ticket, on two models in two worktrees, then a merge shift
+ * (ADR-0007). `true`/`false` are `{ enabled }`; absent stays absent. `models` (two model refs) and
+ * `tiers` (two tier names) pick the two candidates' routes — one of them, never both; `mergeTier`
+ * is where the merge shift runs (the review tier by default); `budget` is the merge shift's budget.
+ */
+function checkDual(value, path, tiers) {
+	if (value === undefined) return undefined;
+	if (value === true || value === false) value = { enabled: value };
+	if (!isPlainObject(value)) fail(path, "must be an object, true or false");
+	for (const key of Object.keys(value)) {
+		if (!DUAL_FIELDS.includes(key)) fail(`${path}.${key}`, `unknown dual field; expected one of ${DUAL_FIELDS.join(", ")}`);
+	}
+	const out = { enabled: false, ...value };
+	if (typeof out.enabled !== "boolean") fail(`${path}.enabled`, "must be true or false");
+	if (out.features !== undefined && !(Array.isArray(out.features) && out.features.every((f) => typeof f === "string" && f.length > 0))) {
+		fail(`${path}.features`, "must be an array of feature names");
+	}
+	if (out.types !== undefined && !(Array.isArray(out.types) && out.types.every((t) => typeof t === "string" && t.length > 0))) {
+		fail(`${path}.types`, "must be an array of ticket types");
+	}
+	if (out.models !== undefined && out.tiers !== undefined) fail(path, "set models or tiers, not both");
+	if (out.models !== undefined) {
+		if (!Array.isArray(out.models) || out.models.length !== 2) fail(`${path}.models`, "must be two model references [A, B]");
+		out.models.forEach((model, i) => checkModel(model, `${path}.models[${i}]`));
+	}
+	if (out.tiers !== undefined) {
+		if (!Array.isArray(out.tiers) || out.tiers.length !== 2) fail(`${path}.tiers`, "must be two tier names [A, B]");
+		out.tiers.forEach((tier, i) => {
+			if (!tiers[tier]) fail(`${path}.tiers[${i}]`, `unknown tier ${JSON.stringify(tier)}`);
+		});
+	}
+	if (out.mergeTier !== undefined && !tiers[out.mergeTier]) fail(`${path}.mergeTier`, `unknown tier ${JSON.stringify(out.mergeTier)}`);
+	checkBudget(out.budget, `${path}.budget`);
+	return out;
 }
 
 const GITHUB_FIELDS = ["repo", "authors", "labels", "pollMin", "autoClose", "push", "planTier", "gh"];

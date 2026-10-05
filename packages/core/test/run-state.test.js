@@ -151,11 +151,33 @@ test("a worker entry is patched per ticket and removed when it settles", async (
 	assert.deepEqual((await state.read()).workers.map((w) => w.ticket.number), ["02"]);
 });
 
+test("dual candidates of one ticket are separate workers; removing the ticket removes them all", async () => {
+	const root = await makeRepo({});
+	const state = openRunState(root);
+	await state.update({ pid: process.pid, running: true, workers: [] });
+	const a = { feature: "f", number: "01", dual: "A" };
+	const b = { feature: "f", number: "01", dual: "B" };
+
+	await state.updateWorker(a, { ticket: { feature: "f", number: "01" }, attempt: 1, shift: "A", model: "grok:grok-4.6" });
+	await state.updateWorker(b, { ticket: { feature: "f", number: "01" }, attempt: 1, shift: "B", model: "claude:haiku" });
+	await state.updateWorker(a, { usage: { tokens: 5, costUsd: 0, turns: 1, contextPct: 0 } });
+
+	const read = await state.read();
+	assert.deepEqual(read.workers.map((w) => [w.shift, w.model]), [["B", "claude:haiku"], ["A", "grok:grok-4.6"]]);
+	assert.equal(read.workers.find((w) => w.shift === "A").usage.tokens, 5);
+
+	await state.removeWorker(b);
+	assert.deepEqual((await state.read()).workers.map((w) => w.shift), ["A"]);
+	await state.updateWorker(b, { ticket: { feature: "f", number: "01" }, attempt: 1, shift: "B", model: "claude:haiku" });
+	await state.removeWorker({ feature: "f", number: "01" });
+	assert.deepEqual((await state.read()).workers, []);
+});
+
 test("a legacy single-runner run state still reads as one runner with one worker", async () => {
 	const root = await makeRepo({});
-	await mkdir(join(root, ".pi"), { recursive: true });
+	await mkdir(join(root, ".shiftwork"), { recursive: true });
 	await writeFile(
-		join(root, ".pi", "shiftwork-run.json"),
+		join(root, ".shiftwork", "shiftwork-run.json"),
 		JSON.stringify({
 			pid: process.pid,
 			running: true,

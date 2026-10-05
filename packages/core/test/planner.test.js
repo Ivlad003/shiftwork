@@ -760,3 +760,8 @@ test("backends.claude.unlimited: true lifts every limit for claude models and fo
 	const pi = planShift({ ticket: t({ type: "code", budget: "50 turns" }), config: cfg }).budget;
 	assert.deepEqual(pi, { maxTurns: 10, maxTokens: 1000, maxWallMin: 45, maxCostUsd: 8, maxContextPct: 70 });
 });
+
+test("planShift: the remaining ticket budget caps every shift, not only rule-targeted handoffs", () => {
+	const fresh = planShift({ ticket: t({ type: "code" }), config: budgetConfig, history: { ticketUsage: { maxCostUsd: 4.5 } } });
+	assert.equal(fresh.budget.maxCostUsd, 0.5);
+});

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, openSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { closeSync, existsSync, openSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openRunState, READY, RESOLVED } from "shiftwork-core";
 import { collectDryRunLines } from "./dry-run.js";
@@ -167,7 +167,7 @@ export function resolvedRows(dashboard, view) {
 
 /**
  * The rows the GitHub tab shows (github-watch, ticket 06): one per issue in
- * `.pi/shiftwork-github.json` — `{ number, title, feature, state }` (state from
+ * `.shiftwork/shiftwork-github.json` — `{ number, title, feature, state }` (state from
  * the feature's tickets, derived by `readGithubIssues` in dashboard.js) — one
  * row per watched issue, sorted by issue number. Pure, and shared with rendering.
  */
@@ -822,50 +822,72 @@ export function createTuiControls({ root, start, stop, plan, togglePause, onChan
 	};
 }
 
+/** Roots this process is starting a runner in right now: a second `r` mid-start is refused. */
+const startingRunners = new Set();
+
+/** Why a runner can't start while a STOP file is there, and how to clear it. */
+export const STOP_FILE_REFUSAL = "a STOP file is in the repo root (an earlier stop, or an operator's): delete STOP to start a runner";
+
 /**
  * Start `shiftwork run` detached, like `/shift run`: output goes to logs/runner-<ts>.log,
- * a stale STOP file is removed first, and the run state is claimed at once so the
- * dashboard is live before the runner's own first write. Refused while a runner is live.
+ * and the run state is claimed at once so the dashboard is live before the runner's own
+ * first write. Refused while a runner is live or this process is already starting one,
+ * and while a STOP file is there — it would end the new run at once, and it may be an
+ * operator's, so it is never removed here: the refusal says to delete it.
  * `darkFactory: true` starts `run --dark-factory` instead, and the run state entry
  * records `mode: "dark-factory"` — the header shows it while the runner is live.
  */
 export async function startDetachedRunner(root, { feature, ticket, darkFactory, bin } = {}) {
-	const runState = openRunState(root);
-	const current = await runState.read();
-	if (current?.live) {
-		return { started: false, reason: `a runner is already working (pid ${current.pid})` };
+	const key = resolve(root);
+	if (startingRunners.has(key)) return { started: false, reason: "a runner is already starting" };
+	startingRunners.add(key);
+	try {
+		const runState = openRunState(root);
+		const live = async () => {
+			const current = await runState.read();
+			return current?.live ? { started: false, reason: `a runner is already working (pid ${current.pid})` } : null;
+		};
+		const refused = await live();
+		if (refused) return refused;
+		if (existsSync(join(root, "STOP"))) return { started: false, reason: STOP_FILE_REFUSAL };
+		const cli = bin ?? process.env.SHIFTWORK_BIN ?? fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
+
+		await mkdir(join(root, "logs"), { recursive: true });
+		const logFile = join(root, "logs", `runner-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
+		// Another process may have started one while the log dir was made: look again last thing.
+		const raced = await live();
+		if (raced) return raced;
+		const args = [
+			cli,
+			"run",
+			...(darkFactory ? ["--dark-factory"] : []),
+			...(feature ? ["--feature", feature] : []),
+			...(ticket ? ["--ticket", ticket] : []),
+		];
+		const log = openSync(logFile, "a");
+		let child;
+		try {
+			child = spawn(process.execPath, args, { cwd: root, detached: true, stdio: ["ignore", log, log] });
+		} finally {
+			// The child has its own copy of the descriptor; this process must not leak one per start.
+			closeSync(log);
+		}
+		child.unref();
+		await runState.update({
+			pid: child.pid,
+			running: true,
+			startedAt: new Date().toISOString(),
+			finishedAt: null,
+			stoppedReason: null,
+			mode: darkFactory ? "dark-factory" : null,
+			workers: [],
+			summary: { resolved: 0, needsInfo: 0 },
+			logFile,
+		});
+		return { started: true, pid: child.pid, logFile };
+	} finally {
+		startingRunners.delete(key);
 	}
-	const cli = bin ?? process.env.SHIFTWORK_BIN ?? fileURLToPath(new URL("../bin/shiftwork.js", import.meta.url));
-
-	// A STOP file left by an earlier stop would end the new run immediately.
-	const stopFile = join(root, "STOP");
-	const removedStop = existsSync(stopFile);
-	if (removedStop) await rm(stopFile, { force: true });
-
-	await mkdir(join(root, "logs"), { recursive: true });
-	const logFile = join(root, "logs", `runner-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
-	const log = openSync(logFile, "a");
-	const args = [
-		cli,
-		"run",
-		...(darkFactory ? ["--dark-factory"] : []),
-		...(feature ? ["--feature", feature] : []),
-		...(ticket ? ["--ticket", ticket] : []),
-	];
-	const child = spawn(process.execPath, args, { cwd: root, detached: true, stdio: ["ignore", log, log] });
-	child.unref();
-	await runState.update({
-		pid: child.pid,
-		running: true,
-		startedAt: new Date().toISOString(),
-		finishedAt: null,
-		stoppedReason: null,
-		mode: darkFactory ? "dark-factory" : null,
-		workers: [],
-		summary: { resolved: 0, needsInfo: 0 },
-		logFile,
-	});
-	return { started: true, pid: child.pid, logFile, removedStop };
 }
 
 /**

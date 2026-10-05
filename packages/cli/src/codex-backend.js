@@ -1,9 +1,10 @@
-import { execFile, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { classifyError } from "shiftwork-core";
+import { execIn } from "./exec.js";
+import { runAgent, spawnAgent } from "./spawn-agent.js";
 
 /**
  * Codex backend: `codex exec -m <m> --json --approve-for-me -o <last> <prompt>`.
@@ -23,30 +24,21 @@ export function createCodexBackend(options = {}) {
 		async probe(model, { timeoutMs = 60_000 } = {}) {
 			if (!(await isOnPath(command, options.env))) return false;
 			const lastFile = join(tmpdir(), `shiftwork-codex-probe-${Date.now()}`);
-			return new Promise((resolve) => {
-				const args = [
-					"exec",
-					"-m",
-					model,
-					"--json",
-					"--approve-for-me",
-					...(options.args ?? []),
-					"-o",
-					lastFile,
-					"Reply with exactly: OK",
-				];
-				const child = execFile(
-					command,
-					args,
-					{ env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-					(error, stdout, stderr) => {
-						rm(lastFile).catch(() => {});
-						const output = `${stdout}\n${stderr}`;
-						resolve(!error && classifyError(output) === null);
-					},
-				);
-				child.stdin?.end();
-			});
+			const args = [
+				"exec",
+				"-m",
+				model,
+				"--json",
+				"--approve-for-me",
+				...(options.args ?? []),
+				"-o",
+				lastFile,
+				"Reply with exactly: OK",
+			];
+			const result = await runAgent(command, args, { env: { ...process.env, ...options.env }, timeoutMs });
+			rm(lastFile).catch(() => {});
+			const output = `${result.stdout}\n${result.stderr}`;
+			return !result.error && result.code === 0 && classifyError(output) === null;
 		},
 
 		async startShift({ cwd, route, prompt, systemPrompt }) {
@@ -60,17 +52,8 @@ export function createCodexBackend(options = {}) {
 			const skillPaths = route.skills?.restricted ? route.skills.paths ?? [] : [];
 			// Deliver granted skills as symlinks in the worktree's .agents/skills/.
 			const skillsDir = join(cwd, ".agents", "skills");
-			const skillLinks = [];
-			if (skillPaths.length) {
-				await mkdir(skillsDir, { recursive: true });
-				for (const skillPath of skillPaths) {
-					const target = join(skillsDir, basename(skillPath));
-					await rm(target, { force: true }).catch(() => {});
-					await symlink(skillPath, target).catch(() => {});
-					skillLinks.push(target);
-				}
-				await excludeSkillsFromGit(cwd);
-			}
+			const skillLinks = skillPaths.length ? await linkSkills(skillsDir, skillPaths) : [];
+			if (skillPaths.length) await excludeSkillsFromGit(cwd);
 
 			const dir = await mkdtemp(join(tmpdir(), "shiftwork-codex-"));
 			const lastFile = join(dir, "last-message.txt");
@@ -87,19 +70,21 @@ export function createCodexBackend(options = {}) {
 			args.push(fullPrompt);
 
 			const queue = eventQueue();
-			let stderr = "";
-			let buffer = "";
+			let stopping = false;
+			const timeoutMs = options.timeoutMs ?? SAFETY_TIMEOUT_MS;
 			const map = createCodexMapper();
 			let ended = false;
 			let lastText = "";
 
 			const cleanup = async () => {
-				for (const link of skillLinks) await rm(link, { force: true }).catch(() => {});
+				for (const link of skillLinks) await unlink(link).catch(() => {});
 				await rm(dir, { recursive: true, force: true });
 			};
 
+			// close() after the process already ended waits for that ending's cleanup.
+			let cleanupDone = null;
 			const finish = async (stopReason, errorMessage) => {
-				if (queue.closed) return;
+				if (queue.closed) return cleanupDone;
 				if (errorMessage) queue.push({ type: "error", message: errorMessage });
 				// Fallback: if stdout produced no text but the -o file did, emit it.
 				if (!ended) {
@@ -107,43 +92,33 @@ export function createCodexBackend(options = {}) {
 					queue.push({ type: "end", stopReason });
 				}
 				queue.close();
-				await cleanup();
+				cleanupDone = cleanup();
+				await cleanupDone;
 			};
 
-			const child = execFile(command, args, {
+			const agent = spawnAgent(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
 				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
-				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
-				maxBuffer: 256 * 1024 * 1024,
-			});
-			// CLIs such as `opencode run` read piped stdin as extra prompt and wait for EOF: close it.
-			child.stdin?.end();
-
-			child.stderr?.on("data", (chunk) => {
-				stderr += chunk;
-			});
-
-			child.stdout?.on("data", (chunk) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop();
-				for (const line of lines) {
-					if (!line.trim()) continue;
+				timeoutMs,
+				onLine(line) {
+					if (!line.trim()) return;
 					const event = parseJsonLine(line);
-					if (!event) continue;
+					if (!event) return;
 					for (const mapped of map(event)) {
 						if (mapped.type === "text") lastText = mapped.text;
 						if (mapped.type === "end") ended = true;
 						queue.push(mapped);
 					}
-				}
-			});
-
-			child.on("error", (error) => finish("error", error.message));
-			child.on("close", (code) => {
-				const message = code !== 0 ? stderr || `codex exited with code ${code}` : undefined;
-				finish(code === 0 ? "stop" : "error", message);
+				},
+				onError: (error) => finish("error", error.message),
+				onClose: ({ code, timedOut }) => {
+					if (stopping) return;
+					const message = timedOut
+						? `codex timed out after ${Math.round(timeoutMs / 60_000)} min (safety timeout)`
+						: code !== 0 ? agent.stderrTail() || `codex exited with code ${code}` : undefined;
+					finish(code === 0 ? "stop" : "error", message);
+				},
 			});
 
 			return {
@@ -151,11 +126,13 @@ export function createCodexBackend(options = {}) {
 				events: queue.iterate(),
 				warnings: preload.warnings,
 				async abort() {
-					child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("aborted").catch(() => {});
 				},
 				async close() {
-					if (!child.killed) child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("stop").catch(() => {});
 				},
 			};
@@ -187,16 +164,23 @@ function parseJsonLine(line) {
 export function createCodexMapper() {
 	let currentTurnText = [];
 	let sawTurn = false;
+	const toolItems = new Set();
 	return function map(event) {
 		if (!event || typeof event !== "object") return [];
 		const out = [];
 		if (event.type === "turn.started") {
 			currentTurnText = [];
 			sawTurn = true;
-		} else if (event.type === "item.completed" && event.item) {
+		} else if ((event.type === "item.started" || event.type === "item.completed") && event.item) {
 			const item = event.item;
-			if (item.type === "agent_message" && item.text) {
+			if (event.type === "item.completed" && item.type === "agent_message" && item.text) {
 				currentTurnText.push(item.text);
+			}
+			// A tool item arrives started and completed: one tool event per item id.
+			const tool = codexTool(item);
+			if (tool && !(item.id && toolItems.has(item.id))) {
+				if (item.id) toolItems.add(item.id);
+				out.push(tool);
 			}
 		} else if (event.type === "turn.completed") {
 			const usage = event.usage ?? {};
@@ -216,18 +200,70 @@ export function createCodexMapper() {
 	};
 }
 
+const TOOL_INPUT_CHARS = 500;
+
+/** A tool call for the shift log: the shell command, else the file path, else the arguments as
+ * JSON — at most 500 chars. `shiftwork reflect` mines these for repeated steps. */
+function toolEvent(name, args) {
+	const input =
+		typeof args === "string"
+			? args
+			: (args?.command ?? args?.cmd ?? args?.file_path ?? args?.filePath ?? args?.path ?? args?.pattern ?? args?.url ?? (args == null ? "" : JSON.stringify(args)));
+	return { type: "tool", name: String(name ?? "tool"), input: String(Array.isArray(input) ? input.join(" ") : input).slice(0, TOOL_INPUT_CHARS) };
+}
+
+/** The tool event of a Codex item, or null when the item is not a tool call. */
+function codexTool(item) {
+	if (item.type === "command_execution") return toolEvent("shell", item.command);
+	if (item.type === "file_change") return toolEvent("file_change", (item.changes ?? []).map((c) => c.path).join(" "));
+	if (item.type === "mcp_tool_call") return toolEvent(item.tool ?? "mcp", item.arguments);
+	if (item.type === "web_search") return toolEvent("web_search", item.query);
+	return null;
+}
+
 /** Stateless convenience for single events (tests); prefer createCodexMapper for a stream. */
 export function mapCodexEvent(event) {
 	return createCodexMapper()(event);
 }
 
+/**
+ * Link granted skills into `skillsDir`. A link of ours left by an earlier shift is reused; any other
+ * file already at the path belongs to the repo and is left alone and not recorded, so cleanup
+ * never removes it. Returns the links to remove when the shift ends.
+ */
+async function linkSkills(skillsDir, skillPaths) {
+	const links = [];
+	await mkdir(skillsDir, { recursive: true });
+	for (const skillPath of skillPaths) {
+		const target = join(skillsDir, basename(skillPath));
+		const existing = await lstat(target).catch(() => null);
+		if (existing) {
+			if (existing.isSymbolicLink() && (await readlink(target).catch(() => null)) === skillPath) links.push(target);
+			continue;
+		}
+		try {
+			await symlink(skillPath, target);
+			links.push(target);
+		} catch {
+			// EEXIST from a race or an unwritable dir: the skill is not delivered, nothing to clean up.
+		}
+	}
+	return links;
+}
+
 async function excludeSkillsFromGit(cwd) {
-	const excludeFile = join(cwd, ".git", "info", "exclude");
-	if (!existsSync(excludeFile)) return;
+	// In a linked worktree `.git` is a file: ask git where info/exclude really lives (the common dir).
+	let excludeFile;
+	try {
+		excludeFile = resolve(cwd, (await execIn(cwd)(["git", "rev-parse", "--git-path", "info/exclude"])).trim());
+	} catch {
+		return;
+	}
 	const pattern = ".agents/skills/";
 	const text = await readFile(excludeFile, "utf8").catch(() => "");
 	if (text.split("\n").some((line) => line.trim() === pattern)) return;
-	await writeFile(excludeFile, text.endsWith("\n") ? `${text}${pattern}\n` : `${text}\n${pattern}\n`);
+	await mkdir(dirname(excludeFile), { recursive: true });
+	await writeFile(excludeFile, !text || text.endsWith("\n") ? `${text}${pattern}\n` : `${text}\n${pattern}\n`);
 }
 
 async function isOnPath(command, env) {

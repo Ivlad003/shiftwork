@@ -26,8 +26,8 @@ async function startPi({ config, model = "scripted/s1" }) {
 	await mkdir(beta, { recursive: true });
 	await writeFile(join(alpha, "SKILL.md"), "---\nname: alpha\ndescription: Alpha skill\n---\nAlpha body.");
 	await writeFile(join(beta, "SKILL.md"), "---\nname: beta\ndescription: Beta skill\n---\nBeta body.");
-	await mkdir(join(cwd, ".pi"), { recursive: true });
-	await writeFile(join(cwd, ".pi", "shiftwork.json"), `${JSON.stringify(config({ alpha, beta }), null, 2)}\n`);
+	await mkdir(join(cwd, ".shiftwork"), { recursive: true });
+	await writeFile(join(cwd, ".shiftwork", "shiftwork.json"), `${JSON.stringify(config({ alpha, beta }), null, 2)}\n`);
 
 	const client = new RpcClient({
 		cliPath: piCli,
@@ -84,13 +84,13 @@ test("switching the model changes the advertised skills", { timeout: 90_000 }, a
 		}),
 	});
 
-	await client.prompt("hello");
-	await client.waitForIdle(60_000);
+	// Subscribed before the prompt goes out: a fast agent may settle before prompt() returns.
+	await client.promptAndWait("hello", undefined, 60_000);
 	assert.deepEqual(await advertised(cwd), ["alpha"]);
 
 	await client.setModel("scripted", "s2");
-	await client.prompt("again");
-	await client.waitForIdle(60_000);
+	// Subscribed before the prompt goes out: a fast agent may settle before prompt() returns.
+	await client.promptAndWait("again", undefined, 60_000);
 	assert.deepEqual(await advertised(cwd), ["alpha", "beta"]);
 });
 
@@ -99,8 +99,8 @@ test("a model without a tier leaves skills untouched", { timeout: 90_000 }, asyn
 		config: () => ({ thinking: "off", model: "scripted/s1" }),
 	});
 
-	await client.prompt("hello");
-	await client.waitForIdle(60_000);
+	// Subscribed before the prompt goes out: a fast agent may settle before prompt() returns.
+	await client.promptAndWait("hello", undefined, 60_000);
 	assert.deepEqual(await advertised(cwd), ["alpha", "beta"]);
 
 	const notify = ui.find((r) => r.method === "notify" && /not in any tier/.test(r.message));

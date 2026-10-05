@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { formatTicketsTable, LIMIT_NAMES, loadConfig, openCooldowns, openRepoTracker, openRunState, runFrontier, validateConfig, VERSION } from "shiftwork-core";
+import { formatTicketsTable, LIMIT_NAMES, loadConfig, openCooldowns, openRepoTracker, openRunState, runFrontier, shiftworkPath, validateConfig, VERSION } from "shiftwork-core";
 import { ensureShiftworkOnPath } from "../src/cli-path.js";
 
 ensureShiftworkOnPath();
@@ -12,10 +12,10 @@ const HELP = `shiftwork ${VERSION} — autonomous agents working in shifts
 
 Usage:
   shiftwork init [--model <provider/id>] [--ollama] [--force]
-                                Create .pi/shiftwork.json, the worker prompt and pi settings
+                                Create .shiftwork/shiftwork.json, the worker prompt and pi settings
                                 --ollama: also discover local Ollama models (OLLAMA_HOST),
                                 add an ollama provider to ~/.pi/agent/models.json and a
-                                local tier to .pi/shiftwork.json
+                                local tier to .shiftwork/shiftwork.json
   shiftwork status [dir] [--dir <path>]
                                 List tickets and the frontier of ready ones
   shiftwork feature pause <feature> [--dir <path>]
@@ -29,17 +29,42 @@ Usage:
                                 Full-screen dashboard: Queue, Agents, Cooldowns, Log, Resolved,
                                 GitHub (1–6, tab); n runs the selected ticket, r runs, s stops,
                                 d dry-runs, p pauses a feature, / searches, g dark-factory
+  shiftwork logs [<feature>/<NN>] [-f|--follow] [--raw] [--all] [--dir <path>]
+                                Read the agents' shift logs: the live runner's workers (else
+                                the latest log), or one ticket's current attempt (--all: every
+                                attempt); -f follows them as they are written (Ctrl-C stops)
+  shiftwork reflect [--since <days>] [--min <n>] [--write] [--dir <path>]
+                                Find shell steps agents repeated in at least n (default 3)
+                                shifts and suggest a script for each; --write saves the
+                                report to .scratch/reflections/ and files an automate-* feature
+  shiftwork stop [--dark-factory] [--wait [sec]] [--force] [--dir <path>]
+                                Stop the live runner: write STOP so its shifts hand off and
+                                it exits (nothing written when no runner is live);
+                                --dark-factory only stops a dark-factory runner (exit 1 while
+                                a plain run is live); --wait polls until it has stopped
+                                (default 120 s, exit 1 on timeout) and removes the STOP file;
+                                --force also sends it SIGTERM
   shiftwork tickets check <feature> [--min <n>] [--except NN] [--dir <path>]
                                 Planning gate: exit 0 when at least n (default 1) tickets
                                 besides the excepted ones (default 01) are ready-for-agent
                                 or later, each with checkboxes and a Verify line, and every
-                                Blocked-by number exists in the feature
+                                Blocked-by number exists in the feature, with no Blocked-by cycle
+  shiftwork graph <feature> [--dir <path>]
+                                Print the feature's tickets and Blocked-by edges as a Mermaid
+                                flowchart (status in each label, cycles dashed); read-only
+  shiftwork jobs <list|run|watch|status> [name...] [--force] [--retry-failed] [--dry-run] [--dir <path>]
+                                Deterministic scripts from .shiftwork/jobs.json, item by item,
+                                resumable; watch runs scheduled ones (see docs/guide.md "Jobs")
   shiftwork github labels [--create] [--dir <path>]
                                 Check the dark-factory labels (github.labels) exist in the
                                 GitHub repo: ✔ exists / ✖ missing per label, exit 1 when any
                                 is missing; --create creates the missing ones with a colour
                                 and a description, never edits or deletes one
                                 (see docs/guide.md "Dark-factory: labels")
+  shiftwork migrate [--dry-run] [--dir <path>]
+                                Move Shiftwork's files (shiftwork.json, the worker prompt, run
+                                state, cooldowns, locks) from the legacy .pi/ to .shiftwork/;
+                                pi's own files stay in .pi/; refused while a runner is live
   shiftwork --version
 
 Run options:
@@ -54,11 +79,11 @@ Run options:
                         when it is not on the frontier; not with --feature or --parallel)
   --dry-run              Print the route of each frontier ticket; spend nothing
   --feature <slug>       Only tickets of this feature
-  --model <provider/id>  Default model (else "model" in .pi/shiftwork.json)
+  --model <provider/id>  Default model (else "model" in .shiftwork/shiftwork.json)
   --thinking <level>     Default thinking level (default: medium)
   --max-attempts <n>     Attempts per ticket before needs-info (default: 3)
   --parallel <n>         Work up to n frontier tickets at once (default: 1, or "parallel"
-                        in .pi/shiftwork.json; > 1 needs worktree.enabled and one worktree
+                        in .shiftwork/shiftwork.json; > 1 needs worktree.enabled and one worktree
                         per ticket; "concurrency" caps the shifts per provider)
   --no-worktree          Work in the main checkout instead of a git worktree per ticket
   --no-budget            Lift every budget limit (turns, tokens, cost, time, context, stall),
@@ -68,7 +93,7 @@ Run options:
   --no-review            Turn review shifts off for this run (they are on by default:
                         every ticket is reviewed once on the strongest configured
                         tier, on its branch before it lands — see "review" in
-                        .pi/shiftwork.json)
+                        .shiftwork/shiftwork.json)
   --dir <path>           Repo root (default: current directory)
   -h, --help             Show this help
 
@@ -87,6 +112,11 @@ try {
 		case "tickets":
 			process.exitCode = await tickets(rest);
 			break;
+		case "graph": {
+			const { graph } = await import("../src/graph.js");
+			process.exitCode = await graph(rest);
+			break;
+		}
 		case "init": {
 			const { init } = await import("../src/init.js");
 			await init(rest);
@@ -98,6 +128,31 @@ try {
 		case "github":
 			process.exitCode = await github(rest);
 			break;
+		case "stop": {
+			const { stop } = await import("../src/stop.js");
+			process.exitCode = await stop(rest);
+			break;
+		}
+		case "logs": {
+			const { logs } = await import("../src/logs.js");
+			process.exitCode = await logs(rest);
+			break;
+		}
+		case "reflect": {
+			const { reflect } = await import("../src/reflect.js");
+			process.exitCode = await reflect(rest);
+			break;
+		}
+		case "migrate": {
+			const { migrate } = await import("../src/migrate.js");
+			process.exitCode = await migrate(rest);
+			break;
+		}
+		case "jobs": {
+			const { jobsCommand } = await import("../src/jobs.js");
+			process.exitCode = await jobsCommand(rest);
+			break;
+		}
 		case "tui": {
 			const { tui } = await import("../src/tui.js");
 			process.exitCode = await tui(rest);
@@ -212,12 +267,16 @@ async function tickets(argv) {
 	if (!Number.isInteger(min) || min < 1) throw new Error(`--min must be a positive integer, got "${values.min}"`);
 	const { checkFeatureTickets, parseExcept, resolveTrackerRoot } = await import("../src/tickets-check.js");
 	const except = parseExcept(values.except ?? ["01"]);
-	const { ok, problems, ready } = await checkFeatureTickets({
+	const { ok, problems, ready, asked } = await checkFeatureTickets({
 		root: await resolveTrackerRoot({ dir: values.dir }),
 		feature,
 		min,
 		except,
 	});
+	if (ok && asked) {
+		console.log(`${feature}: plan needs information; no implementation tickets required`);
+		return 0;
+	}
 	if (ok) {
 		console.log(`${feature}: ${ready} ready ticket${ready === 1 ? "" : "s"} besides ${except.join(", ")} (need ${min})`);
 		return 0;
@@ -359,7 +418,7 @@ async function run(argv) {
 		unlimited: unlimitedFrom(values, loaded.unlimited),
 		// `--no-review` turns reviews off for this one run, like `review: false` in the config.
 		review: values["no-review"] ? false : loaded.review,
-		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
+		workerPrompt: readOptional(shiftworkPath(root, "shiftwork-worker.md")),
 	});
 	if ((config.parallel ?? 1) > 1 && values["no-worktree"]) {
 		throw new Error("--no-worktree cannot be combined with parallel > 1: every parallel ticket needs its own worktree");
@@ -403,7 +462,7 @@ async function run(argv) {
 				config,
 				workspace,
 				classifyTicket,
-				shiftLog: shiftLogger(root),
+				shiftLog: await shiftLogger(root),
 				once: values.once,
 			});
 		}
@@ -415,7 +474,7 @@ async function run(argv) {
 			config,
 			workspace,
 			classifyTicket,
-			log: shiftLogger(root),
+			log: await shiftLogger(root),
 			options: { once: values.once, feature: values.feature, ticket: values.ticket },
 		});
 	} finally {
@@ -452,12 +511,18 @@ function readOptional(path) {
 	return existsSync(path) ? readFileSync(path, "utf8") : undefined;
 }
 
-/** Append every shift event as NDJSON to logs/<feature>/<NN>/attempt-<n>.jsonl. */
-function shiftLogger(root) {
-	return ({ ticket, attempt, event }) => {
-		const dir = join(root, "logs", ticket.feature, ticket.number);
-		mkdirSync(dir, { recursive: true });
-		appendFileSync(join(dir, `attempt-${attempt}.jsonl`), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
-		if (event.type === "turn") process.stdout.write(`  · ${ticket.feature}/${ticket.number} turn (${event.usage.totalTokens} tokens)\n`);
+/**
+ * Append every shift event as NDJSON to logs/<feature>/<NN>/attempt-<n>[.<k>].jsonl: a
+ * file of this run's own (an earlier run's attempt-<n>.jsonl is left alone), each shift
+ * opening with a `start` event that names its backend, model and tier (dashboard.js).
+ */
+async function shiftLogger(root) {
+	const { createShiftLogger } = await import("../src/dashboard.js");
+	const log = createShiftLogger(root);
+	return (entry) => {
+		log(entry);
+		const { ticket, event, dual } = entry;
+		const who = `${ticket.feature}/${ticket.number}${dual ? `·${dual}` : ""}`;
+		if (event.type === "turn") process.stdout.write(`  · ${who} turn (${event.usage.totalTokens} tokens)\n`);
 	};
 }

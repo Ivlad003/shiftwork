@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { frontier, loadConfig, openCooldowns, openRepoTracker, planShift, reviewWhen, shouldReview, validateConfig } from "shiftwork-core";
+import { frontier, loadConfig, openCooldowns, openRepoTracker, planShift, reviewWhen, shiftworkPath, shouldDual, shouldReview, validateConfig } from "shiftwork-core";
 import { createJevClassifier } from "./jev.js";
 
 /** Plan each frontier ticket, classifying untyped ones, and print the route. Spends nothing besides classify. */
@@ -10,7 +10,7 @@ export async function dryRunFrontier({ tickets, config, cooldowns = [], classify
 	for (const ticket of tickets) {
 		const classification = await classifyUntyped(ticket, config, classifyTicket);
 		const route = planShift({ ticket, config, classification, cooldowns });
-		log(formatDryRunLine(ticket, route, reviewColumn(config, ticket, route)));
+		log(formatDryRunLine(ticket, route, reviewColumn(config, ticket, route), dualColumn(config, ticket, route)));
 	}
 }
 
@@ -23,6 +23,17 @@ export function reviewColumn(config, ticket, route) {
 	return `${review.tier ?? "-"} (${reviewWhen(config) === "after-land" ? "after land" : "before land"})`;
 }
 
+/** The dual column of a dry-run line (ADR-0007): the two candidates and where they merge, or
+ * nothing when the ticket runs single. Worktrees and a second model are checked at run time. */
+export function dualColumn(config, ticket, route) {
+	if (!shouldDual(config, { ...ticket, type: ticket.type ?? route.type })) return undefined;
+	const dual = config.dual ?? {};
+	const merge = `merge ${dual.mergeTier ?? "review tier"}`;
+	if (dual.models?.length === 2) return `${dual.models[0]} + ${dual.models[1]} → ${merge}`;
+	if (dual.tiers?.length === 2) return `tiers ${dual.tiers[0]} + ${dual.tiers[1]} → ${merge}`;
+	return `usual route + next provider → ${merge}`;
+}
+
 export async function classifyUntyped(ticket, config, classifyTicket) {
 	if (ticket.type || !classifyTicket || config.jev?.enabled === false) return undefined;
 	try {
@@ -32,13 +43,14 @@ export async function classifyUntyped(ticket, config, classifyTicket) {
 	}
 }
 
-export function formatDryRunLine(ticket, route, review) {
+export function formatDryRunLine(ticket, route, review, dual) {
 	if (route.wait) {
 		return `${ticket.feature}/${ticket.number}  wait until ${new Date(route.wait).toISOString()}  ${ticket.title ?? ""}`;
 	}
 	const source = ticket.type ? "" : route.typeSource === "jev" ? " (jev)" : " (default)";
 	const reviewPart = review === undefined ? "" : `  review=${review}`;
-	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.ref ?? route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}${reviewPart}  ${ticket.title ?? ""}`;
+	const dualPart = dual === undefined ? "" : `  dual=${dual}`;
+	return `${ticket.feature}/${ticket.number}  type=${route.type}${source}  tier=${route.tier ?? "-"}  model=${route.ref ?? route.model}  thinking=${route.thinking}  budget=${formatBudget(route.budget)}${reviewPart}${dualPart}  ${ticket.title ?? ""}`;
 }
 
 const BUDGET_PARTS = [
@@ -53,14 +65,14 @@ const BUDGET_PARTS = [
 /**
  * The dry-run of `shiftwork run` as an array of lines: what each frontier ticket would
  * route to. Used by the CLI (`run --dry-run`) and the TUI's `d` key. Pass a ready
- * `config` to skip loading `.pi/shiftwork.json`; `agentDir` keeps the jev classifier
+ * `config` to skip loading `.shiftwork/shiftwork.json`; `agentDir` keeps the jev classifier
  * away from the user's real pi agent dir in tests.
  */
 export async function collectDryRunLines(root, { feature, config, agentDir } = {}) {
 	agentDir ??= process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 	config ??= validateConfig({
 		...(await loadConfig(root, agentDir)),
-		workerPrompt: readOptional(join(root, ".pi", "shiftwork-worker.md")),
+		workerPrompt: readOptional(shiftworkPath(root, "shiftwork-worker.md")),
 	});
 	const tracker = await openRepoTracker(root, config);
 	const all = (await tracker.list()).filter((t) => !feature || t.feature === feature);

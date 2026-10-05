@@ -37,7 +37,9 @@ Shiftwork executes these tickets itself (see `CONTEXT.md` and ADR-0001). A ticke
 - `**Model:**` `provider/model-id`. Overrides routing.
 - `**Skills:**` skill-group adjustments, for example `+design -git`.
 - `**Budget:**` ticket budget overrides, for example `$2 · 50 turns`.
+- `**Dual:**` `yes` or `no`. Turns dual shifts (two models, then a merge; ADR-0007) on or off for this ticket, overriding `dual.enabled`.
 - `**Verify:**` backtick-quoted commands separated by `·`. They form the verify gate (ADR-0003).
+- `**Frozen:**` backtick-quoted globs separated by `·` (or `,`). Frozen paths: a branch that changed one does not resolve, even with the gate passing. Added to the config's `frozen` list.
 
 Besides the triage roles, the runner writes two statuses: `claimed` (the runner holds the ticket) and `resolved` (the verify gate passed). It appends shift reports and handoff notes under `## Comments`.
 
@@ -45,7 +47,7 @@ Besides the triage roles, the runner writes two statuses: `claimed` (the runner 
 
 ## OpenSpec tracker
 
-Shiftwork can also work [OpenSpec](https://openspec.dev) changes through the same tracker interface. Set `"tracker": "openspec"` in `.pi/shiftwork.json`, or let it auto-detect: `openspec/changes/` is used when `.scratch/` doesn't exist (`.scratch/` wins when both exist).
+Shiftwork can also work [OpenSpec](https://openspec.dev) changes through the same tracker interface. Set `"tracker": "openspec"` in `.shiftwork/shiftwork.json`, or let it auto-detect: `openspec/changes/` is used when `.scratch/` doesn't exist (`.scratch/` wins when both exist).
 
 - One feature per change: `openspec/changes/<change>/`. The `archive/` folder is ignored.
 - Each unchecked `- [ ] N.M` task in `tasks.md` is a ticket, blocked by the previous task (so sections follow each other). A checked box is a resolved ticket; resolving a task ticks its box.

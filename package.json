@@ -9,7 +9,7 @@
     "packages/opencode"
   ],
   "scripts": {
-    "test": "node --test \"packages/*/test/**/*.test.js\"",
+    "test": "node --test --test-timeout=180000 \"packages/*/test/**/*.test.js\"",
     "llms": "node scripts/llms.mjs",
     "sync-skills": "node scripts/sync-skills.mjs",
     "pack:dry": "npm pack --dry-run --workspaces",

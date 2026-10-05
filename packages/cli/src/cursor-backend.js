@@ -1,8 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { classifyError } from "shiftwork-core";
+import { runAgent, spawnAgent } from "./spawn-agent.js";
 
 /**
  * Cursor CLI backend: `cursor-agent -p --output-format stream-json --model <m> --force --trust
@@ -30,29 +31,20 @@ export function createCursorBackend(options = {}) {
 		async probe(model, { timeoutMs = 60_000 } = {}) {
 			if (!(await isOnPath(command, options.env))) return false;
 			if (!(await isAuthenticated(command, options.env))) return false;
-			return new Promise((resolve) => {
-				const args = [
-					"-p",
-					"--output-format",
-					"stream-json",
-					"--model",
-					model,
-					"--force",
-					"--trust",
-					...(options.args ?? []),
-					"Reply with exactly: OK",
-				];
-				const child = execFile(
-					command,
-					args,
-					{ env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-					(error, stdout, stderr) => {
-						const output = `${stdout}\n${stderr}`;
-						resolve(!error && classifyError(output) === null && !AUTH_ERROR.test(output));
-					},
-				);
-				child.stdin?.end();
-			});
+			const args = [
+				"-p",
+				"--output-format",
+				"stream-json",
+				"--model",
+				model,
+				"--force",
+				"--trust",
+				...(options.args ?? []),
+				"Reply with exactly: OK",
+			];
+			const result = await runAgent(command, args, { env: { ...process.env, ...options.env }, timeoutMs });
+			const output = `${result.stdout}\n${result.stderr}`;
+			return !result.error && result.code === 0 && classifyError(output) === null && !AUTH_ERROR.test(output);
 		},
 
 		async startShift({ cwd, route, prompt, systemPrompt }) {
@@ -94,9 +86,8 @@ export function createCursorBackend(options = {}) {
 			args.push(fullPrompt);
 
 			const queue = eventQueue();
-			let stderr = "";
-			let stdoutTail = "";
-			let buffer = "";
+			let stopping = false;
+			const timeoutMs = options.timeoutMs ?? SAFETY_TIMEOUT_MS;
 			const map = createCursorMapper();
 			let ended = false;
 
@@ -115,45 +106,33 @@ export function createCursorBackend(options = {}) {
 				return cleanupDone;
 			};
 
-			const child = execFile(command, args, {
+			const agent = spawnAgent(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
 				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
-				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
-				maxBuffer: 256 * 1024 * 1024,
-			});
-			// A piped stdin must not be read as extra prompt: close it.
-			child.stdin?.end();
-
-			child.stderr?.on("data", (chunk) => {
-				stderr += chunk;
-			});
-
-			child.stdout?.on("data", (chunk) => {
-				stdoutTail = (stdoutTail + chunk).slice(-8192);
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop();
-				for (const line of lines) {
-					if (!line.trim()) continue;
+				timeoutMs,
+				onLine(line) {
+					if (!line.trim()) return;
 					const event = parseJsonLine(line);
-					if (!event) continue;
+					if (!event) return;
 					for (const mapped of map(event)) {
 						if (mapped.type === "end") ended = true;
 						queue.push(mapped);
 					}
-				}
-			});
-
-			child.on("error", (error) => finish("error", error.message));
-			child.on("close", (code) => {
-				let message = code !== 0 ? stderr.trim() || `cursor-agent exited with code ${code}` : undefined;
-				// An auth failure means the backend is unavailable (like a missing binary), not cooling.
-				if (message && AUTH_ERROR.test(`${stderr}\n${stdoutTail}`)) {
-					message = `${command} backend not available: ${message}`;
-				}
-				// When the stream already ended itself (a `result` line), finish() keeps that ending.
-				finish(code === 0 ? "stop" : "error", message);
+				},
+				onError: (error) => finish("error", error.message),
+				onClose: ({ code, timedOut }) => {
+					if (stopping) return;
+					let message = timedOut
+						? `cursor-agent timed out after ${Math.round(timeoutMs / 60_000)} min (safety timeout)`
+						: code !== 0 ? agent.stderrTail().trim() || `cursor-agent exited with code ${code}` : undefined;
+					// An auth failure means the backend is unavailable (like a missing binary), not cooling.
+					if (message && AUTH_ERROR.test(`${agent.stderrTail()}\n${agent.stdoutTail()}`)) {
+						message = `${command} backend not available: ${message}`;
+					}
+					// When the stream already ended itself (a `result` line), finish() keeps that ending.
+					finish(code === 0 ? "stop" : "error", message);
+				},
 			});
 
 			return {
@@ -161,11 +140,13 @@ export function createCursorBackend(options = {}) {
 				events: queue.iterate(),
 				warnings: preload.warnings,
 				async abort() {
-					child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("aborted").catch(() => {});
 				},
 				async close() {
-					if (!child.killed) child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("stop").catch(() => {});
 				},
 			};
@@ -191,7 +172,7 @@ function parseJsonLine(line) {
  * - `thinking` delta/completed: reasoning chunks; ignored (not reply text)
  * - `assistant`: { message: { content: [{ type: "text", text }] } } — one event per assistant
  *   message, so one turn each (not per line). Usage is NOT on these events.
- * - `tool_call` started/completed: tool lifecycle; ignored
+ * - `tool_call` started/completed: { <name>ToolCall: { args } } — `started` becomes one `tool` event
  * - `result`: { subtype, is_error, result, usage? } — the only place usage is reported, as
  *   { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }. The pending turn carries it.
  *
@@ -232,6 +213,11 @@ export function createCursorMapper() {
 			pendingTurn = true;
 			return out;
 		}
+		if (event.type === "tool_call" && event.subtype === "started" && event.tool_call) {
+			// { editToolCall: { args } } → "edit"; the completed event repeats the call.
+			const [key, call] = Object.entries(event.tool_call)[0] ?? [];
+			return key ? [toolEvent(key.replace(/ToolCall$/, ""), call?.args)] : [];
+		}
 		if (event.type === "error") {
 			return [...flushPending(), { type: "error", message: event.message ?? event.error?.message ?? "cursor-agent error" }];
 		}
@@ -251,6 +237,18 @@ export function createCursorMapper() {
 	}
 	map.flush = () => flushPending();
 	return map;
+}
+
+const TOOL_INPUT_CHARS = 500;
+
+/** A tool call for the shift log: the shell command, else the file path, else the arguments as
+ * JSON — at most 500 chars. `shiftwork reflect` mines these for repeated steps. */
+function toolEvent(name, args) {
+	const input =
+		typeof args === "string"
+			? args
+			: (args?.command ?? args?.cmd ?? args?.file_path ?? args?.filePath ?? args?.path ?? args?.pattern ?? args?.url ?? (args == null ? "" : JSON.stringify(args)));
+	return { type: "tool", name: String(name ?? "tool"), input: String(Array.isArray(input) ? input.join(" ") : input).slice(0, TOOL_INPUT_CHARS) };
 }
 
 /** Stateless convenience for single events (tests); prefer createCursorMapper for a stream. */

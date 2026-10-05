@@ -1,8 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { classifyError } from "shiftwork-core";
+import { runAgent, spawnAgent } from "./spawn-agent.js";
 
 /**
  * Claude Code backend: `claude -p` with `--output-format stream-json`.
@@ -19,28 +20,9 @@ export function createClaudeBackend(options = {}) {
 
 		async probe(model, { timeoutMs = 60_000 } = {}) {
 			if (!(await isOnPath(command, options.env))) return false;
-			return new Promise((resolve) => {
-				const args = [
-					"-p",
-					"--model",
-					model,
-					"--output-format",
-					"stream-json",
-					"--dangerously-skip-permissions",
-					...(options.args ?? []),
-					"Reply with exactly: OK",
-				];
-				const child = execFile(
-					command,
-					args,
-					{ env: { ...process.env, ...options.env }, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-					(error, stdout, stderr) => {
-						const output = `${stdout}\n${stderr}`;
-						resolve(!error && classifyError(output) === null);
-					},
-				);
-				child.stdin?.end();
-			});
+			const args = ["-p", "--model", model, "--output-format", "stream-json", "--dangerously-skip-permissions", ...(options.args ?? []), "Reply with exactly: OK"];
+			const result = await runAgent(command, args, { env: { ...process.env, ...options.env }, timeoutMs });
+			return !result.error && result.code === 0 && classifyError(`${result.stdout}\n${result.stderr}`) === null;
 		},
 
 		async startShift({ cwd, route, prompt, systemPrompt }) {
@@ -72,7 +54,8 @@ export function createClaudeBackend(options = {}) {
 				"--output-format",
 				"stream-json",
 				"--verbose",
-				"--append-system-prompt",
+				// --append-system-prompt takes the text itself; the worker prompt is in a file.
+				"--append-system-prompt-file",
 				workerFile,
 				"--dangerously-skip-permissions",
 			];
@@ -81,56 +64,50 @@ export function createClaudeBackend(options = {}) {
 			args.push(prompt);
 
 			const queue = eventQueue();
-			let stderr = "";
-			let buffer = "";
 			const map = createClaudeMapper();
 			let ended = false;
+			let stopping = false;
+			const timeoutMs = options.timeoutMs ?? SAFETY_TIMEOUT_MS;
 
 			const cleanup = async () => {
 				await rm(dir, { recursive: true, force: true });
 			};
 
+			// close() after the process already ended waits for that ending's cleanup.
+			let cleanupDone = null;
 			const finish = async (stopReason, errorMessage) => {
-				if (queue.closed) return;
+				if (queue.closed) return cleanupDone;
 				if (errorMessage) queue.push({ type: "error", message: errorMessage });
 				if (!ended) queue.push({ type: "end", stopReason });
 				queue.close();
-				await cleanup();
+				cleanupDone = cleanup();
+				await cleanupDone;
 			};
 
-			const child = execFile(command, args, {
+			const agent = spawnAgent(command, args, {
 				cwd,
 				env: { ...process.env, ...options.env },
 				// A safety net only: budgets (maxWallMin) end shifts with a handoff long before this.
-				timeout: options.timeoutMs ?? SAFETY_TIMEOUT_MS,
-				maxBuffer: 256 * 1024 * 1024,
-			});
-			// CLIs such as `opencode run` read piped stdin as extra prompt and wait for EOF: close it.
-			child.stdin?.end();
-
-			child.stderr?.on("data", (chunk) => {
-				stderr += chunk;
-			});
-
-			child.stdout?.on("data", (chunk) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop();
-				for (const line of lines) {
-					if (!line.trim()) continue;
+				timeoutMs,
+				onLine(line) {
+					if (!line.trim()) return;
 					const event = parseStreamJsonLine(line);
-					if (!event) continue;
+					if (!event) return;
 					for (const mapped of map(event)) {
 						if (mapped.type === "end") ended = true;
 						queue.push(mapped);
 					}
-				}
-			});
-
-			child.on("error", (error) => finish("error", error.message));
-			child.on("close", (code) => {
-				const message = code !== 0 ? stderr || `claude exited with code ${code}` : undefined;
-				finish(code === 0 ? "stop" : "error", message);
+				},
+				onError: (error) => finish("error", error.message),
+				onClose: ({ code, timedOut }) => {
+					if (stopping) return;
+					const message = timedOut
+						? `claude timed out after ${Math.round(timeoutMs / 60_000)} min (safety timeout)`
+						: code !== 0
+							? agent.stderrTail() || `claude exited with code ${code}`
+							: undefined;
+					finish(code === 0 ? "stop" : "error", message);
+				},
 			});
 
 			return {
@@ -138,11 +115,13 @@ export function createClaudeBackend(options = {}) {
 				events: queue.iterate(),
 				warnings: preload.warnings,
 				async abort() {
-					child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("aborted").catch(() => {});
 				},
 				async close() {
-					if (!child.killed) child.kill("SIGTERM");
+					stopping = true;
+					await agent.kill();
 					await finish("stop").catch(() => {});
 				},
 			};
@@ -163,7 +142,7 @@ function parseStreamJsonLine(line) {
  * assistant message arrives as several lines (thinking, tool_use, text) sharing `message.id`,
  * and counts as one turn. The formats come from a recorded transcript (test/fixtures/claude-stream.jsonl):
  * - `assistant`: message.usage { input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens }
- * - `rate_limit_event`: rate_limit_info { status: "allowed" | …, rateLimitType, resetsAt (epoch s) }
+ * - `rate_limit_event`: rate_limit_info { status: "allowed" | "allowed_warning" | "rejected", rateLimitType, resetsAt (epoch s) }
  * - `result`: { subtype, is_error, result, num_turns, total_cost_usd }
  */
 export function createClaudeMapper() {
@@ -183,10 +162,11 @@ export function createClaudeMapper() {
 			}
 			for (const block of message.content ?? []) {
 				if (block.type === "text" && block.text) out.push({ type: "text", text: block.text });
+				else if (block.type === "tool_use") out.push(toolEvent(block.name, block.input));
 			}
 		} else if (event.type === "rate_limit_event") {
 			const info = event.rate_limit_info ?? {};
-			if (info.status && info.status !== "allowed") {
+			if (isBlockingRateLimit(info.status)) {
 				const resets = info.resetsAt ? ` It resets at ${new Date(info.resetsAt * 1000).toISOString()}` : "";
 				out.push({ type: "error", message: `Claude ${info.rateLimitType ?? "plan"} usage limit reached (${info.status}).${resets}` });
 			}
@@ -197,6 +177,28 @@ export function createClaudeMapper() {
 		}
 		return out;
 	};
+}
+
+const TOOL_INPUT_CHARS = 500;
+
+/** A tool call for the shift log: the shell command, else the file path, else the arguments as
+ * JSON — at most 500 chars. `shiftwork reflect` mines these for repeated steps. */
+function toolEvent(name, args) {
+	const input =
+		typeof args === "string"
+			? args
+			: (args?.command ?? args?.cmd ?? args?.file_path ?? args?.filePath ?? args?.path ?? args?.pattern ?? args?.url ?? (args == null ? "" : JSON.stringify(args)));
+	return { type: "tool", name: String(name ?? "tool"), input: String(Array.isArray(input) ? input.join(" ") : input).slice(0, TOOL_INPUT_CHARS) };
+}
+
+/**
+ * A rate_limit_event blocks the run only when its status says so ("rejected"). "allowed" and the
+ * warnings ("allowed_warning": close to the limit) are informational: cooling the provider for
+ * hours on a warning would drop a model that still works.
+ */
+function isBlockingRateLimit(status) {
+	if (!status) return false;
+	return !/^allowed|warning/i.test(status);
 }
 
 /** Stateless convenience for single events (tests); prefer createClaudeMapper for a stream. */

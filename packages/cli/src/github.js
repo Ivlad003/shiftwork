@@ -1,3 +1,8 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { execIn } from "./exec.js";
 
 /** The hidden marker every comment Shiftwork posts ends with, so its own comments are never mistaken for a collaborator's reply. */
@@ -46,8 +51,12 @@ export async function ghPreFlight({ gh = "gh", exec, command = "dark-factory" } 
  * Every comment Shiftwork posts ends with the hidden `SHIFTWORK_MARKER`, and
  * `comment` resolves the new comment's id, so the sync can tell its own
  * comments from a collaborator's reply.
+ *
+ * `warn(line)` (default `console.error`) is told once per client when the
+ * collaborators cannot be listed (a token without push access gets a 403) and
+ * `collaborators()` falls back to the authenticated user.
  */
-export function createGitHub({ root, repo, gh = "gh", exec } = {}) {
+export function createGitHub({ root, repo, gh = "gh", exec, warn = console.error } = {}) {
 	// The default exec runs the binary in `root`, inheriting the environment
 	// (so the operator's `gh auth login` session applies).
 	const runCmd = exec ?? execIn(root);
@@ -64,20 +73,55 @@ export function createGitHub({ root, repo, gh = "gh", exec } = {}) {
 		if (repo !== undefined) return repo;
 		return parseRepoUrl((await runCmd(["git", "remote", "get-url", "origin"])).trim());
 	}
+	let warnedCollaborators = false;
 
 	return {
 		repo: resolveRepo,
 
 		/**
 		 * Logins of the repo's collaborators — every page
-		 * (`gh api repos/<repo>/collaborators --paginate`).
+		 * (`gh api repos/<repo>/collaborators --paginate`). When that fails (a
+		 * token without push access gets a 403), the authenticated user alone
+		 * (`gh api user`), with one warning per client; the callers add
+		 * `github.authors`. Tried again on every call; when the user cannot be
+		 * read either, the original error is thrown.
 		 */
 		async collaborators() {
-			return ghLines("api", `repos/${await resolveRepo()}/collaborators`, "--paginate", "--jq", ".[].login");
+			const target = await resolveRepo();
+			try {
+				return await ghLines("api", `repos/${target}/collaborators`, "--paginate", "--jq", ".[].login");
+			} catch (error) {
+				let me;
+				try {
+					me = await ghCmd("api", "user", "--jq", ".login");
+				} catch {
+					throw error;
+				}
+				if (!warnedCollaborators) {
+					warnedCollaborators = true;
+					warn(
+						`dark-factory: cannot list the collaborators of ${target} (${oneLine(error)}); only ${me} and github.authors may hand over issues and reply`,
+					);
+				}
+				return me ? [me] : [];
+			}
 		},
 
-		/** Open issues of the repo, narrowed to `label` when given, normalized to plain fields. */
-		async listIssues({ label, limit = 100 } = {}) {
+		/**
+		 * The login that most recently added `label` to the issue (its `labeled`
+		 * events, every page), or undefined when it was never added.
+		 */
+		async labelActor(n, label) {
+			const jq = `.[] | select(.event == "labeled" and .label.name == ${JSON.stringify(label)}) | .actor.login`;
+			return (await ghLines("api", `repos/${await resolveRepo()}/issues/${n}/events`, "--paginate", "--jq", jq)).at(-1);
+		},
+
+		/**
+		 * Open issues of the repo, narrowed to `label` when given, normalized to
+		 * plain fields. With a label the limit is 1000, so a busy queue of
+		 * labelled issues is not cut at 100.
+		 */
+		async listIssues({ label, limit = label === undefined ? 100 : 1000 } = {}) {
 			const args = ["issue", "list", ...(await repoFlag()), "--state", "open", "--limit", String(limit)];
 			if (label !== undefined) args.push("--label", label);
 			const out = await ghJson(...args, "--json", "number,title,body,state,author,labels,url");
@@ -117,6 +161,27 @@ export function createGitHub({ root, repo, gh = "gh", exec } = {}) {
 			return out.id;
 		},
 
+		/** The issue body (`gh issue view --json body`). Empty when GitHub has none. */
+		async issueBody(n) {
+			const out = await ghJson("issue", "view", String(n), ...(await repoFlag()), "--json", "body");
+			return out.body ?? "";
+		},
+
+		/**
+		 * Replace the issue body. The text goes through a file so newlines and
+		 * quotes stay literal; Shiftwork never deletes the issue.
+		 */
+		async editBody(n, body) {
+			const dir = await mkdtemp(join(tmpdir(), `shiftwork-issue-${randomUUID()}-`));
+			try {
+				const file = join(dir, "body.md");
+				await writeFile(file, String(body ?? ""));
+				return await ghCmd("issue", "edit", String(n), ...(await repoFlag()), "--body-file", file);
+			} finally {
+				await rm(dir, { recursive: true, force: true });
+			}
+		},
+
 		/** Add labels to the issue. */
 		async addLabels(n, labels) {
 			const flags = labels.flatMap((label) => ["--add-label", label]);
@@ -149,6 +214,15 @@ export function createGitHub({ root, repo, gh = "gh", exec } = {}) {
 			return ghCmd(...args);
 		},
 	};
+}
+
+/** An error's message on one line (gh errors span several). */
+export function oneLine(error) {
+	return String(error?.message ?? error)
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.join(" ");
 }
 
 /** The body with the Shiftwork marker at the end (never a second marker). */

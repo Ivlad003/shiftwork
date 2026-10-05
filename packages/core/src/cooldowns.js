@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { withLock } from "./lock.js";
+import { shiftworkPath } from "./paths.js";
 
 /**
- * Open the shared cooldown state at `.pi/shiftwork-state.json`.
+ * Open the shared cooldown state at `.shiftwork/shiftwork-state.json` (legacy `.pi/`).
  * Cooldowns are records of providers that hit a provider limit and must be
  * skipped by every runner until `until`.
  */
 export function openCooldowns(root) {
-	const path = join(root, ".pi", "shiftwork-state.json");
+	const path = shiftworkPath(root, "shiftwork-state.json");
 
 	async function read() {
 		try {

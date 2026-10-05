@@ -20,9 +20,9 @@ after(async () => {
 test("loading the pi-shiftwork package advertises the shiftwork skill", { timeout: 90_000 }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "sw-pi-skill-"));
 	const agentDir = await mkdtemp(join(tmpdir(), "sw-pi-home-"));
-	await mkdir(join(cwd, ".pi"), { recursive: true });
+	await mkdir(join(cwd, ".shiftwork"), { recursive: true });
 	await writeFile(
-		join(cwd, ".pi", "shiftwork.json"),
+		join(cwd, ".shiftwork", "shiftwork.json"),
 		JSON.stringify({ thinking: "off", model: "scripted/s1" }),
 		"utf8",
 	);
@@ -41,8 +41,8 @@ test("loading the pi-shiftwork package advertises the shiftwork skill", { timeou
 	clients.push(client);
 
 	await client.start();
-	await client.prompt("hello");
-	await client.waitForIdle(60_000);
+	// Subscribed before the prompt goes out: a fast agent may settle before prompt() returns.
+	await client.promptAndWait("hello", undefined, 60_000);
 
 	const recorded = join(cwd, "shiftwork-skills.json");
 	assert.ok(existsSync(recorded), "the scripted provider recorded the advertised skills");

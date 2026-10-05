@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -121,13 +121,41 @@ async function showFrontier(ctx: ExtensionContext) {
 	ctx.ui.notify(`Shiftwork: ${ready.length} ready of ${tickets.length}\n${lines.join("\n")}${runner}`, "info");
 }
 
-/** `/shift run`: start `shiftwork run` detached, log to a file and return at once. */
+/** Repo roots this pi is starting a runner in right now: a second `/shift run` mid-start is refused. */
+const startingRunners = new Set<string>();
+
+/**
+ * `/shift run`: start `shiftwork run` detached, log to a file and return at once.
+ * Refused while a runner is live or starting, and while a STOP file is there: it would
+ * end the new run at once, and it may be an operator's, so it is never removed here.
+ */
 async function startRunner(ctx: ExtensionContext, args: string[], watch: (ctx: ExtensionContext) => void) {
+	const key = resolve(ctx.cwd);
+	if (startingRunners.has(key)) {
+		ctx.ui.notify("Shiftwork: a runner is already starting", "warning");
+		return;
+	}
+	startingRunners.add(key);
+	try {
+		await startRunnerOnce(ctx, args, watch);
+	} finally {
+		startingRunners.delete(key);
+	}
+}
+
+async function startRunnerOnce(ctx: ExtensionContext, args: string[], watch: (ctx: ExtensionContext) => void) {
 	const runState = openRunState(ctx.cwd);
-	const state = await runState.read();
-	if (state?.live) {
+	const live = async () => {
+		const state = await runState.read();
+		if (!state?.live) return false;
 		ctx.ui.notify(`Shiftwork: a runner is already working (pid ${state.pid}) · ${describeRun(state)}`, "warning");
 		watch(ctx);
+		return true;
+	};
+	if (await live()) return;
+
+	if (existsSync(join(ctx.cwd, "STOP"))) {
+		ctx.ui.notify("Shiftwork: a STOP file is in the repo root (an earlier /shift stop, or an operator's): delete STOP to start a runner", "warning");
 		return;
 	}
 
@@ -137,19 +165,22 @@ async function startRunner(ctx: ExtensionContext, args: string[], watch: (ctx: E
 		return;
 	}
 
-	// A STOP file left by an earlier /shift stop would end the new run immediately.
-	const stopFile = join(ctx.cwd, "STOP");
-	const removedStop = existsSync(stopFile);
-	if (removedStop) rmSync(stopFile, { force: true });
-
 	const logFile = join(ctx.cwd, "logs", `runner-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
 	mkdirSync(join(ctx.cwd, "logs"), { recursive: true });
+	// Another process may have started one meanwhile: look again last thing before the spawn.
+	if (await live()) return;
 	const log = openSync(logFile, "a");
-	const child = spawn(process.execPath, [cli, "run", ...args], {
-		cwd: ctx.cwd,
-		detached: true,
-		stdio: ["ignore", log, log],
-	});
+	let child: ReturnType<typeof spawn>;
+	try {
+		child = spawn(process.execPath, [cli, "run", ...args], {
+			cwd: ctx.cwd,
+			detached: true,
+			stdio: ["ignore", log, log],
+		});
+	} finally {
+		// The child has its own copy of the descriptor; pi must not leak one per run.
+		closeSync(log);
+	}
 	child.unref();
 
 	// Claim the state right away so the widget is live before the runner's own first write.
@@ -164,8 +195,7 @@ async function startRunner(ctx: ExtensionContext, args: string[], watch: (ctx: E
 		logFile,
 	});
 	watch(ctx);
-	const removed = removedStop ? " · removed the STOP file" : "";
-	ctx.ui.notify(`Shiftwork: runner started (pid ${child.pid})${removed} · logs: ${logFile}`, "info");
+	ctx.ui.notify(`Shiftwork: runner started (pid ${child.pid}) · logs: ${logFile}`, "info");
 }
 
 /** `/shift stop`: the STOP file makes the runner finish the current shift and exit. */

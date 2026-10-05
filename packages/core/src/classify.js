@@ -105,17 +105,27 @@ function header(headers, name) {
 	return undefined;
 }
 
+/** Reset hints at or before now are no hint: the caller falls back to its default cooldown. */
 function parseReset(message, headers, nowMs) {
+	const at = rawReset(message, headers, nowMs);
+	return at && at.getTime() > nowMs ? at : undefined;
+}
+
+/** Below this, a numeric `x-ratelimit-reset` is seconds from now, not epoch seconds (2001-09-09). */
+const EPOCH_SECONDS_MIN = 1e9;
+
+function rawReset(message, headers, nowMs) {
 	const retryAfter = header(headers, "retry-after");
 	if (retryAfter != null) {
 		const parsed = parseRetryAfter(retryAfter, nowMs);
-		if (parsed) return parsed;
+		if (parsed && parsed.getTime() > nowMs) return parsed;
 	}
 	for (const name of ["x-ratelimit-reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]) {
 		const value = header(headers, name);
 		if (value == null) continue;
 		const n = Number(value);
 		if (Number.isFinite(n) && String(value).trim() !== "") {
+			if (n < EPOCH_SECONDS_MIN) return new Date(nowMs + n * 1000);
 			return new Date(n < 1e12 ? n * 1000 : n);
 		}
 		const date = Date.parse(value);
@@ -142,4 +152,28 @@ function parseRetryAfter(value, nowMs) {
 	const date = Date.parse(text);
 	if (!Number.isNaN(date)) return new Date(date);
 	return undefined;
+}
+
+const AUTH = pattern([
+	"no api key",
+	"api key (?:not found|not set|missing|is missing|required)",
+	"missing api key",
+	"invalid (?:x-)?api[ -_]?key",
+	"incorrect api key",
+	"authentication (?:failed|error|required)",
+	"\\bunauthori[sz]ed\\b",
+	"\\b401\\b",
+	"not logged in",
+	"please (?:run \\S+ )?log ?in",
+	"invalid credentials",
+]);
+
+/**
+ * An authentication or configuration error (no API key, a rejected key, not logged in):
+ * retrying that provider in this run cannot help. `kind` is the backend error event's own
+ * `kind`, when it says so (`"auth"`).
+ */
+export function isAuthError(message, kind) {
+	if (kind === "auth") return true;
+	return typeof message === "string" && AUTH.test(message);
 }

@@ -2,11 +2,12 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { orderFrontier } from "./index.js";
-import { classifyError, cooldownMs } from "./classify.js";
+import { classifyError, cooldownMs, isAuthError } from "./classify.js";
 import { openCooldowns } from "./cooldowns.js";
 import { applyProfileContext, createMeter } from "./meter.js";
 import { chooseHandoffMode, cooldownKey, liftedFor, parseModelRef, planShift, resolveTicketBudget } from "./planner.js";
-import { buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, REVIEW_WRAP_UP_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
+import { buildMergePrompt, buildReviewPrompt, buildShiftPrompt, REVIEWER_PROMPT, REVIEW_WRAP_UP_PROMPT, SOFT_LIMIT_STEER, STOP_STEER, WORKER_PROMPT } from "./prompt.js";
+import { matchesGlob } from "./glob.js";
 import { noRunState, openRunState } from "./run-state.js";
 
 const NEEDS_INFO = "needs-info";
@@ -18,6 +19,7 @@ const WAIT_STEP_MS = 60_000;
 /** Only the runner's own shift reports: "### Shift N — <backend> <model> (<thinking>)". */
 const SHIFT_REPORT = /^### Shift (\d+) — \S+ \S+ \([^)]*\)$/gm;
 const MARKER = /<shiftwork:needs-info\s+reason="([^"]*)"\s*\/>/;
+const RESEARCH_MARKER = /<shiftwork:needs-research\s+reason="([^"]*)"\s*\/>/;
 const REVIEW_MARKER = /<shiftwork:review\s+verdict="([^"]*)"\s+reason="([^"]*)"\s*\/>/g;
 const REVIEW_VERDICTS = new Set(["accept", "reopen", "follow-up"]);
 /** Review findings kept in the ticket; the full review text stays in the review log. */
@@ -46,9 +48,57 @@ function checkStop(root) {
 export function shouldReview(config, ticket) {
 	const review = config.review;
 	if (!review?.enabled) return false;
+	// A plan or research ticket's work is files under .scratch/, which git never commits: a
+	// reviewer would judge an empty diff. Its gate (`tickets check`, `test -s research.md`) is its check.
+	if (trackerOnly(ticket)) return false;
 	if (review.features?.length && !review.features.includes(ticket.feature)) return false;
 	if (review.types?.length && !review.types.includes(ticket.type)) return false;
 	return true;
+}
+
+/** A ticket's `**Dual:**` line: yes opts it in, no opts it out, whatever `dual.enabled` says. */
+const DUAL_YES = /^(?:yes|true|on)$/i;
+/** Shift labels with a worker entry of their own beside the ticket's: dual candidates (ADR-0007) and the review. */
+const DUAL_LABEL = /^(?:A|B|merge|review)$/;
+const DUAL_NO = /^(?:no|false|off)$/i;
+
+/** Whether a ticket gets dual shifts (ADR-0007): two worker shifts on two models in two
+ * worktrees, then a merge shift. The ticket's own `**Dual:** yes|no` line wins; otherwise
+ * `dual.enabled` with its `features` and `types` filters (the routed type). A plan or research
+ * ticket never does: its work is tracker files, with nothing to merge. Pure. */
+export function shouldDual(config, ticket) {
+	if (trackerOnly(ticket)) return false;
+	const own = String(ticket?.dual ?? "").trim();
+	if (DUAL_YES.test(own)) return true;
+	if (DUAL_NO.test(own)) return false;
+	const dual = config.dual;
+	if (!dual?.enabled) return false;
+	if (dual.features?.length && !dual.features.includes(ticket.feature)) return false;
+	if (ticket.type !== undefined && dual.types?.length && !dual.types.includes(ticket.type)) return false;
+	return true;
+}
+
+/** Ticket types whose whole work is tracker files (new tickets, research.md) under .scratch/. */
+const TRACKER_ONLY_TYPES = new Set(["plan", "research"]);
+const trackerOnly = (ticket) => TRACKER_ONLY_TYPES.has(ticket?.type);
+
+/** The frozen globs of a ticket: the config's list plus its own `**Frozen:**` line. A plan or
+ * research ticket has none: its work is tracker files, never what a gate measures. */
+function frozenOf(config, ticket) {
+	if (trackerOnly(ticket)) return [];
+	return [...new Set([...(config.frozen ?? []), ...(ticket.frozen ?? [])])];
+}
+
+/** The changed files of the ticket's branch that match a frozen glob; none without a worktree. */
+async function frozenChanges(workspace, ticket, globs) {
+	if (!globs.length || typeof workspace?.changedFiles !== "function") return [];
+	return (await workspace.changedFiles(ticket)).filter((file) => globs.some((glob) => matchesGlob(file, glob)));
+}
+
+/** Whether this worked ticket gets a review shift: by its own Type (a plan or research ticket
+ * never does, even when routing has no entry for it) and by the type it was routed as. */
+function reviewsTicket(config, ticket, route) {
+	return !trackerOnly(ticket) && shouldReview(config, { ...ticket, type: route.type });
 }
 
 /** Where the review shift runs: on the ticket's unlanded branch, before anything lands (the
@@ -59,13 +109,31 @@ export function reviewWhen(config) {
 }
 
 /**
- * Parse the `--ticket` value `<feature>/<NN>` into its feature and padded number.
- * Pure; throws on any other shape.
+ * Parse the `--ticket` value `<feature>/<NN>` into its feature and padded number. An OpenSpec
+ * task number (`<change>/1.2`) is taken as it is, unpadded. Pure; throws on any other shape.
  */
 export function parseTicketSpec(spec) {
-	const match = /^(.+)\/(\d+)$/.exec(String(spec ?? ""));
+	const match = /^(.+)\/(\d+(?:\.\d+)*)$/.exec(String(spec ?? ""));
 	if (!match) throw new Error(`ticket spec ${JSON.stringify(spec)} is not <feature>/<NN>`);
-	return { feature: match[1], number: String(Number(match[2])).padStart(2, "0") };
+	const number = match[2].includes(".") ? match[2] : String(Number(match[2])).padStart(2, "0");
+	return { feature: match[1], number };
+}
+
+/**
+ * The part of a ticket file that is this ticket's own: in a file shared by several tickets
+ * (OpenSpec's one .shiftwork.md per change, one `## N.M` section per task) the ticket's
+ * section, up to the next `## N.M` heading; any other file is the ticket's whole. Pure.
+ */
+export function ticketSection(text, ticket) {
+	const source = String(text ?? "");
+	const number = String(ticket?.number ?? "");
+	if (!/^\d+(?:\.\d+)*$/.test(number)) return source;
+	const escaped = number.replaceAll(".", "\\.");
+	const heading = new RegExp(`^## ${escaped}\\s*$`, "m").exec(source);
+	if (!heading) return source;
+	const rest = source.slice(heading.index + heading[0].length);
+	const next = /^## \d+(?:\.\d+)*\s*$/m.exec(rest);
+	return next ? rest.slice(0, next.index) : rest;
 }
 
 /**
@@ -137,6 +205,9 @@ export async function runFrontier({
 	// In-memory per-provider shift caps (`concurrency`): a serial run never fills one.
 	// Cross-process caps are out of scope; the lock file (ticket 02) covers shared state, not slots.
 	const slots = createProviderSlots(config.concurrency);
+	// Models whose provider failed authentication (no API key, a rejected key): skipped by
+	// every ticket for the rest of this run; never written to the cooldown store.
+	const authBlocked = [];
 	const parallel = options.parallel ?? config.parallel ?? 1;
 	const counts = () => ({ resolved: summary.resolved.length, needsInfo: summary.needsInfo.length, reopened: summary.reopened.length });
 	const recordOutcome = (ticket, outcome) => {
@@ -162,6 +233,7 @@ export async function runFrontier({
 				cooldowns: cooldownStore,
 				runState: state,
 				slots,
+				authBlocked,
 			});
 		} finally {
 			// The worker entry is gone once the shift settles: readers see only running shifts.
@@ -169,12 +241,23 @@ export async function runFrontier({
 		}
 	};
 	const frontierPage = async () => {
-		const page = (await tracker.frontier())
+		let tickets = await tracker.frontier();
+		// One tracker.list() per read, shared by the hold and the feature order below.
+		const needsList = options.holdOnNeedsInfo || currentFeature;
+		const listed = needsList ? await tracker.list() : [];
+		// Dark-factory only: a needs-info ticket holds its whole feature for this pass,
+		// so implementation waits until the next poll sees the answer. An ordinary
+		// `shiftwork run` leaves `holdOnNeedsInfo` unset and still works the siblings.
+		if (options.holdOnNeedsInfo) {
+			const held = new Set(listed.filter((t) => t.status === NEEDS_INFO).map((t) => t.feature));
+			tickets = tickets.filter((t) => !held.has(t.feature));
+		}
+		const page = tickets
 			.filter((t) => !seen.has(seenKey(t)) && (!options.feature || t.feature === options.feature))
 			.filter((t) => !chosen || (t.feature === chosen.feature && t.number === chosen.number));
 		// A fresh runner takes the tracker's order (a started feature first, then name);
 		// once it has worked a ticket, its feature is worked before any other.
-		return currentFeature ? orderFrontier(page, await tracker.list(), { current: currentFeature }) : page;
+		return currentFeature ? orderFrontier(page, listed, { current: currentFeature }) : page;
 	};
 
 	await state.update({
@@ -187,45 +270,52 @@ export async function runFrontier({
 		summary: { resolved: 0, needsInfo: 0, reopened: 0 },
 	});
 
-	// A resolved ticket whose last review never gave a verdict owes one: it is re-reviewed
-	// before any new work, every run, until a review gives it a verdict (`--ticket` names one
-	// frontier ticket and re-reviews nothing).
-	if (!chosen) await reviewUnfinishedReviews();
-
-	// `once` (and a chosen `ticket`) is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
 	// One worker failing is not the end of the run's bookkeeping: the pool lets the
-	// others settle, the run state is finished, and only then the error propagates.
+	// others settle, and whatever throws (a worker, a release, a re-review), the run state
+	// is finished below before the error propagates.
 	let failure = null;
-	if (parallel > 1 && !options.once && !chosen) failure = await runInPool();
-	else
-		for (;;) {
-			if (checkStop(root)) {
-				summary.stoppedReason = "STOP file";
-				break;
-			}
-			const frontier = await frontierPage();
-			if (frontier.length === 0) break;
-			const ticket = frontier[0];
-			seen.add(seenKey(ticket));
+	try {
+		// A resolved ticket whose last review never gave a verdict owes one: it is re-reviewed
+		// before any new work, every run, until a review gives it a verdict (`--ticket` names one
+		// frontier ticket and re-reviews nothing).
+		if (!chosen) await reviewUnfinishedReviews();
 
-			const claim = await tracker.claim(ticket);
-			if (!claim) continue;
-			currentFeature = ticket.feature;
-			let outcome;
-			try {
-				outcome = await workOne(ticket);
-			} finally {
-				await tracker.release(claim);
+		// `once` (and a chosen `ticket`) is one ticket however high `parallel` is: the serial loop keeps today's order exactly.
+		if (parallel > 1 && !options.once && !chosen) failure = await runInPool();
+		else
+			for (;;) {
+				if (checkStop(root)) {
+					summary.stoppedReason = "STOP file";
+					break;
+				}
+				const frontier = await frontierPage();
+				if (frontier.length === 0) break;
+				const ticket = frontier[0];
+				seen.add(seenKey(ticket));
+
+				const claim = await tracker.claim(ticket);
+				if (!claim) continue;
+				currentFeature = ticket.feature;
+				let outcome;
+				try {
+					outcome = await workOne(ticket);
+				} finally {
+					await tracker.release(claim);
+				}
+				if (outcome.action === "stop") {
+					summary.stoppedReason = outcome.reason;
+					break;
+				}
+				// A research rollback: the ticket comes back once its research ticket resolves, this run too.
+				if (outcome.action === "needs-research") seen.delete(seenKey(ticket));
+				recordOutcome(ticket, outcome);
+				await state.update({ summary: counts() });
+				// A chosen ticket is worked once however the run ends: the loop stops after it.
+				if (options.once || chosen) break;
 			}
-			if (outcome.action === "stop") {
-				summary.stoppedReason = outcome.reason;
-				break;
-			}
-			recordOutcome(ticket, outcome);
-			await state.update({ summary: counts() });
-			// A chosen ticket is worked once however the run ends: the loop stops after it.
-			if (options.once || chosen) break;
-		}
+	} catch (error) {
+		failure = error;
+	}
 
 	if (!summary.stoppedReason && checkStop(root)) {
 		summary.stoppedReason = "STOP file";
@@ -258,9 +348,13 @@ export async function runFrontier({
 				try {
 					outcome = await workOne(ticket, ws);
 				} catch (thrown) {
-						error = thrown;
-				} finally {
+					error = thrown;
+				}
+				// A release that throws is this worker's failure, never a rejected race below.
+				try {
 					await tracker.release(claim);
+				} catch (thrown) {
+					error ??= thrown;
 				}
 				return { worker, ticket, outcome, error };
 			})();
@@ -285,13 +379,15 @@ export async function runFrontier({
 			if (running.length === 0) break;
 			const done = await Promise.race(running);
 			running.splice(running.indexOf(done.worker), 1);
+			// A ticket worked to the end counts even when its release then threw.
+			if (done.outcome && done.outcome.action !== "stop") recordOutcome(done.ticket, done.outcome);
+			if (done.outcome?.action === "needs-research") seen.delete(seenKey(done.ticket));
 			if (done.error) {
 				// A failed worker ends the run, but only after the running shifts settle.
 				failure ??= done.error;
 				stopping = true;
 				continue;
 			}
-			recordOutcome(done.ticket, done.outcome);
 			await state.update({ summary: counts() });
 			if (done.outcome.action === "stop") {
 				summary.stoppedReason ??= done.outcome.reason;
@@ -331,7 +427,7 @@ export async function runFrontier({
 				summary.stoppedReason ??= "STOP file";
 				return;
 			}
-			const text = await readFile(t.path, "utf8");
+			const text = ticketSection(await readFile(t.path, "utf8"), t);
 			// Unfinished only on the last review section's own status line, with no verdict: a
 			// quoted not-finished line in findings is not a status line, so it never re-reviews.
 			if (!reviewUnfinished(text)) continue;
@@ -341,6 +437,7 @@ export async function runFrontier({
 			const beforeLand = t.status === READY;
 			const cwd = beforeLand ? (await workspace.prepare(t)).cwd : undefined;
 			const outcome = await runReviewShift({
+				runState: state,
 				root,
 				ticket: t,
 				tracker,
@@ -361,6 +458,7 @@ export async function runFrontier({
 					: { landed: lastLandedLine(text) }),
 				resumed: true,
 				slots,
+				authBlocked,
 			});
 			if (outcome.verdict === "skip" || outcome.verdict === "stopped") {
 				// No worker shift on a ticket that owes a verdict: the frontier skips it this run,
@@ -408,7 +506,7 @@ export async function runFrontier({
 				// the ticket is back on the frontier (runReviewShift put it there) and this same run
 				// fixes it forward. `none` hands the branch to a human, needs-info as ever.
 				if (outcome.verdict === "reopen") {
-					const reopens = countReopenVerdicts(await readFile(t.path, "utf8"));
+					const reopens = countReopenVerdicts(ticketSection(await readFile(t.path, "utf8"), t));
 					if (reopens >= (config.review?.maxRounds ?? 2)) {
 						const branch = (await workspace.keep(t)).branch;
 						await tracker.appendComment(t, `- Review rejected it ${reopens} times; branch ${branch} kept`);
@@ -536,9 +634,11 @@ function countReopenVerdicts(text) {
 	return (text.match(/^- Verdict: reopen\b/gm) ?? []).length;
 }
 
-async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState, slots }) {
-	let cwd = workspace ? (await workspace.prepare(ticket)).cwd : root;
-	const initialText = await readFile(ticket.path, "utf8");
+async function workTicket({ root, ticket, tracker, backend, verify, config, workspace, maxAttempts, log, classify, classifyTicket, clock, cooldowns, runState, slots, authBlocked = [] }) {
+	let cwd = root;
+	// Only this ticket's own section: OpenSpec tasks share one .shiftwork.md.
+	const sectionOf = (text) => ticketSection(text, ticket);
+	const initialText = sectionOf(await readFile(ticket.path, "utf8"));
 	const earlier = [...initialText.matchAll(SHIFT_REPORT)].map((m) => Number(m[1]));
 	// The last review of the ticket ended in reopen: the next shift's prompt points at its findings.
 	const reopenedByReview = /^- Verdict: reopen/m.test(initialText.slice(Math.max(0, initialText.lastIndexOf("### Review"))));
@@ -557,93 +657,153 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 	const blockedModels = [];
 	const ticketUsage = { maxTokens: 0, maxCostUsd: 0, maxTurns: 0, maxWallMin: 0 };
 	const maxHandoffs = config.maxHandoffs ?? 3;
+	// Provider-limit shifts in a row: past maxLimitRetries the ticket stops instead of looping.
+	const maxLimitRetries = config.maxLimitRetries ?? 10;
+	let limitRetries = 0;
 	const { classification, classificationNote } = await classifyUntyped(ticket, config, classifyTicket);
-	const historyOf = (extra = {}) => ({ previousRoute, exceededKind, ticketUsage, blockedModels, ...extra });
+	const historyOf = (extra = {}) => ({ previousRoute, exceededKind, ticketUsage, blockedModels: [...blockedModels, ...authBlocked], ...extra });
+
+	// Dual shifts (ADR-0007): a fresh ticket that asks for them is first worked by two candidates
+	// on two models in two worktrees, then merged. The outcome feeds the loop below: a resolved
+	// dual is its first round's shift (already reported), a failed one its next attempt.
+	// A ticket whose dual round ran in an earlier run (a reopen, a needs-info answered) still has
+	// its candidate branches: its `### Dual — A: …` block says so, and they go when it lands.
+	const dualCandidates = /^### Dual — A: /m.test(initialText) ? DUAL_LABELS.map((label) => ({ ...ticket, suffix: label.toLowerCase() })) : [];
+	let preset = null;
+	const dual =
+		earlier.length === 0 && !trackerOnly(ticket) && shouldDual(config, { ...ticket, type: undefined })
+			? await runDualShifts({ root, ticket, tracker, backend, verify, config, workspace, log, classify, clock, cooldowns, runState, slots, authBlocked, classification, classificationNote, ticketUsage, shiftNumber, attempt, maxAttempts, candidates: dualCandidates })
+			: { kind: "skip" };
+	shiftNumber += dual.shifts ?? 0;
+	if (dual.kind === "stop") {
+		await tracker.setStatus(ticket, READY);
+		return { action: "stop", reason: "STOP file" };
+	}
+	if (dual.kind === NEEDS_INFO) {
+		await tracker.setStatus(ticket, NEEDS_INFO);
+		return { action: NEEDS_INFO, reason: dual.reason };
+	}
+	if (dual.kind === "resolved") {
+		cwd = dual.cwd;
+		preset = dual;
+	} else if (dual.kind === "retry") {
+		cwd = dual.cwd;
+		lastVerifyFailure = dual.lastVerifyFailure;
+		attempt++;
+	} else if (workspace) cwd = (await workspace.prepare(ticket)).cwd;
+	// The dual candidates' branches stay until the ticket lands; then they go, like a landed branch.
+	const dropDualCandidates = async () => {
+		for (const candidate of dualCandidates.splice(0)) if (typeof workspace?.redo === "function") await workspace.redo(candidate);
+	};
 
 	for (;;) {
 		if (checkStop(root)) {
 			await tracker.setStatus(ticket, READY);
 			return { action: "stop", reason: "STOP file" };
 		}
-		const now = clock.now();
-		// Before every ticket, check every guessed cooldown; between its shifts, every probeEveryMin.
-		await probeCooldowns({ backend, cooldowns, config, now, force: firstPlan && config.probeBeforeTicket !== false, log: (event) => log({ ticket, attempt, event }) });
-		firstPlan = false;
-		// A provider at its concurrency cap is skipped like a cooling one, but no cooldown is written.
-		const plan = planShift({
-			ticket,
-			config,
-			classification,
-			history: historyOf(),
-			cooldowns: await cooldowns.active(now),
-			now,
-			fullProviders: slots ? slots.fullProviders() : [],
-		});
-		if (plan.wait) {
-			const ms = Math.max(0, new Date(plan.wait).getTime() - now.getTime());
-			log({ ticket, event: { type: "wait", until: plan.wait, ms } });
-			// Wake at least once a minute so a STOP file is noticed during long cooldowns.
-			await clock.sleep(Math.min(ms, WAIT_STEP_MS));
-			continue;
-		}
-		if (plan.stop) {
-			const notes = [];
-			if (workspace) notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
-			notes.push(`- Stopped: ${plan.stop}`);
-			await tracker.appendComment(ticket, notes.join("\n"));
-			await tracker.setStatus(ticket, NEEDS_INFO);
-			return { action: NEEDS_INFO, reason: plan.stop };
-		}
-		const route = plan;
-		// Take this shift's provider slot right after planning it: plan and acquire are
-		// one synchronous block, so two workers can never take the last slot together.
-		const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
-		if (slots && !releaseSlot) {
-			// Planned before another worker took the last slot: re-plan shortly.
-			log({ ticket, event: { type: "wait", provider: route.provider, ms: WAIT_STEP_MS } });
-			await clock.sleep(WAIT_STEP_MS);
-			continue;
-		}
-		const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root, reopenedByReview });
-		const softLimitPct = config.softLimitPct ?? 80;
-		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
-		const publish = await publishShift(runState ?? noRunState(), { ticket, attempt, shift: shiftNumber, route });
+		// A resolved dual is this round's shift: no planning, no new shift, its gate already run.
+		const fromDual = preset;
+		preset = null;
+		let route;
 		let shift;
-		try {
-			shift = await runShift(
-				backend,
-				{
-					root,
-					cwd,
-					route,
-					prompt,
-					systemPrompt: config.workerPrompt ?? WORKER_PROMPT,
-					softLimitPct,
-					getDiffStat,
-					ticketPath: ticket.path,
-					maxHandoffs,
-					allowInPlace: Boolean(config.allowInPlace),
-					// Planned while this shift holds its own slot, so a same-provider in-place
-					// swap can look busy at a cap of 1; that only skips to another provider.
-					planHandoff: (kind, fromRoute) =>
-						planShift({
-							ticket,
-							config,
-							classification,
-							history: historyOf({ previousRoute: fromRoute, exceededKind: kind }),
-							fullProviders: slots ? slots.fullProviders() : [],
-						}),
-				},
-				(event) => {
-					log({ ticket, attempt, event });
-					publish(event);
-				},
-			);
-		} finally {
-			releaseSlot?.();
-		}
+		const getDiffStat = workspace ? () => workspace.diffStat(ticket) : undefined;
+		if (fromDual) {
+			route = fromDual.route;
+			shift = fromDual.shift;
+		} else {
+			const now = clock.now();
+			// Before every ticket, check every guessed cooldown; between its shifts, every probeEveryMin.
+			await probeCooldowns({ backend, cooldowns, config, now, force: firstPlan && config.probeBeforeTicket !== false, log: (event) => log({ ticket, attempt, event }) });
+			firstPlan = false;
+			const activeCooldowns = await cooldowns.active(now);
+			// A provider at its concurrency cap is skipped like a cooling one, but no cooldown is written.
+			const plan = planShift({
+				ticket,
+				config,
+				classification,
+				history: historyOf(),
+				cooldowns: activeCooldowns,
+				now,
+				fullProviders: slots ? slots.fullProviders() : [],
+			});
+			if (plan.wait) {
+				const ms = Math.max(0, new Date(plan.wait).getTime() - now.getTime());
+				log({ ticket, event: { type: "wait", until: plan.wait, ms } });
+				// Wake at least once a minute so a STOP file is noticed during long cooldowns.
+				await clock.sleep(Math.min(ms, WAIT_STEP_MS));
+				continue;
+			}
+			if (plan.stop) {
+				const notes = [];
+				if (workspace) notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+				notes.push(`- Stopped: ${plan.stop}`);
+				await tracker.appendComment(ticket, notes.join("\n"));
+				await tracker.setStatus(ticket, NEEDS_INFO);
+				return { action: NEEDS_INFO, reason: plan.stop };
+			}
+			route = plan;
+			// The ticket budget is a total across every shift: once the earlier shifts used it up
+			// (on a limit this route doesn't lift), no shift starts — a retry, a handoff or a limit retry alike.
+			const remaining = remainingTicketBudget(ticket, config, ticketUsage, route);
+			if (remaining.exhausted) {
+				const notes = [];
+				if (workspace) notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+				notes.push(`- Stopped: ticket budget exhausted (${remaining.reason})`);
+				await tracker.appendComment(ticket, notes.join("\n"));
+				await tracker.setStatus(ticket, NEEDS_INFO);
+				return { action: NEEDS_INFO, reason: `ticket budget exhausted: ${remaining.reason}` };
+			}
+			// Take this shift's provider slot right after planning it: plan and acquire are
+			// one synchronous block, so two workers can never take the last slot together.
+			const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
+			if (slots && !releaseSlot) {
+				// Planned before another worker took the last slot: re-plan shortly.
+				log({ ticket, event: { type: "wait", provider: route.provider, ms: WAIT_STEP_MS } });
+				await clock.sleep(WAIT_STEP_MS);
+				continue;
+			}
+			const prompt = buildShiftPrompt(ticket, { root, attempt, absolute: cwd !== root, reopenedByReview, frozen: frozenOf(config, ticket) });
+			const softLimitPct = config.softLimitPct ?? 80;
+			const publish = await publishShift(runState ?? noRunState(), { ticket, attempt, shift: shiftNumber, route });
+			try {
+				shift = await runShift(
+					backend,
+					{
+						root,
+						cwd,
+						route,
+						prompt,
+						systemPrompt: config.workerPrompt ?? WORKER_PROMPT,
+						softLimitPct,
+						getDiffStat,
+						ticketPath: ticket.path,
+						maxHandoffs,
+						allowInPlace: Boolean(config.allowInPlace),
+						// Planned while this shift holds its own slot, so a same-provider in-place
+						// swap can look busy at a cap of 1; that only skips to another provider.
+						planHandoff: (kind, fromRoute) =>
+							planShift({
+								ticket,
+								config,
+								classification,
+								history: historyOf({ previousRoute: fromRoute, exceededKind: kind }),
+								cooldowns: activeCooldowns,
+								now: clock.now(),
+								fullProviders: slots ? slots.fullProviders() : [],
+							}),
+					},
+					(event) => {
+						log({ ticket, attempt, event });
+						publish(event);
+					},
+					{ sectionOf },
+				);
+			} finally {
+				releaseSlot?.();
+			}
 
-		accumulateUsage(ticketUsage, shift);
+			accumulateUsage(ticketUsage, shift);
+		}
 
 		if (shift.handoff?.kind === "stop") {
 			const notes = [];
@@ -679,19 +839,70 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: "stop", reason: "STOP file" };
 		}
 
+		// A research rollback (`<shiftwork:needs-research/>`): what is missing is reading, not a human's
+		// answer. A research ticket is filed in the feature and blocks this one, which stays ready, its
+		// branch kept: the frontier works the research first. Not a failed attempt. Once per ticket — a
+		// second one, or a tracker that cannot file tickets (OpenSpec), asks a human instead.
+		if (shift.needsInfo === null && shift.needsResearch !== null && shift.needsResearch !== undefined) {
+			const reason = shift.needsResearch || "the agent asked for research";
+			const rolledBack = /^- Outcome: needs-research: /m.test(sectionOf(await readFile(ticket.path, "utf8")));
+			if (rolledBack || typeof tracker.createTicket !== "function" || typeof tracker.addBlocker !== "function") shift.needsInfo = reason;
+			else {
+				const research = await fileResearchTicket(tracker, ticket, { reason });
+				await tracker.addBlocker(ticket, research.number);
+				const notes = workspace ? [`- Branch kept: ${(await workspace.keep(ticket)).branch}`] : [];
+				const decision = { action: "needs-research", reason: `${reason} → ${ticket.feature}/${research.number}` };
+				await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult: null, decision, classificationNote, ticketUsage }), ...notes].join("\n"));
+				await tracker.setStatus(ticket, READY);
+				return { action: "needs-research", reason, research };
+			}
+		}
+
+		// No API key, a rejected key, not logged in: retrying that provider cannot help this run.
+		// Its models are skipped by every ticket for the rest of the run, and no attempt is counted.
+		// A backend that reports itself unavailable (a missing CLI, not logged in) cools as before.
+		if (shift.error && shift.needsInfo === null && !isBackendUnavailable(shift.error, route) && isAuthError(shift.error, shift.errorKind)) {
+			for (const ref of modelsOfProvider(config, route, ticket)) if (!authBlocked.includes(ref)) authBlocked.push(ref);
+			await tracker.appendComment(
+				ticket,
+				[
+					shiftReport({ number: shiftNumber, route, shift, verifyResult: null, decision: { action: "retry", reason: "auth error" }, classificationNote, ticketUsage }),
+					`- Auth error: ${route.provider} — ${shift.error}; its models are skipped for this run, continuing without counting an attempt`,
+				].join("\n"),
+			);
+			shiftNumber++;
+			continue;
+		}
+
 		let limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
 		if (!limit && shift.error && isBackendUnavailable(shift.error, route)) {
 			limit = { kind: "usage" };
 		}
 		// Free models cool on their own; everything else cools its whole provider.
 		const provider = route.model && String(route.model).endsWith(":free") ? cooldownKey(route.model) : route.provider;
-		const until = limit ? (limit.resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
-		if (limit) await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(limit.resetAt) });
+		// A reset time at or before now is no reset time: the provider would be free again at
+		// once and the same model rerun in a hot loop. The kind's default cooldown applies instead.
+		const resetAt = limit?.resetAt && new Date(limit.resetAt).getTime() > clock.now().getTime() ? limit.resetAt : undefined;
+		const until = limit ? (resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind))) : undefined;
+		if (limit) await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(resetAt) });
 		// The limit may have hit after the work was done: if the gate passes, the ticket is resolved.
 		// With nothing changed, nobody worked the ticket yet: hand it on instead of judging the gate.
 		const workedBeforeLimit = limit && (!workspace?.hasChanges || (await workspace.hasChanges(ticket)));
-		const limitGate = workedBeforeLimit && ticket.verify.length > 0 && shift.needsInfo === null ? await verify(ticket.verify, cwd) : null;
-		if (limit && !limitGate?.ok) {
+		// A plan or research ticket's gate checks tracker files (`tickets check`, `test -s …/research.md`):
+		// the tracker's copy in the repo, never the worktree's stale copy of .scratch/.
+		const gateCwd = trackerOnly(ticket) ? root : cwd;
+		const limitGate = workedBeforeLimit && ticket.verify.length > 0 && shift.needsInfo === null ? await verify(ticket.verify, gateCwd) : null;
+		// The agent's needs-info wins over a provider limit in the same shift: its question is asked.
+		if (limit && !limitGate?.ok && shift.needsInfo === null) {
+			limitRetries++;
+			const capped = limitRetries >= maxLimitRetries;
+			const reason = `provider limits hit ${limitRetries} times in a row (maxLimitRetries ${maxLimitRetries})`;
+			const notes = [
+				`- Provider limit: ${limit.kind} on ${provider}, cooling until ${until instanceof Date ? until.toISOString() : until}; ${
+					capped ? "no more limit retries" : "continuing without counting an attempt"
+				}`,
+			];
+			if (capped && workspace) notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
 			await tracker.appendComment(
 				ticket,
 				[
@@ -700,20 +911,25 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 						route,
 						shift,
 						verifyResult: null,
-						decision: { action: "retry", reason: `provider ${limit.kind} limit` },
+						decision: capped ? { action: NEEDS_INFO, reason } : { action: "retry", reason: `provider ${limit.kind} limit` },
 						classificationNote,
 						ticketUsage,
 					}),
-					`- Provider limit: ${limit.kind} on ${provider}, cooling until ${until instanceof Date ? until.toISOString() : until}; continuing without counting an attempt`,
+					...notes,
 				].join("\n"),
 			);
 			shiftNumber++;
+			if (capped) {
+				await tracker.setStatus(ticket, NEEDS_INFO);
+				return { action: NEEDS_INFO, reason };
+			}
 			continue;
 		}
+		limitRetries = 0;
 
 		const hasVerify = ticket.verify.length > 0;
 		// A handed-off shift may already have finished the work: the gate decides either way.
-		const verifyResult = limitGate ?? (shift.needsInfo === null && hasVerify ? await verify(ticket.verify, cwd) : null);
+		const verifyResult = fromDual ? fromDual.verifyResult : (limitGate ?? (shift.needsInfo === null && hasVerify ? await verify(ticket.verify, gateCwd) : null));
 		let decision = decideNext({
 			attempt,
 			maxAttempts,
@@ -725,6 +941,16 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		const notes = [];
 		const inPlaceHandoffs = shift.handoffs ?? [];
 		let freshHandoff = shift.handoff && !shift.handoff.inPlace ? shift.handoff : null;
+		// Frozen paths: a gate that passes on a branch that changed what it measures proves nothing.
+		// The attempt fails like a failed gate (maxAttempts still ends it), the files named.
+		const frozenHit = decision.action === "resolve" ? await frozenChanges(workspace, ticket, frozenOf(config, ticket)) : [];
+		if (frozenHit.length) {
+			notes.push(`- Frozen paths changed: ${frozenHit.join(", ")}`);
+			freshHandoff = null;
+			decision =
+				attempt >= maxAttempts ? { action: NEEDS_INFO, reason: `frozen paths changed: ${frozenHit.join(", ")}` } : { action: "retry" };
+			if (decision.action === NEEDS_INFO) notes.push(`- Branch kept: ${(await workspace.keep(ticket)).branch}`);
+		}
 		if (
 			!freshHandoff &&
 			verifyResult &&
@@ -736,7 +962,10 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		}
 		// A gate that passes with nothing changed doesn't test the ticket. If a budget cut the
 		// shift short, nobody has worked the ticket yet: hand it on instead of giving up.
-		const unchanged = decision.action === "resolve" && workspace?.hasChanges ? !(await workspace.hasChanges(ticket)) : false;
+		// A plan or research ticket's work is new files under .scratch, which git excludes, so a
+		// passing gate is the ticket done even when the product tree is untouched.
+		const unchanged =
+			!trackerOnly(ticket) && decision.action === "resolve" && workspace?.hasChanges ? !(await workspace.hasChanges(ticket)) : false;
 		if (unchanged && freshHandoff) decision = { action: "retry" };
 		let nextRoute = undefined;
 		handoffCount += inPlaceHandoffs.length;
@@ -761,7 +990,19 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			handoffCount++;
 			rememberBlocked(blockedModels, route, freshHandoff.kind);
 			const handoffHistory = historyOf({ previousRoute: route, exceededKind: freshHandoff.kind });
-			nextRoute = { ...planShift({ ticket, config, classification, history: handoffHistory }), backend: backend.name };
+			// Planned with the same inputs as the next shift's real plan, so the note names the
+			// model that runs next — never a cooling or full one. A wait or a stop names none.
+			const handoffNow = clock.now();
+			const planned = planShift({
+				ticket,
+				config,
+				classification,
+				history: handoffHistory,
+				cooldowns: await cooldowns.active(handoffNow),
+				now: handoffNow,
+				fullProviders: slots ? slots.fullProviders() : [],
+			});
+			nextRoute = planned.model ? { ...planned, backend: backend.name } : undefined;
 			if (!freshHandoff.agentNote) {
 				const handoffNote = await buildHandoffNote({
 					shiftNumber,
@@ -786,12 +1027,14 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 		let redoNext = false;
 		// Before-land: the review shift judges the unlanded branch in its worktree first (in the
 		// resolve branch below); the landing, and its notes, happen only after the review accepts.
-		const beforeLand =
-			workspace && decision.action === "resolve" && reviewWhen(config) === "before-land" && shouldReview(config, { ...ticket, type: route.type });
+		const reviewed = reviewsTicket(config, ticket, route);
+		const beforeLand = workspace && decision.action === "resolve" && reviewWhen(config) === "before-land" && reviewed;
 		if (!beforeLand && workspace && decision.action === "resolve") {
 			const landing = await landResolvedBranch({ ticket, workspace, verify, config, cwd, notes, conflictRedone });
-			if (landing.outcome === "landed") landedMessage = landing.message;
-			else if (landing.outcome === "redo") {
+			if (landing.outcome === "landed") {
+				landedMessage = landing.message;
+				await dropDualCandidates();
+			} else if (landing.outcome === "redo") {
 				conflictRedone = true;
 				redoNext = true;
 				// The report says what happens next: this shift's work is redone, not resolved.
@@ -804,8 +1047,11 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 
 		// Before-land, a passed gate is not resolved yet: the review decides whether the branch lands.
 		const reported = beforeLand && decision.action === "resolve" ? { ...decision, reviewNext: true } : decision;
-		await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision: reported, classificationNote, ticketUsage }), ...notes].join("\n"));
-		shiftNumber++;
+		// A dual round's shifts are reported already (candidates, merge, the `### Dual` block): only its notes follow.
+		if (!fromDual) {
+			await tracker.appendComment(ticket, [shiftReport({ number: shiftNumber, route, shift, verifyResult, decision: reported, classificationNote, ticketUsage }), ...notes].join("\n"));
+			shiftNumber++;
+		} else if (notes.length) await tracker.appendComment(ticket, notes.join("\n"));
 
 		if (redoNext) {
 			// The landing conflicted with a parallel one (noted above): one more shift, in a fresh
@@ -825,6 +1071,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 				// first (the landing's own commit), or that range is empty.
 				if (typeof workspace.commit === "function") await workspace.commit(ticket);
 				review = await runReviewShift({
+					runState,
 					root,
 					ticket,
 					tracker,
@@ -838,13 +1085,14 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					cwd,
 					target: typeof workspace.target === "function" ? await workspace.target(ticket) : undefined,
 					slots,
+					authBlocked,
 					// A follow-up is filed only once the branch has landed: not for work that never lands.
 					deferFollowUp: true,
 				});
 				if (review.verdict === "reopen") {
 					// Reopen rounds are bounded: after review.maxRounds reopens on one ticket a human
 					// takes over — nothing has landed, the branch and its worktree are kept.
-					const reopens = countReopenVerdicts(await readFile(ticket.path, "utf8"));
+					const reopens = countReopenVerdicts(ticketSection(await readFile(ticket.path, "utf8"), ticket));
 					if (reopens >= (config.review?.maxRounds ?? 2)) {
 						const branch = (await workspace.keep(ticket)).branch;
 						await tracker.appendComment(ticket, `- Review rejected it ${reopens} times; branch ${branch} kept`);
@@ -866,7 +1114,15 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					await tracker.setStatus(ticket, READY);
 					return { action: "stop", reason: "STOP file" };
 				}
-				// accept, follow-up (filed below, once landed) or skip (no reviewer free): land.
+				// No reviewer free is no silent accept either: nothing lands, the branch stays in its
+				// worktree, and the ticket goes back to the frontier owing the review — the next run's
+				// reviewUnfinishedReviews resumes it there before any worker shift.
+				if (review.verdict === "skip") {
+					await tracker.appendComment(ticket, "- Review: not finished (no reviewer free this run)");
+					await tracker.setStatus(ticket, READY);
+					return { action: "deferred", reason: `review not run: ${review.reason}`, review };
+				}
+				// accept or follow-up (filed below, once landed): land.
 				const landingNotes = [];
 				// What the review round left in the worktree (reviewer edits, verify strays) is
 				// discarded first, so the landing commits only the work the review saw; the
@@ -886,6 +1142,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					continue;
 				}
 				if (landing.outcome === "landed") {
+					await dropDualCandidates();
 					if (review.verdict === "follow-up") {
 						review.followUp = await createFollowUp(tracker, ticket, { root, type: route.type, reason: review.reason, verify: ticket.verify });
 						landingNotes.push(followUpLine(review.followUp));
@@ -904,8 +1161,9 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			const reason = landedMessage ?? (notes.length ? notes[notes.length - 1].replace(/^- Landed: /, "") : "verify passed");
 			// After a landing (or without a workspace, before-land included), one review shift in
 			// a fresh context judges the work (stories 4–6).
-			if (!beforeLand && shouldReview(config, { ...ticket, type: route.type })) {
+			if (!beforeLand && reviewed) {
 				review = await runReviewShift({
+					runState,
 					root,
 					ticket,
 					tracker,
@@ -918,6 +1176,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 					type: route.type,
 					landed: landedMessage,
 					slots,
+					authBlocked,
 				});
 				if (review.verdict === "reopen") return { action: "reopen", reason: review.reason, review };
 				// No verdict twice is no silent accept: the ticket goes to needs-info, the landed commit stays.
@@ -934,7 +1193,7 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			previousRoute = route;
 			exceededKind = freshHandoff.kind;
 			if (freshHandoff.kind === "verifyFailed" && verifyResult && !verifyResult.ok) {
-				lastVerifyFailure = verifyResult.results.find((r) => r.code !== 0) ?? null;
+				lastVerifyFailure = verifyResult.results?.find((r) => r.code !== 0) ?? null;
 				attempt++;
 			}
 			// Before starting the next shift, make sure the ticket budget isn't exhausted —
@@ -948,8 +1207,8 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			continue;
 		}
 
-		if (verifyResult && !verifyResult.ok) {
-			lastVerifyFailure = verifyResult.results.find((r) => r.code !== 0) ?? null;
+		if ((verifyResult && !verifyResult.ok) || frozenHit.length) {
+			lastVerifyFailure = verifyResult?.ok ? null : (verifyResult.results?.find((r) => r.code !== 0) ?? null);
 			attempt++;
 			previousRoute = undefined;
 			exceededKind = undefined;
@@ -960,6 +1219,302 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
 			return { action: "stop", reason: "STOP file" };
 		}
 	}
+}
+
+const DUAL_LABELS = ["A", "B"];
+
+/**
+ * The dual phase of a fresh ticket (ADR-0007): two candidate shifts on two models (different
+ * providers when the config allows), each in its own worktree on `shiftwork/<feature>-<NN>-a|b`,
+ * at the same time as far as the provider slots allow, each through its own Verify gate. Both
+ * pass: a merge shift on `dual.mergeTier` (the review tier by default) combines them in the
+ * ticket's own worktree, started from A's branch; a merge that fails its gate is dropped and A
+ * taken. One passes: it is taken without a merge. Neither: the next attempt is an ordinary single
+ * shift from the target. The ticket's own branch then goes through the usual review and landing.
+ * Every shift here is reported (candidates, merge) with a `### Dual` summary; `shifts` is how
+ * many. Returns `kind`: "skip" (not dual after all), "single" (dual impossible, warned),
+ * "resolved" (`cwd`, `route`, `shift`, `verifyResult` of the ticket's branch), "retry" (`cwd`,
+ * `lastVerifyFailure`), "stop" or NEEDS_INFO (`reason`). Candidates go into `candidates`.
+ */
+async function runDualShifts(ctx) {
+	const { root, ticket, tracker, config, workspace, clock, cooldowns, classification, ticketUsage, authBlocked, attempt, maxAttempts, candidates } = ctx;
+	const single = async (why) => {
+		await tracker.appendComment(ticket, `### Dual\n- Warning: ${why}; worked as a single shift`);
+		return { kind: "single" };
+	};
+	const now = clock.now();
+	const routes = planDualRoutes({ ticket, config, classification, ticketUsage, authBlocked, cooldowns: await cooldowns.active(now), now });
+	// No first route (every model cooling, or none): the ordinary loop waits or stops as ever.
+	if (!routes) return { kind: "skip" };
+	// The `types` filter needs the routed type, known only now.
+	if (!shouldDual(config, { ...ticket, type: routes[0].type })) return { kind: "skip" };
+	if (!ticket.verify.length) return single("dual shifts need Verify commands to compare the candidates");
+	if (!workspace || typeof workspace.diff !== "function") return single("dual shifts need worktrees (worktree.enabled is false or --no-worktree)");
+	if (routes.length < 2) return single(`no second model to run beside ${routes[0].ref ?? routes[0].model}`);
+	const remaining = remainingTicketBudget(ticket, config, ticketUsage, routes[0]);
+	if (remaining.exhausted) return { kind: "skip" };
+
+	const results = await Promise.all(
+		routes.map((route, i) => runDualCandidate({ ...ctx, route, label: DUAL_LABELS[i], candidate: { ...ticket, suffix: DUAL_LABELS[i].toLowerCase() } })),
+	);
+	for (const r of results) if (!candidates.some((c) => c.suffix === r.candidate.suffix)) candidates.push(r.candidate);
+	let number = ctx.shiftNumber;
+	const reports = [];
+	for (const r of results) {
+		if (!r.shift) continue;
+		accumulateUsage(ticketUsage, r.shift);
+		reports.push(
+			shiftReport({
+				number: number++,
+				route: r.route,
+				shift: r.shift,
+				verifyResult: r.verifyResult,
+				decision: { action: "dual", reason: `dual candidate ${r.label} on ${r.branch}${r.verifyResult?.ok && !r.changed ? " (gate passed with nothing changed)" : ""}` },
+				classificationNote: ctx.classificationNote,
+				ticketUsage,
+			}),
+		);
+	}
+	if (reports.length) await tracker.appendComment(ticket, reports.join("\n"));
+	const branches = results.map((r) => r.branch).join(", ");
+	const summary = (merge, notes = []) => tracker.appendComment(ticket, [dualHeading(results, merge), ...notes].join("\n"));
+	const shifts = () => number - ctx.shiftNumber;
+
+	if (results.some((r) => r.stopped)) {
+		await summary("stopped", [`- Candidates kept: ${branches}`]);
+		return { kind: "stop", shifts: shifts() };
+	}
+	const passed = results.filter((r) => r.passed);
+	if (passed.length === 0) {
+		// Needs-info only when both candidates asked; one question beside a failed gate is a failed attempt.
+		const asked = results.every((r) => r.shift?.needsInfo != null) ? results[0].shift.needsInfo : null;
+		const failed = results.map((r) => r.verifyResult?.results?.find((x) => x.code !== 0)).find(Boolean) ?? null;
+		const decision = decideNext({ attempt, maxAttempts, needsInfo: asked, hasVerify: true, verifyOk: false });
+		if (decision.action !== "retry") {
+			for (const r of results) await workspace.keep(r.candidate);
+			await summary("skipped — neither passed its gate", [`- Candidates kept: ${branches}`]);
+			return { kind: NEEDS_INFO, reason: decision.reason, shifts: shifts() };
+		}
+		await summary("skipped — neither passed its gate", [`- Candidates kept: ${branches} (until the ticket lands); the next attempt starts from the target`]);
+		return { kind: "retry", cwd: (await workspace.prepare(ticket)).cwd, lastVerifyFailure: failed, shifts: shifts() };
+	}
+
+	// The better-verified candidate: the one that passed, or A when both did.
+	const best = passed[0];
+	const take = async (merge) => {
+		await summary(merge, [`- Candidates kept: ${branches} (until the ticket lands)`]);
+		const { cwd } = await workspace.prepare(ticket, { from: best.branch });
+		return { kind: "resolved", cwd, route: best.route, shift: settled(best.shift), verifyResult: best.verifyResult, shifts: shifts() };
+	};
+	if (passed.length === 1) return take(`skipped — only ${best.label} passed its gate`);
+
+	// Both passed: one merge shift, in a fresh context, in the ticket's own worktree from A's branch.
+	const mergeRoute = planMergeRoute({ ticket, config, classification, ticketUsage, authBlocked, cooldowns: await cooldowns.active(clock.now()), now: clock.now(), routeA: routes[0] });
+	if (!mergeRoute) return take(`skipped — no ${mergeTierOf(config, routes[0])} model free; took ${best.label}`);
+	const left = remainingTicketBudget(ticket, config, ticketUsage, mergeRoute);
+	if (left.exhausted) return take(`skipped — ticket budget exhausted (${left.reason}); took ${best.label}`);
+	const target = typeof workspace.target === "function" ? await workspace.target(ticket) : undefined;
+	const stats = await Promise.all(results.map((r) => workspace.diff(r.candidate).catch(() => ({}))));
+	const { cwd } = await workspace.prepare(ticket, { from: best.branch });
+	const merge = await runDualShift({
+		...ctx,
+		route: mergeRoute,
+		cwd,
+		prompt: buildMergePrompt(ticket, {
+			root,
+			target,
+			base: best.label,
+			candidates: results.map((r, i) => ({ label: r.label, model: r.route.ref ?? r.route.model, branch: r.branch, verify: verifyLine(r.verifyResult), stat: stats[i]?.stat })),
+		}),
+		getDiffStat: () => workspace.diffStat(ticket),
+		logAs: "merge",
+	});
+	accumulateUsage(ticketUsage, merge.shift);
+	const stopped = merge.shift.handoff?.kind === "stop";
+	const mergeGate = !stopped && merge.shift.needsInfo === null ? await ctx.verify(ticket.verify, cwd) : null;
+	await tracker.appendComment(
+		ticket,
+		shiftReport({ number: number++, route: mergeRoute, shift: merge.shift, verifyResult: mergeGate, decision: { action: "dual", reason: `dual merge of ${results.map((r) => r.label).join(" and ")} from ${best.branch}` }, classificationNote: ctx.classificationNote, ticketUsage }),
+	);
+	const mergeName = `${mergeRoute.backend} ${mergeRoute.model} (${mergeRoute.thinking})`;
+	if (stopped) {
+		await summary(`${mergeName}, stopped`, [`- Candidates kept: ${branches}`]);
+		return { kind: "stop", shifts: shifts() };
+	}
+	if (mergeGate?.ok) {
+		await summary(`${mergeName}, merged (verify passed)`, [`- Candidates kept: ${branches} (until the ticket lands)`]);
+		return { kind: "resolved", cwd, route: { ...mergeRoute, type: routes[0].type, typeSource: routes[0].typeSource }, shift: settled(merge.shift), verifyResult: mergeGate, shifts: shifts() };
+	}
+	// The merge did not hold: its work is dropped, and the ticket's branch starts again from A's.
+	const why = merge.shift.needsInfo !== null ? `asked for information (${merge.shift.needsInfo})` : merge.shift.error ? `failed (${merge.shift.error})` : verifyLine(mergeGate);
+	if (typeof workspace.redo === "function") await workspace.redo(ticket);
+	return take(`${mergeName}, ${why}; took ${best.label}`);
+}
+
+/** A dual shift settled by the dual phase: no handoff, error or question left for the loop to act on. */
+function settled(shift) {
+	return { ...shift, handoff: null, handoffs: [], error: null, needsInfo: null, needsResearch: null };
+}
+
+/** "verify passed", or where the gate failed. */
+function verifyLine(result) {
+	if (result?.ok) return "verify passed";
+	if (!result) return "verify not run";
+	const failed = result.results?.find((r) => r.code !== 0);
+	return failed ? `verify failed at \`${failed.cmd}\` (exit ${failed.code})` : "verify failed";
+}
+
+/** `### Dual — A: <route>, <verify>; B: <route>, <verify>; merge: <outcome>`. */
+function dualHeading(results, merge) {
+	const parts = results.map((r) => {
+		const gate = r.verifyResult?.ok && !r.changed ? "verify passed with nothing changed" : r.shift?.needsInfo != null ? `needs-info: ${r.shift.needsInfo}` : verifyLine(r.verifyResult);
+		return `${r.label}: ${r.route.backend} ${r.route.model} (${r.route.thinking}), ${gate}`;
+	});
+	return `### Dual — ${parts.join("; ")}; merge: ${merge}`;
+}
+
+/** The merge shift's tier: `dual.mergeTier`, else the review tier, else candidate A's. */
+function mergeTierOf(config, routeA) {
+	return config.dual?.mergeTier ?? (config.review?.enabled !== false ? config.review?.tier : undefined) ?? routeA.tier;
+}
+
+/** A config whose every route goes to `tier`: the ticket keeps its routed type, the tier is forced. */
+function onTier(config, tier) {
+	const routing = Object.fromEntries(Object.entries(config.routing ?? {}).map(([type, r]) => [type, { ...r, tier, model: undefined }]));
+	return { ...config, routing, defaultTier: tier };
+}
+
+/**
+ * The two candidates' routes, or null when the first cannot be planned (every model cooling or
+ * none: the ordinary loop waits or stops). `dual.models` pins both; `dual.tiers` routes each on its
+ * tier; otherwise A is the ticket's ordinary route and B the next one on another provider — on the
+ * same provider only when no other has a model. A one-route array: there is no second model.
+ */
+function planDualRoutes({ ticket, config, classification, ticketUsage, authBlocked, cooldowns, now }) {
+	const plan = (over, blocked = []) => {
+		try {
+			const route = planShift({
+				ticket: over.ticket ?? ticket,
+				config: over.config ?? config,
+				classification,
+				history: { ticketUsage, blockedModels: [...authBlocked, ...blocked] },
+				cooldowns,
+				now,
+			});
+			return route.model ? route : null;
+		} catch {
+			return null;
+		}
+	};
+	const dual = config.dual ?? {};
+	if (dual.models?.length === 2) {
+		const [a, b] = dual.models.map((model) => plan({ ticket: { ...ticket, model } }));
+		return a ? (b ? [a, b] : [a]) : null;
+	}
+	if (dual.tiers?.length === 2) {
+		const unpinned = { ...ticket, model: undefined };
+		const a = plan({ ticket: unpinned, config: onTier(config, dual.tiers[0]) });
+		if (!a) return null;
+		const b = plan({ ticket: unpinned, config: onTier(config, dual.tiers[1]) }, [a.ref ?? a.model]);
+		return b ? [a, b] : [a];
+	}
+	const a = plan({});
+	if (!a) return null;
+	const otherProvider = plan({}, modelsOfProvider(config, a, ticket));
+	const b = otherProvider ?? plan({}, [a.ref ?? a.model]);
+	return b ? [a, b] : [a];
+}
+
+/** The merge shift's route on the merge tier, the ticket's routed type kept; its budget is
+ * `dual.budget` when set. Null when no model of the tier is free. */
+function planMergeRoute({ ticket, config, classification, ticketUsage, authBlocked, cooldowns, now, routeA }) {
+	const tier = mergeTierOf(config, routeA);
+	let route;
+	try {
+		route = planShift({
+			ticket: { ...ticket, model: undefined },
+			config: tier ? onTier(config, tier) : config,
+			classification,
+			history: { ticketUsage, blockedModels: [...authBlocked] },
+			cooldowns,
+			now,
+		});
+	} catch {
+		return null;
+	}
+	if (!route.model) return null;
+	return config.dual?.budget ? { ...route, budget: config.dual.budget } : route;
+}
+
+/** One candidate: its own worktree, its own shift, its own gate; the work committed on its
+ * branch so `git diff <target>...<branch>` shows it. */
+async function runDualCandidate(ctx) {
+	const { root, ticket, candidate, label, route, workspace, attempt } = ctx;
+	const { cwd, branch } = await workspace.prepare(candidate);
+	const branchName = branch ?? `${candidate.feature}-${candidate.number}-${candidate.suffix}`;
+	const { shift } = await runDualShift({
+		...ctx,
+		cwd,
+		prompt: buildShiftPrompt(ticket, { root, attempt, absolute: true, dual: label, frozen: frozenOf(ctx.config, ticket) }),
+		getDiffStat: () => workspace.diffStat(candidate),
+		logAs: label,
+	});
+	if (!shift) return { label, route, branch: branchName, candidate, shift: null, stopped: true, passed: false };
+	const stopped = shift.handoff?.kind === "stop";
+	const verifyResult = !stopped && shift.needsInfo === null ? await ctx.verify(ticket.verify, cwd) : null;
+	const changed = typeof workspace.hasChanges === "function" ? await workspace.hasChanges(candidate) : true;
+	if (typeof workspace.commit === "function") await workspace.commit(candidate);
+	return { label, route, branch: branchName, candidate, cwd, shift, verifyResult, changed, stopped, passed: Boolean(verifyResult?.ok) && changed };
+}
+
+/** One shift of the dual phase on `route`: its provider slot (waited for), no handoffs (its
+ * budget's hard limit ends it), a provider limit cools the provider as ever. `shift` is null when
+ * the runner stopped before a slot was free. */
+async function runDualShift({ root, ticket, backend, config, route, cwd, prompt, getDiffStat, logAs, log, classify, clock, cooldowns, runState, slots, attempt }) {
+	let release;
+	for (;;) {
+		release = slots ? slots.acquire(route.provider) : undefined;
+		if (!slots || release) break;
+		if (checkStop(root)) return { shift: null };
+		log({ ticket, attempt, dual: logAs, event: { type: "wait", provider: route.provider, ms: WAIT_STEP_MS } });
+		await clock.sleep(WAIT_STEP_MS);
+	}
+	const publish = await publishShift(runState ?? noRunState(), { ticket, attempt, shift: logAs, route });
+	let shift;
+	try {
+		shift = await runShift(
+			backend,
+			{
+				root,
+				cwd,
+				route,
+				prompt,
+				systemPrompt: config.workerPrompt ?? WORKER_PROMPT,
+				softLimitPct: config.softLimitPct ?? 80,
+				getDiffStat,
+				ticketPath: ticket.path,
+				maxHandoffs: 0,
+				allowInPlace: false,
+			},
+			(event) => {
+				log({ ticket, attempt, dual: logAs, event });
+				publish(event);
+			},
+			{ sectionOf: (text) => ticketSection(text, ticket) },
+		);
+	} finally {
+		release?.();
+		// A finished candidate leaves the live view while its sibling may still be running.
+		await runState?.removeWorker({ ...ticket, dual: logAs });
+	}
+	const limit = shift.error ? classify(shift.error, shift.errorHeaders, clock.now()) : null;
+	if (limit) {
+		const provider = route.model && String(route.model).endsWith(":free") ? cooldownKey(route.model) : route.provider;
+		const resetAt = limit.resetAt && new Date(limit.resetAt).getTime() > clock.now().getTime() ? limit.resetAt : undefined;
+		const until = resetAt ?? new Date(clock.now().getTime() + cooldownMs(config, limit.kind));
+		await cooldowns.add(provider, until, limit.kind, { at: clock.now(), exact: Boolean(resetAt) });
+	}
+	return { shift };
 }
 
 /**
@@ -980,13 +1535,14 @@ async function workTicket({ root, ticket, tracker, backend, verify, config, work
  * ticket's last `- Landed:` line (`landed`), since `git log -3` no longer has to reach it.
  * @returns {Promise<{ verdict: "accept" | "reopen" | "follow-up" | "none" | "skip" | "stopped", reason: string, warnings?: string[], followUp?: object }>}
  */
-async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target, deferFollowUp = false, resumed = false }) {
+async function runReviewShift({ root, ticket, tracker, backend, verify, config, clock, cooldowns, log, type, landed, slots, cwd, target, deferFollowUp = false, resumed = false, authBlocked = [], runState }) {
 	const review = config.review;
 	const now = clock.now();
 	// Plan on the review tier as if the ticket were untyped and unrouted: the review is its own job.
 	const plan = planShift({
 		ticket: { ...ticket, type: undefined, model: undefined, skills: [], budget: undefined },
 		config: { ...config, routing: {}, defaultTier: review.tier },
+		history: authBlocked.length ? { blockedModels: [...authBlocked] } : {},
 		cooldowns: await cooldowns.active(now),
 		now,
 		fullProviders: slots ? slots.fullProviders() : [],
@@ -1003,7 +1559,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 	// `unlimited` list lifts it — only `review.budget` itself does.
 	const route = { ...plan, budget: review.budget };
 
-	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target, resumed });
+	const first = await runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target, resumed, runState });
 	if (first.notRun) {
 		await tracker.appendComment(ticket, `### Review\n- Not run: ${first.notRun}`);
 		return { verdict: "skip", reason: first.notRun };
@@ -1018,7 +1574,7 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 		// No verdict is not accept: once more, in a fresh context, on the next model of the chain.
 		warnings.push(outcome.why);
 		retryRoute = nextReviewRoute(route, config, review);
-		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots, cwd, target, resumed });
+		const second = await runOneReviewShift({ root, ticket, backend, config, route: retryRoute, landed, log, slots, cwd, target, resumed, runState });
 		finalShift = second.shift ?? finalShift;
 		outcome = second.notRun
 			? { verdict: null, reason: null, why: `${retryRoute.model}: ${second.notRun}` }
@@ -1068,9 +1624,11 @@ async function runReviewShift({ root, ticket, tracker, backend, verify, config, 
 
 /** Run one review shift on `route`: its own provider slot, the reviewer prompt, no handoffs, the wrap-up steer at its soft limit.
  * `cwd` is where the review runs — the ticket's worktree for a before-land review, else the repo. */
-async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target, resumed }) {
+async function runOneReviewShift({ root, ticket, backend, config, route, landed, log, slots, cwd, target, resumed, runState }) {
 	const releaseSlot = slots ? slots.acquire(route.provider) : undefined;
 	if (slots && !releaseSlot) return { notRun: `${route.provider} is at its concurrency cap` };
+	// The review is a live worker of its own while it runs (the TUI's Agents tab, `shiftwork logs`).
+	const publish = await publishShift(runState ?? noRunState(), { ticket, attempt: "review", shift: "review", route });
 	try {
 		const shift = await runShift(
 			backend,
@@ -1087,11 +1645,15 @@ async function runOneReviewShift({ root, ticket, backend, config, route, landed,
 				// At its soft limit a review wraps up and gives its verdict; it never gets the worker handoff prompt.
 				softLimitSteer: REVIEW_WRAP_UP_PROMPT,
 			},
-			(event) => log({ ticket, attempt: "review", event }),
+			(event) => {
+				log({ ticket, attempt: "review", event });
+				publish(event);
+			},
 		);
 		return { shift };
 	} finally {
 		releaseSlot?.();
+		await runState?.removeWorker({ ...ticket, dual: "review" });
 	}
 }
 
@@ -1155,6 +1717,20 @@ function followUpLine(followUp) {
 		: `- Follow-up: not filed — this tracker cannot create tickets; file it manually: ${followUp.title}`;
 }
 
+/** File the research ticket of a research rollback: `Type: research`, writing the feature's
+ * research.md, which its gate checks; the blocked ticket and the reason in its What to build. */
+async function fileResearchTicket(tracker, ticket, { reason }) {
+	const research = `.scratch/${ticket.feature}/research.md`;
+	const sentence = /[.!?…]$/.test(reason) ? reason : `${reason}.`;
+	return tracker.createTicket(ticket.feature, {
+		title: truncate(`Research: ${reason}`, 80),
+		what: `Research what ${ticket.feature}/${ticket.number} (${ticket.title ?? "untitled"}) needs before its implementation can continue: ${sentence} Write the findings (sources, facts, decisions, open questions) to ${research}. Filed by a shift of ${ticket.feature}/${ticket.number}, which is blocked by this ticket.`,
+		type: "research",
+		verify: [`test -s ${research}`],
+		checkboxes: [`${research} answers: ${reason}`],
+	});
+}
+
 /** File the follow-up ticket: a new ticket in the feature, blocked by nothing, with the reviewed ticket's verify gate. */
 async function createFollowUp(tracker, ticket, { root, type, reason, verify }) {
 	const title = truncate(`Follow-up to ${ticket.feature}/${ticket.number}: ${reason}`, 80);
@@ -1171,14 +1747,17 @@ function formatReviewComment({ route, retryRoute, verdict, reason, warnings = []
 	const lines = [`### Review — ${route.backend} ${route.model} (${route.thinking})${retried}`, `- Verdict: ${verdict} — ${reason}`, `- Time: ${formatDuration(shift.wallMin)}`];
 	if (verifyResult?.ok) lines.push("- Verify: passed");
 	else if (verifyResult) {
-		const failed = verifyResult.results.find((r) => r.code !== 0) ?? verifyResult;
+		const failed = verifyResult.results?.find((r) => r.code !== 0) ?? verifyResult;
 		lines.push(`- Verify: failed at \`${failed.cmd}\` (exit ${failed.code})`);
 		// The failing output, as in a shift report: a verdict of accept over a red gate needs its why.
 		if (failed.outputTail) lines.push("", "```", failed.outputTail.trimEnd(), "```", "");
 	} else lines.push("- Verify: not run");
 	for (const w of shift.warnings ?? []) lines.push(`- Warning: ${w}`);
 	for (const w of warnings) lines.push(`- Warning: ${w}`);
-	const findings = reviewFindings(shift.text);
+	// The findings are the reviewer's final message, not the narration of how it got there;
+	// a final message holding only the marker falls back to the whole text.
+	const final = reviewFindings(shift.lastText);
+	const findings = final.length ? final : reviewFindings(shift.text);
 	if (findings.length) lines.push("- Findings:", "", ...findings);
 	if (followUp) lines.push(followUpLine(followUp));
 	return lines.join("\n");
@@ -1208,8 +1787,10 @@ function truncate(text, max) {
  */
 async function publishShift(runState, { ticket, attempt, shift, route }) {
 	const usage = { tokens: 0, costUsd: 0, turns: 0, contextPct: 0 };
+	// A dual candidate (`A`, `B`, `merge`) or a review is its own worker entry: a sibling may run at the same time.
+	const key = DUAL_LABEL.test(String(shift)) ? { ...ticket, dual: shift } : ticket;
 	const write = () =>
-		runState.updateWorker(ticket, {
+		runState.updateWorker(key, {
 			ticket: { feature: ticket.feature, number: ticket.number, title: ticket.title, path: ticket.path },
 			attempt,
 			shift,
@@ -1273,6 +1854,18 @@ function accumulateUsage(target, shift) {
 
 const BLOCKING_KINDS = new Set(["stallTurns", "verifyFailed"]);
 
+/** Every model reference the config (and this ticket) can route to on `route`'s provider. */
+function modelsOfProvider(config, route, ticket) {
+	const refs = [
+		route.ref ?? route.model,
+		config.model,
+		ticket.model,
+		...Object.values(config.tiers ?? {}).flatMap((tier) => tier.chain ?? []),
+		...Object.values(config.routing ?? {}).map((r) => r?.model),
+	].filter(Boolean);
+	return [...new Set(refs)].filter((ref) => ref === (route.ref ?? route.model) || parseModelRef(ref).provider === route.provider);
+}
+
 function rememberBlocked(blockedModels, route, kind) {
 	const ref = route?.ref ?? route?.model;
 	if (!BLOCKING_KINDS.has(kind) || !ref) return;
@@ -1293,14 +1886,51 @@ function remainingTicketBudget(ticket, config, usage, route) {
 
 const COMPACT_INSTRUCTIONS = "Keep the current task, files touched, hypotheses and next steps. Drop chatter.";
 
-/** Consume one shift's events into a result. */
-async function runShift(backend, request, log) {
+/** A CLI agent killed by a signal: what a Shiftwork stop (a STOP file, a signal) does to it. */
+const KILLED_EXIT = /exited with code (?:130|143|null)\b|\bSIG(?:INT|TERM)\b/;
+/** How long a killed agent's shift waits for the STOP file a signal handler is writing. */
+const STOP_FILE_GRACE_MS = 500;
+
+/** Whether a STOP file appears within `ms` (a signal handler may write it just after the agent died). */
+async function stopFileSoon(root, ms = STOP_FILE_GRACE_MS) {
+	for (let waited = 0; ; waited += 50) {
+		if (checkStop(root)) return true;
+		if (waited >= ms) return false;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+}
+
+/** The agent's needs-info reason: the marker only in its final message, standalone — a marker
+ * quoted in backticks or a code block, or one in an earlier message, is not a question. */
+function needsInfoOf(lastText) {
+	return markerProse(lastText).match(MARKER)?.[1] ?? null;
+}
+
+/** The agent's research rollback reason (`<shiftwork:needs-research reason="…"/>`), read like needs-info. */
+function needsResearchOf(lastText) {
+	return markerProse(lastText).match(RESEARCH_MARKER)?.[1] ?? null;
+}
+
+/** The final message without code blocks and backtick spans: a quoted marker is not one. */
+function markerProse(lastText) {
+	return String(lastText ?? "")
+		.replace(/```[\s\S]*?(?:```|$)/g, "")
+		.replace(/`[^`\n]*`/g, "");
+}
+
+const WALL_TICK = Symbol("wall-clock tick");
+
+/** Consume one shift's events into a result. `sectionOf` scopes the ticket file to this
+ * ticket's own section (a shared OpenSpec .shiftwork.md) when looking for its handoff note. */
+async function runShift(backend, request, log, { sectionOf = (text) => text } = {}) {
 	const result = {
 		usage: { input: 0, output: 0, totalTokens: 0 },
 		costUsd: 0,
 		turns: 0,
 		text: "",
+		lastText: "",
 		error: null,
+		errorKind: undefined,
 		stopReason: null,
 		needsInfo: null,
 		warnings: [],
@@ -1318,7 +1948,9 @@ async function runShift(backend, request, log) {
 	result.warnings = shift.warnings ?? [];
 	const startedAt = Date.now();
 	let currentRoute = request.route;
-	let meter = createMeter(currentRoute.budget, request.softLimitPct ?? 80, { now: Date.now });
+	const softLimitPct = request.softLimitPct ?? 80;
+	let meterStartedAt = Date.now();
+	let meter = createMeter(currentRoute.budget, softLimitPct, { now: Date.now });
 
 	let softFired = false;
 	let softFiredThisTurn = false;
@@ -1330,7 +1962,7 @@ async function runShift(backend, request, log) {
 	async function hasAgentHandoff() {
 		if (!request.ticketPath) return false;
 		try {
-			const text = await readFile(request.ticketPath, "utf8");
+			const text = sectionOf(await readFile(request.ticketPath, "utf8"));
 			if (!text.includes("### Handoff")) return false;
 			if (ticketSnapshot === null) return true;
 			const lastOld = ticketSnapshot.lastIndexOf("### Handoff");
@@ -1382,7 +2014,9 @@ async function runShift(backend, request, log) {
 		}
 		result.handoffs.push({ inPlace: true, kind, reason, from: currentRoute, to: next, compacted: decision.compact });
 		currentRoute = next;
-		meter = createMeter(next.budget, request.softLimitPct ?? 80, { now: Date.now });
+		meterStartedAt = Date.now();
+		meter = createMeter(next.budget, softLimitPct, { now: Date.now });
+		resetWallTimer();
 		softFired = false;
 		softFiredThisTurn = false;
 		softGraceRemaining = 0;
@@ -1395,7 +2029,7 @@ async function runShift(backend, request, log) {
 		softFiredThisTurn = true;
 		softGraceRemaining = 2;
 		exceededKind = kind;
-		if (ticketSnapshot === null) ticketSnapshot = await readFile(request.ticketPath, "utf8").catch(() => "");
+		if (ticketSnapshot === null) ticketSnapshot = sectionOf(await readFile(request.ticketPath, "utf8").catch(() => ""));
 		if (shift.steer) await shift.steer(steerText).catch(() => {});
 	}
 
@@ -1417,8 +2051,42 @@ async function runShift(backend, request, log) {
 		}
 		return false;
 	}
+	// The wall-clock budget is kept by a timer, not only on events: a tool call that hangs
+	// sends no events, and the shift is still steered at its soft limit and aborted at its hard one.
+	let wallTimer = null;
+	let pendingTick = null;
+	function resetWallTimer() {
+		clearTimeout(wallTimer);
+		wallTimer = null;
+		pendingTick = null;
+	}
+	function nextWallTick() {
+		const limitMin = currentRoute.budget?.maxWallMin;
+		if (limitMin === undefined || limitMin === null) return null;
+		const fired = meter.snapshot();
+		if (fired.hardFired.has("maxWallMin")) return null;
+		const softAt = meterStartedAt + (limitMin * 60_000 * softLimitPct) / 100;
+		const hardAt = meterStartedAt + limitMin * 60_000;
+		const at = !fired.softFired.has("maxWallMin") && Date.now() < softAt ? softAt : hardAt;
+		return new Promise((resolve) => {
+			wallTimer = setTimeout(() => resolve(WALL_TICK), Math.max(0, at - Date.now()) + 5);
+		});
+	}
+	const iterator = shift.events[Symbol.asyncIterator]();
+	let pendingNext = null;
 	try {
-		for await (const event of shift.events) {
+		for (;;) {
+			pendingNext ??= iterator.next();
+			if (pendingTick === null) pendingTick = nextWallTick() ?? new Promise(() => {});
+			const next = await Promise.race([pendingNext, pendingTick]);
+			if (next === WALL_TICK) {
+				resetWallTimer();
+				if (await checkLimit(meter.observe({ type: "tick" }))) break;
+				continue;
+			}
+			pendingNext = null;
+			if (next.done) break;
+			const event = next.value;
 			const observed = applyProfileContext(event, currentRoute.contextWindow);
 			log(observed);
 			let limit = null;
@@ -1477,24 +2145,38 @@ async function runShift(backend, request, log) {
 
 			if (event.type === "text") {
 				result.text += `${event.text}\n`;
+				if (String(event.text ?? "").trim()) result.lastText = event.text;
 			} else if (event.type === "error") {
 				result.error = event.message;
 				result.errorHeaders = event.headers;
+				result.errorKind = event.kind;
 			} else if (event.type === "end") {
 				result.stopReason = event.stopReason;
 				break;
 			}
 		}
 	} finally {
+		resetWallTimer();
 		await shift.close?.().catch(() => {});
 	}
 	if (exceededKind === "stop" && !result.handoff) {
 		result.stopReason = "STOP file";
 		result.handoff = { reason: "STOP file", kind: "stop", agentNote: await hasAgentHandoff() };
 	}
+	// The agent died because Shiftwork is stopping (a STOP file, or a signal whose handler writes
+	// one just after the agent got it too): a stopped shift, not a failed attempt.
+	if (
+		!result.handoff &&
+		result.error &&
+		request.root &&
+		(checkStop(request.root) || (KILLED_EXIT.test(result.error) && (await stopFileSoon(request.root))))
+	) {
+		result.stopReason = "STOP file";
+		result.handoff = { reason: "STOP file", kind: "stop", agentNote: false };
+	}
 	result.wallMin = (Date.now() - startedAt) / 60_000;
-	const marker = result.text.match(MARKER);
-	if (marker) result.needsInfo = marker[1];
+	result.needsInfo = needsInfoOf(result.lastText);
+	result.needsResearch = needsResearchOf(result.lastText);
 	return result;
 }
 
@@ -1571,9 +2253,10 @@ function shiftReport({ number, route, shift, verifyResult, decision, classificat
 	if (verifyResult?.ok) {
 		lines.push("- Verify: passed");
 	} else if (verifyResult) {
-		const failed = verifyResult.results.find((r) => r.code !== 0);
-		lines.push(`- Verify: failed at \`${failed.cmd}\` (exit ${failed.code})`);
-		if (failed.outputTail) lines.push("", "```", failed.outputTail.trimEnd(), "```", "");
+		// A gate may say ok: false without any non-zero result (a timeout, an adapter error).
+		const failed = verifyResult.results?.find((r) => r.code !== 0);
+		lines.push(failed ? `- Verify: failed at \`${failed.cmd}\` (exit ${failed.code})` : "- Verify: failed");
+		if (failed?.outputTail) lines.push("", "```", failed.outputTail.trimEnd(), "```", "");
 	} else {
 		lines.push("- Verify: not run");
 	}
@@ -1585,7 +2268,11 @@ function shiftReport({ number, route, shift, verifyResult, decision, classificat
 			? decision.reviewNext
 				? "verify passed; review before landing"
 				: "resolved"
-			: decision.action === "redo"
+			: decision.action === "dual"
+				? decision.reason
+			: decision.action === "needs-research"
+				? `needs-research: ${decision.reason}`
+				: decision.action === "redo"
 				? "redo on the new target (landing conflict)"
 				: decision.action === "retry"
 				? "new attempt"
